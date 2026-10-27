@@ -119,7 +119,17 @@ class S3BlobStore:
             aws_access_key_id=access_key,
             aws_secret_access_key=secret_key,
             region_name="us-east-1",
-            config=Config(s3={"addressing_style": "path"}),
+            config=Config(
+                s3={"addressing_style": "path"},
+                # botocore ≥1.36 по умолчанию считает CRC32 на каждый запрос; S3-совместимые хранилища
+                # (SeaweedFS, MinIO старых версий) понимают это не всегда — только там, где требует API
+                request_checksum_calculation="when_required",
+                response_checksum_validation="when_required",
+                # без таймаутов зависшее хранилище держит поток воркера бесконечно
+                connect_timeout=5,
+                read_timeout=60,
+                retries={"max_attempts": 3, "mode": "standard"},
+            ),
         )
         self._lock = asyncio.Lock()
         self._bucket_ready = False

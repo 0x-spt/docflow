@@ -85,8 +85,17 @@ def test_factory_s3_requires_endpoint():
         blob_store_from_settings(Settings(blob_backend="s3", s3_endpoint=None))
 
 
-def _minio_endpoint() -> str:
-    return os.environ.get("DOCFLOW_S3_ENDPOINT", "http://localhost:9000")
+def test_s3_client_has_timeouts_and_no_default_checksums():
+    config = S3BlobStore("http://x:9000", "b", "a", "s")._client.meta.config
+    assert config.connect_timeout == 5 and config.read_timeout == 60
+    assert config.request_checksum_calculation == "when_required"
+    assert config.response_checksum_validation == "when_required"
+    assert config.retries["mode"] == "standard"
+
+
+def _s3_endpoint() -> str:
+    # по умолчанию — SeaweedFS из docker-compose.yml
+    return os.environ.get("DOCFLOW_S3_ENDPOINT", "http://localhost:8333")
 
 
 def _reachable(endpoint: str) -> bool:
@@ -100,14 +109,14 @@ def _reachable(endpoint: str) -> bool:
 
 @pytest.mark.integration
 async def test_s3_roundtrip():
-    endpoint = _minio_endpoint()
+    endpoint = _s3_endpoint()
     if not _reachable(endpoint):
-        pytest.skip(f"MinIO недоступен: {endpoint}")
+        pytest.skip(f"S3 недоступен: {endpoint}")
     store = S3BlobStore(
         endpoint,
         f"docflow-test-{uuid.uuid4().hex[:8]}",
-        os.environ.get("DOCFLOW_S3_ACCESS_KEY", "minioadmin"),
-        os.environ.get("DOCFLOW_S3_SECRET_KEY", "minioadmin"),
+        os.environ.get("DOCFLOW_S3_ACCESS_KEY", "docflow"),
+        os.environ.get("DOCFLOW_S3_SECRET_KEY", "docflow-secret"),
     )
     key = scan_key("t1")
     assert not await store.exists(key)
