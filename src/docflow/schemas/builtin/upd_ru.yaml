@@ -1,0 +1,99 @@
+slug: upd_ru
+version: 1
+title: Универсальный передаточный документ (УПД)
+description: УПД (счёт-фактура и передаточный документ) с таблицей товаров, статусом и участниками сделки.
+fields:
+  - name: number
+    type: string
+    required: true
+    description: "Номер УПД строкой, как написан (из шапки «Счёт-фактура № … от …»)."
+  - name: issued
+    type: date
+    required: true
+    description: "Дата УПД (после «от»). Месяц прописью переведи в число. null, если даты нет."
+    rules:
+      - {kind: date_not_future}
+  - name: status
+    type: enum
+    values: ["1", "2"]
+    description: "Статус УПД из левого верхнего угла: «1» — счёт-фактура и передаточный документ, «2» — только передаточный документ. null, если не виден."
+  - name: supplier
+    type: string
+    description: "Продавец: наименование как написано, с формой собственности."
+  - name: supplier_inn
+    type: string
+    description: "ИНН продавца из строки «ИНН/КПП» — цифры до косой черты: 10 или 12 цифр без пробелов."
+    rules:
+      - {kind: inn}
+  - name: supplier_kpp
+    type: string
+    description: "КПП продавца: 9 цифр после косой черты в строке «ИНН/КПП». null у ИП."
+    rules:
+      - {kind: kpp}
+  - name: shipper
+    type: string
+    description: "Грузоотправитель: наименование и адрес как написаны. Если написано «он же» — верни «он же». null, если не указан."
+  - name: consignee
+    type: string
+    description: "Грузополучатель: наименование и адрес как написаны. Если «он же» — верни «он же». null, если не указан."
+  - name: buyer
+    type: string
+    description: "Покупатель: наименование как написано."
+  - name: buyer_inn
+    type: string
+    description: "ИНН покупателя (цифры до косой черты в «ИНН/КПП»): 10 или 12 цифр."
+    rules:
+      - {kind: inn}
+  - name: buyer_kpp
+    type: string
+    description: "КПП покупателя: 9 цифр после косой черты. null у ИП."
+    rules:
+      - {kind: kpp}
+  - name: bik
+    type: string
+    description: "БИК банка продавца, если указан в реквизитах: 9 цифр. null, если банковских реквизитов нет."
+    rules:
+      - {kind: bik}
+  - name: account
+    type: string
+    description: "Корреспондентский счёт банка продавца (к/с), 20 цифр без пробелов. null, если реквизитов нет."
+  - name: items
+    type: table
+    required: true
+    description: "Все строки таблицы товаров (работ, услуг) по порядку, без строки «Всего к оплате»."
+    columns:
+      - name: name
+        type: string
+        description: "Наименование товара (графа 1) целиком, как написано."
+      - name: unit
+        type: string
+        description: "Единица измерения (графа 2/2а): «шт», «кг». null, если нет."
+      - name: qty
+        type: number
+        description: "Количество (графа 3). «2,5» = 2.5. null, если не указано."
+      - name: price
+        type: number
+        description: "Цена за единицу без НДС (графа 4) в рублях числом. null, если нет."
+      - name: amount
+        type: number
+        description: "Стоимость без налога, всего (графа 5), как напечатана. null, если нет."
+      - name: vat_amount
+        type: number
+        description: "Сумма налога (графа 8) как напечатана. null при «без НДС»."
+      - name: amount_with_vat
+        type: number
+        description: "Стоимость с налогом, всего (графа 9), как напечатана. null, если нет."
+  - name: total
+    type: number
+    required: true
+    description: "«Всего к оплате»: стоимость с налогом (графа 9) итоговой строки, ТАК, КАК НАПЕЧАТАНО. Не пересчитывай."
+  - name: vat
+    type: number
+    description: "«Всего к оплате»: сумма налога (графа 8) итоговой строки. null, если «без НДС»."
+rules:
+  - kind: table_sum_equals
+    params: {table: items, column: amount_with_vat, total: total, tolerance: 0.01}
+  - kind: table_row_product
+    params: {table: items, qty: qty, price: price, amount: amount}
+  - kind: account_matches_bik
+    params: {account: account, bik: bik}

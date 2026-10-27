@@ -1,0 +1,49 @@
+slug: passport_ru
+version: 1
+title: Паспорт гражданина РФ
+description: Разворот паспорта РФ с фотографией и персональными данными.
+fields:
+  - name: series
+    type: string
+    required: true
+    description: "Серия паспорта: 4 цифры подряд без пробелов («4515»). Если напечатано «45 15» — склей."
+    rules:
+      - {kind: regex, params: {pattern: '^\d{4}$'}}
+  - name: number
+    type: string
+    required: true
+    description: "Номер паспорта: 6 цифр подряд, с ведущими нулями («012345»). Строкой, не числом."
+    rules:
+      - {kind: regex, params: {pattern: '^\d{6}$'}}
+  - name: full_name
+    type: string
+    required: true
+    description: "ФИО целиком в именительном падеже, как напечатано: «ИВАНОВ ИВАН ИВАНОВИЧ». Фамилия, имя и отчество на отдельных строках — склей через пробел."
+  - name: birth_date
+    type: date
+    required: true
+    description: "Дата рождения. На паспорте «05.03.1990» — переведи в число-месяц-год."
+    rules:
+      - {kind: date_not_future}
+  - name: birth_place
+    type: string
+    description: "Место рождения как написано, без сокращений и исправлений (например, «ГОР. МОСКВА»)."
+  - name: issued_by
+    type: string
+    required: true
+    description: "Кем выдан: орган целиком как написано, строки склей через пробел."
+  - name: issue_date
+    type: date
+    required: true
+    description: "Дата выдачи паспорта (после «Дата выдачи»)."
+    rules:
+      - {kind: date_not_future}
+  - name: division_code
+    type: string
+    required: true
+    description: "Код подразделения в формате «123-456» (3 цифры, дефис, 3 цифры)."
+    rules:
+      - {kind: regex, params: {pattern: '^\d{3}-\d{3}$'}}
+rules:
+  - kind: date_order
+    params: {earlier: birth_date, later: issue_date}

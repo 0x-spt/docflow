@@ -1,0 +1,81 @@
+slug: invoice_ru
+version: 1
+title: Счёт на оплату (РФ)
+description: Счёт на оплату от поставщика покупателю, с реквизитами для платежа и таблицей позиций.
+fields:
+  - name: number
+    type: string
+    required: true
+    description: "Номер счёта строкой, как написан (может быть «15», «СЧ-0042/А»). Только номер, без слов «Счёт №» и без даты."
+  - name: issued
+    type: date
+    required: true
+    description: "Дата счёта (после «от»). Если месяц прописью («5 марта 2026 г.») — переведи в число. null, если даты нет."
+    rules:
+      - {kind: date_not_future}
+  - name: supplier
+    type: string
+    description: "Поставщик (получатель платежа): наименование как написано, с формой («ООО «Ромашка»», «ИП Иванов И. И.»)."
+  - name: supplier_inn
+    type: string
+    description: "ИНН поставщика: 10 цифр (юрлицо) или 12 (ИП), только цифры, без пробелов. Не путай с КПП и ИНН покупателя."
+    rules:
+      - {kind: inn}
+  - name: supplier_kpp
+    type: string
+    description: "КПП поставщика: ровно 9 цифр. null у ИП — у них КПП нет."
+    rules:
+      - {kind: kpp}
+  - name: buyer
+    type: string
+    description: "Покупатель (плательщик): наименование как написано. null, если не указан."
+  - name: buyer_inn
+    type: string
+    description: "ИНН покупателя: 10 или 12 цифр, без пробелов. null, если не указан."
+    rules:
+      - {kind: inn}
+  - name: bik
+    type: string
+    description: "БИК банка поставщика: 9 цифр (начинается с 04). Берётся из блока банковских реквизитов."
+    rules:
+      - {kind: bik}
+  - name: account
+    type: string
+    description: "Расчётный счёт поставщика (р/с): 20 цифр подряд, без пробелов и точек."
+  - name: corr_account
+    type: string
+    description: "Корреспондентский счёт банка (к/с): 20 цифр подряд, без пробелов. Не путай с расчётным счётом."
+  - name: items
+    type: table
+    required: true
+    description: "Все строки таблицы товаров/услуг по порядку, без строки «Итого»."
+    columns:
+      - name: name
+        type: string
+        description: "Наименование товара или услуги целиком, как написано."
+      - name: qty
+        type: number
+        description: "Количество (число). «2,5» = 2.5. null, если не указано."
+      - name: unit
+        type: string
+        description: "Единица измерения как написана: «шт», «кг», «усл.», «час». null, если нет."
+      - name: price
+        type: number
+        description: "Цена ЗА ЕДИНИЦУ в рублях числом, без пробелов: «12 500,50» = 12500.5. null, если нет."
+      - name: amount
+        type: number
+        description: "Сумма по строке в рублях, как напечатана (не пересчитывай сам). null, если нет."
+  - name: total
+    type: number
+    required: true
+    description: "Итоговая сумма к оплате («Всего к оплате») в рублях ТАК, КАК НАПЕЧАТАНА, включая НДС. Не пересчитывай."
+  - name: vat
+    type: number
+    description: "Сумма НДС в рублях, как напечатана. null, если «Без НДС» или не указан."
+rules:
+  - kind: table_sum_equals
+    params: {table: items, column: amount, total: total, tolerance: 0.01}
+  - kind: table_row_product
+    params: {table: items, qty: qty, price: price, amount: amount}
+  - kind: account_matches_bik
+    params: {account: corr_account, bik: bik}
