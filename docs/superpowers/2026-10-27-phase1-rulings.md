@@ -1,0 +1,103 @@
+# Фаза 1: решения, принятые при реализации, и отложенные замечания
+
+Перенесено из журнала выполнения плана `plans/2026-10-27-phase1-core.md`. Каждое решение: что решено — почему — чего стоит, если неверно.
+
+## Решения
+
+- T1 adds `jsonschema` to dev deps and registers pytest markers `integration` and `e2e` — needed by T2/T5/T13 tests — cost if wrong: one extra dev dep.
+- Rule kind names live in `schemas/model.py` as `FIELD_RULES` and `DOC_RULES` frozensets; DocSchema validates against them; T3 engine imports them and implements exactly those (test asserts registry keys == the sets) — breaks the import cycle, lets T2 YAML carry rules — cost if wrong: rule names in two places, guarded by a test.
+- T9 creates `src/docflow/serializers.py` with `document_payload(document, base_url: str) -> dict` (the GET /v1/documents/{id} shape) and adds `public_base_url: str = "http://localhost:8000"` to Settings; T11 reuses it — keeps webhook body and API identical — cost if wrong: small move.
+- integration tests that need tesseract/MinIO/Postgres skip (not fail) when the dependency is unavailable; CI installs them — local Windows has none — cost if wrong: integration coverage only in CI/containers.
+- work on branch `phase1-core` in the repo, not a separate worktree — fresh repo with only docs on main — cost if wrong: none.
+- CI `pytest -m integration` exits 5 with no tests (plan-mandated) — keep; Task 5 adds the first integration test and the repo has no remote, so CI does not run yet — cost if wrong: one red CI run.
+- promote Minor "rule params not cross-checked" into fix round 1 — Task 3 relies on param names, typos in builtins would fail silently at runtime — cost if wrong: slightly larger fix.
+- UPD drops account_matches_bik (UPD rarely carries bank details) — cost if wrong: no account check on UPD.
+- Task 3 unknown-kind check already lives in DocSchema (Task 2); engine adds registries + drift test instead of a second check — cost if wrong: none.
+- promote multi-page TIFF (silent page loss) into fix round 1; cap decoded pages at 3000 px long side instead of generator — bounds memory simply, 3000px ≈ 250dpi A4 — cost if wrong: slightly lower resolution for huge drawings.
+- Task 5 bw scans encoded PNG not JPEG — smaller and sharper for 1-bit — cost if wrong: none.
+- Task 10 pipeline treats any OCR failure as non-fatal — store the PDF without text layer, log it, continue extraction (extraction reads images, not the text layer) — cost if wrong: a document may ship without searchable text.
+- promote grouping validation, catch anthropic.APIError base, non-end_turn stop_reason = error, image-order assert into fix round 1 — pipeline relies on ExtractionError as sole failure and on never parsing truncated output — cost if wrong: slightly bigger fix.
+- Task 8 JSON columns JSONB on Postgres via with_variant, statuses as String+CHECK (no PG ENUM), migration drift test on SQLite without Docker — cost if wrong: minor schema rework.
+- Task 13 compose must use a non-default host port for Postgres (55432) and a working S3 image — the user's machine runs a native PostgreSQL on 127.0.0.1:5432, and minio/minio is no longer pullable from Docker Hub — cost if wrong: dev URL differs from defaults.
+- promote 3 minors into fix round 1 — partial unique index for built-in schemas (free before first deploy), UtcDateTime TypeDecorator (Task 9 compares datetimes on SQLite), PG integration test on dedicated docflow_test db (downgrade base would wipe dev DB) — cost if wrong: small extra work.
+- retries = 1 initial + 5 retries using all delays (10,60,300,1800,7200), failed after 6th failure — the spec lists five delays, so the plan text "after 5 failures" was the off-by-one — cost if wrong: one extra attempt at 2h.
+- SSRF check_webhook_url lives in webhooks.py, enforced at send time (anti-rebinding) and at registration in Task 11; Settings.webhook_allow_private=False — cost if wrong: dev must set the flag for local receivers.
+- requeue_stale sweeper function in Task 9; Task 10 worker wires it as an arq cron — cost if wrong: none.
+- Task 10 claims document atomically (queued→processing UPDATE), unexpected exceptions → failed "внутренняя ошибка обработки" without re-raise, SchemaResolver falls back to library builtins without seeding, DOCFLOW_FAKE_EXTRACTOR wired in worker now (needed by Task 13) — cost if wrong: small rework.
+- stuck documents handled by reaper cron (claimed_at column, fail after job_timeout+5min), not takeover — simpler, one mechanism; edit undeployed 0001 — cost if wrong: an interrupted document fails instead of being retried.
+- Task 11 — streamed size cap (no full buffering), 404 not 403 for foreign docs, schema version = resolved, tenant schema version = max+1 ignoring body, webhook DELETE = soft (active=False), SSRF check at registration; process job_id "process:{id}" — cost if wrong: API contract tweaks.
+- request body cap max_request_mb=200 via ASGI middleware (30 photos × ~5MB + headroom) — cost if wrong: very large scans rejected; configurable.
+- on enqueue failure clear idempotency_key (doc never ran) instead of a queued-doc sweeper — cost if wrong: none.
+- Task 12 headline metric ok_precision; eval datasets gitignored (personal data), only README committed — cost if wrong: none.
+- seed-schemas stays insert-only; built-in body changes require a version bump (documented) — cost if wrong: stale schema if someone edits a YAML without bumping.
+- S3 in compose = SeaweedFS (chrislusf/seaweedfs, Apache-2.0, `server -s3`) — minio/minio, quay.io/minio and bitnami/minio not pullable here — cost if wrong: swap image; app speaks plain S3.
+- Task 13 Step 3 (real Claude eval on real invoices) deferred to the user — no ANTHROPIC_API_KEY in env and no real documents (personal data must not be committed) — cost if wrong: real quality number unknown until the user runs it.
+- fix wave = C1, I1 (+Redis AOF), I2, I3, I4-partial (extractor timeouts/retries within job budget), M1, M4, M6, M7, M11 — cost if wrong: one larger fix commit.
+- park I5 (requeue on shutdown) — needs shutdown-vs-timeout distinction; with I1 sweeper a failed doc is honest; before pilot — cost if wrong: deploys fail ≤4 in-flight docs.
+- park I6 (retention/deletion for 152-ФЗ) — new feature, required before first passport customer — cost if wrong: compliance gap if passports go live early.
+- park I4 measurement (30-page real run) — needs ANTHROPIC_API_KEY and real docs; user action — cost if wrong: long docs may time out.
+- park M2 (regex on loop), M3 (webhook drip-feed), M5 (body caps on JSON routes), M8 (pdf_text_layer flag), M9 (https-only webhooks), M10 (last text block) — before self-serve multi-tenant onboarding — cost if wrong: abuse by a malicious tenant.
+- park T7 _ensure_bucket needs CreateBucket — fix before using external S3 — cost if wrong: least-privilege S3 key fails.
+- park I4 residual (240s×2 attempts can exceed job_timeout 300 → doc marked failed deterministically, one orphan retry may bill) — follow-up: max_retries=0 or ~140s timeout — cost if wrong: occasional wasted API call on very slow requests.
+- park WorkerSettings.keep_result=0 (failed-job result key blocks re-enqueue ≤1h, self-heals) — cost if wrong: rare 1h delay.
+
+## Отложено до пилота / мультитенантного онбординга
+
+- Task 1 — MinIO in CI has no readiness wait
+- Task 1 — test_defaults reads real env/.env — use Settings(_env_file=None)
+- Task 1 — s3_secret_key plain str, not SecretStr
+- Task 2 — _uncertain enum empty when fields=[]
+- Task 2 — FieldSpec.required unused by to_json_schema — add comment
+- Task 2 — _check_doc_rule raises TypeError (not ValidationError) on unhashable params
+- Task 3 — _uncertain as bare string iterated by chars
+- Task 3 — non-numeric table cell raises TypeError instead of issue
+- Task 3 — table_sum_equals skips silently when table empty but total present
+- Task 3 — hard-coded ACCOUNT in test not tied to valid_account
+- Task 3 — dedupe by (field, code) drops second message (e.g. "р/с проверить нельзя")
+- Task 4 — RGBA/P transparency converted without white background
+- Task 4 — %PDF- required at offset 0
+- Task 4 — BW_BLOCK fixed 35px, not scaled with image size
+- Task 4 — _to_jpeg extra full-size copy
+- Task 4 — detect_kind returns str not Literal
+- Task 4 — test gaps — crop+downscale path not exercised, RGBA/CMYK/corrupt PDF/WEBP/TIFF detection untested, unused tmp_path
+- Task 4 — PDF zero-size page → ZeroDivisionError in scale (likely unreachable)
+- Task 4 — constant 16-bit image renders white
+- Task 5 — non-dependency ocrmypdf errors propagate raw (no OcrFailed wrapper)
+- Task 5 — global logger setLevel side effect, imprecise comment
+- Task 5 — non RGB/L scan modes silently coerced to L
+- Task 5 — gs-only-missing branch untested
+- Task 6 — integers parsed via float (precision > 2^53)
+- Task 6 — 2-digit year pivot depends on date.today()
+- Task 6 — _parse_string accepts floats; unknown types silently treated as string
+- Task 6 — OllamaExtractor has no defaults (config supplies them)
+- Task 6 — "0.125"/"2.500" with 3 decimals now bad_value (intended trade-off)
+- Task 7 — key components ending in "."/space and reserved names (con) not rejected — aliasing only
+- Task 7 — S3 client no timeouts/retries config; CRC32 checksum defaults may break MinIO
+- Task 7 — _ensure_bucket on every get/exists needs CreateBucket permission
+- Task 7 — S3 Body not closed on read error; original_key doesn't validate document_id; S3 mapping not unit-tested
+- Task 8 — conftest __all__ hack for unused import
+- Task 8 — FK columns without indexes (api_keys.tenant_id, deliveries.document_id)
+- Task 8 — alembic env uses asyncio.run — can't be called inside running loop
+- Task 8 — integration test needs CREATEDB role; __table_args__ formatting
+- Task 9 — full resp.text read before 500-char cap
+- Task 9 — endpoint secret stored plaintext (needed for HMAC)
+- Task 9 — tests — timeout not asserted, document.failed body untested, untidy imports
+- Task 9 — CGNAT 100.64.0.0/10 not blocked by SSRF check
+- Task 9 — DNS rebinding only narrowed (httpx re-resolves) — comment overstates; pinned-IP transport would close it
+- Task 9 — webhook_allow_private has no config test
+- Task 10 — SIGTERM/deploy marks in-flight docs failed (should requeue on shutdown)
+- Task 10 — orphan extraction thread after timeout (cost, concurrency > max_jobs)
+- Task 10 — _uncertain removed from data — UI must read issues (document in API docs)
+- Task 10 — resolved schema version not written back when None
+- Task 10 — fake_responses relative default path; redis_settings read at import; client recreation uncommented
+- Task 10 — worker smoke test doesn't run a job via startup ctx; commit→enqueue order not tested
+- Task 10 — no index documents(status, claimed_at) for reaper
+- Task 11 — auth-time DB txn open during file reads/count_pages
+- Task 11 — schema list loads all version bodies
+- Task 11 — no test that 401 wins over unknown schema
+- Task 13 — config default database_url port 5432 (host runs need .env 55432)
+- Task 13 — compose publishes PG/redis/S3 on 0.0.0.0 with dev creds — bind 127.0.0.1
+- Task 13 — S3 creds duplicated in compose and docker/s3.json
+- Task 13 — CI integration still uses MinIO, not SeaweedFS
+- Task 13 — e2e skips (not fails) when stack down; leaves e2e tenants
+- Task 13 — README typo «меряется», no --extractor hint; image digests not pinned
