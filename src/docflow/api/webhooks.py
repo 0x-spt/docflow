@@ -19,7 +19,7 @@ NOT_FOUND = "вебхук не найден"
 
 
 class WebhookIn(BaseModel):
-    url: str = Field(description="Куда слать POST, http(s) на публичный адрес")
+    url: str = Field(max_length=2048, description="Куда слать POST, http(s) на публичный адрес")
     events: list[str] = Field(description="Подмножество: document.completed, document.failed")
 
 

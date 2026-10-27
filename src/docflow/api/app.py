@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from docflow.api import documents, schemas, webhooks
+from docflow.api.limits import RequestSizeLimit
 from docflow.config import Settings, get_settings
 from docflow.db.session import make_engine, make_sessionmaker
 from docflow.pipeline import SchemaResolver
@@ -69,6 +70,7 @@ def create_app(
     app.state.enqueuer = enqueuer
     app.state.schemas = SchemaResolver()
     app.add_exception_handler(Exception, _unhandled)
+    app.add_middleware(RequestSizeLimit)
 
     @app.get("/healthz", tags=["service"], summary="Проверка живости", description="Отвечает, пока процесс жив.")
     async def healthz() -> dict:

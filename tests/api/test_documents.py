@@ -78,7 +78,7 @@ async def test_upload_202_enqueues(api, auth):
 async def test_upload_two_files_and_mode(api, auth):
     files = [
         ("files", ("a.png", png_bytes(), "image/png")),
-        ("files", ("b.pdf", pdf_bytes(2), "application/pdf")),
+        ("files", ("b.pdf", pdf := pdf_bytes(2), "application/pdf")),
     ]
     r = await upload(api, auth, files=files, mode="bw")
     assert r.status_code == 202, r.text
@@ -86,7 +86,7 @@ async def test_upload_two_files_and_mode(api, auth):
         doc = await s.get(Document, uuid.UUID(r.json()["id"]))
     assert doc.mode == "bw"
     assert len(doc.files) == 2
-    assert await api.blobs.get(doc.files[1]) == pdf_bytes(2)
+    assert await api.blobs.get(doc.files[1]) == pdf  # img2pdf пишет время в PDF: второй вызов может отличаться
 
 
 async def test_idempotency_returns_same_document(api, auth):
@@ -174,6 +174,92 @@ async def test_enqueue_failure_marks_failed_503(api, auth, monkeypatch):
         doc = (await s.execute(select(Document))).scalar_one()
     assert doc.status == "failed"
     assert doc.error
+
+
+async def test_enqueue_failure_frees_idempotency_key(api, auth, monkeypatch):
+    h = {**auth, "Idempotency-Key": "retry-me"}
+    real = api.enqueuer.enqueue
+
+    async def down(*_a, **_k):
+        raise ConnectionError("redis недоступен")
+
+    monkeypatch.setattr(api.enqueuer, "enqueue", down)
+    failed = await upload(api, h)
+    assert failed.status_code == 503
+    monkeypatch.setattr(api.enqueuer, "enqueue", real)
+    r = await upload(api, h)
+    assert r.status_code == 202, r.text
+    assert r.json()["status"] == "queued"
+    async with api.sessionmaker() as s:
+        docs = (await s.execute(select(Document))).scalars().all()
+    assert len(docs) == 2
+    assert {d.idempotency_key for d in docs} == {None, "retry-me"}
+
+
+async def test_idempotent_replay_ignores_files(api, auth):
+    h = {**auth, "Idempotency-Key": "same"}
+    first = await upload(api, h)
+    garbage = [("files", ("x.bin", b"hello", "application/octet-stream"))]
+    r = await upload(api, h, files=garbage)
+    assert r.status_code == 200
+    assert r.json() == first.json()
+
+
+async def test_idempotency_key_too_long_422(api, auth):
+    r = await upload(api, {**auth, "Idempotency-Key": "k" * 256})
+    assert r.status_code == 422
+    assert await doc_count(api) == 0
+    r = await upload(api, {**auth, "Idempotency-Key": "k" * 255})
+    assert r.status_code == 202
+
+
+async def test_too_many_files_422_before_reading(api, auth, monkeypatch):
+    from docflow.api import documents
+
+    api.settings.max_pages = 2
+    reads = []
+    real = documents._read_capped
+
+    async def spy(*args, **kwargs):
+        reads.append(1)
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(documents, "_read_capped", spy)
+    files = [("files", (f"{i}.png", png_bytes(), "image/png")) for i in range(3)]
+    r = await upload(api, auth, files=files)
+    assert r.status_code == 422
+    assert reads == []
+    assert await doc_count(api) == 0
+
+
+async def test_total_bytes_cap_in_handler(api, auth, monkeypatch):
+    from docflow.api import documents
+
+    # middleware пропускает (лимит проверяется по всему телу), а обработчик считает сумму файлов
+    monkeypatch.setattr(documents, "_request_limit", lambda settings: 1024 * 1024)
+    part = png_bytes() + b"\0" * (600 * 1024)  # валидный PNG с хвостом: страница считается
+    files = [("files", ("a.png", part, "image/png")), ("files", ("b.png", part, "image/png"))]
+    r = await upload(api, auth, files=files)
+    assert r.status_code == 413
+    assert await doc_count(api) == 0
+
+
+async def test_blob_content_type_from_signature(api, auth, monkeypatch):
+    seen = []
+    real = api.blobs.put
+
+    async def spy(key, data, content_type):
+        seen.append(content_type)
+        await real(key, data, content_type)
+
+    monkeypatch.setattr(api.blobs, "put", spy)
+    files = [
+        ("files", ("a.png", png_bytes(), "text/html")),
+        ("files", ("b.pdf", pdf_bytes(1), "image/png")),
+    ]
+    r = await upload(api, auth, files=files)
+    assert r.status_code == 202
+    assert seen == ["image/png", "application/pdf"]
 
 
 async def test_blob_failure_leaves_no_queued_document(api, auth, monkeypatch):

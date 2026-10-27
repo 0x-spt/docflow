@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from docflow.api.deps import BlobsDep, EnqueuerDep, ResolverDep, SessionDep, SettingsDep, TenantDep, parse_id
+from docflow.api.limits import request_limit_bytes
 from docflow.db.models import Document
 from docflow.imaging.load import UnsupportedFile, count_pages, detect_kind
 from docflow.queue import PROCESS_DOCUMENT
@@ -26,6 +27,30 @@ MODES = ("color", "gray", "bw")
 CHUNK = 1024 * 1024
 NOT_FOUND = "документ не найден"
 ENQUEUE_ERROR = "не удалось поставить документ в очередь, загрузите его заново"
+IDEMPOTENCY_KEY_MAX = 255
+
+# сигнатура → MIME для хранилища; заголовку клиента не верим
+_IMAGE_TYPES = (
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"\x89PNG", "image/png"),
+    (b"II*\x00", "image/tiff"),
+    (b"MM\x00*", "image/tiff"),
+)
+
+
+def _request_limit(settings) -> int:
+    return request_limit_bytes(settings)
+
+
+def _content_type(data: bytes, kind: str) -> str:
+    if kind == "pdf":
+        return "application/pdf"
+    for magic, mime in _IMAGE_TYPES:
+        if data.startswith(magic):
+            return mime
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/heic"  # остальное detect_kind признаёт только по ftyp HEIF
 
 
 def _accepted(document: Document) -> dict:
@@ -70,9 +95,10 @@ async def _get_own(session: AsyncSession, tenant_id: uuid.UUID, raw_id: str) -> 
     description=(
         "Принимает один или несколько файлов (JPEG, PNG, WEBP, TIFF, HEIC, PDF) одного документа и ставит его "
         "в очередь. Возвращает id и статус `queued`; результат — через `GET /v1/documents/{id}` или вебхук. "
-        "Повтор с тем же заголовком `Idempotency-Key` вернёт 200 и тот же документ без повторной обработки. "
-        "Ошибки: 413 — файл больше лимита, 415 — неподдерживаемый или битый файл, "
-        "422 — неизвестная схема, неверный режим, нет файлов или слишком много страниц."
+        "Повтор с тем же заголовком `Idempotency-Key` (до 255 символов) вернёт 200 и исходный документ без "
+        "повторной обработки — даже если файлы в повторе другие: они не читаются и не проверяются. "
+        "Ошибки: 413 — файл или весь запрос больше лимита, 415 — неподдерживаемый или битый файл, "
+        "422 — неизвестная схема, неверный режим, нет файлов, слишком много файлов или страниц."
     ),
     responses={200: {"description": "Документ с этим Idempotency-Key уже был принят"}},
 )
@@ -87,7 +113,7 @@ async def upload_document(
     files: Annotated[list[UploadFile] | None, File(description="Файлы документа (страницы по порядку)")] = None,
     schema_version: Annotated[int | None, Form(description="Версия схемы; по умолчанию последняя")] = None,
     mode: Annotated[str, Form(description="Режим скана: color, gray или bw")] = "gray",
-    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=IDEMPOTENCY_KEY_MAX)] = None,
 ):
     try:
         schema = await resolver.resolve(session, tenant_id, schema_slug, schema_version)
@@ -101,12 +127,27 @@ async def upload_document(
         if existing is not None:
             return JSONResponse(_accepted(existing), status_code=status.HTTP_200_OK)
 
+    files = files or []
+    # в каждом файле минимум страница: лишние файлы отсекаем, не читая ни одного
+    if len(files) > settings.max_pages:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"Слишком много файлов: больше {settings.max_pages} на документ",
+        )
     limit = settings.max_file_mb * 1024 * 1024
+    total_limit = _request_limit(settings)
     contents: list[tuple[str, bytes, str]] = []
     total_pages = 0
-    for upload in files or []:
+    total_bytes = 0
+    for upload in files:
         filename = upload.filename or "file"
         data = await _read_capped(upload, limit, settings.max_file_mb)
+        total_bytes += len(data)
+        if total_bytes > total_limit:
+            raise HTTPException(
+                status.HTTP_413_CONTENT_TOO_LARGE,
+                f"Файлы документа вместе больше {settings.max_request_mb} МБ",
+            )
         kind = detect_kind(data)
         if kind is None:
             raise HTTPException(
@@ -122,7 +163,7 @@ async def upload_document(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
                 f"Слишком много страниц: больше {settings.max_pages} на документ",
             )
-        contents.append((filename, data, "application/pdf" if kind == "pdf" else (upload.content_type or "")))
+        contents.append((filename, data, _content_type(data, kind)))
     if not contents:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Нужен хотя бы один файл в поле files")
 
@@ -151,7 +192,7 @@ async def upload_document(
 
     try:
         for key, (_, data, content_type) in zip(keys, contents, strict=True):
-            await blobs.put(key, data, content_type or "application/octet-stream")
+            await blobs.put(key, data, content_type)
     except Exception:
         # транзакция не закоммичена: queued-документа без файлов не останется
         await session.rollback()
@@ -166,6 +207,8 @@ async def upload_document(
         logger.exception("не удалось поставить документ %s в очередь", doc_id)
         document.status = "failed"
         document.error = ENQUEUE_ERROR
+        # освобождаем ключ: повтор клиента с тем же Idempotency-Key должен создать документ заново
+        document.idempotency_key = None
         await session.commit()
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, ENQUEUE_ERROR) from None
     return _accepted(document)

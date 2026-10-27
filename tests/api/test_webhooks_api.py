@@ -44,6 +44,11 @@ async def test_private_or_bad_url_422(api, auth, url):
     assert "detail" in r.json()
 
 
+async def test_url_too_long_422(api, auth):
+    r = await create(api, auth, url=PUBLIC_URL + "?q=" + "a" * 2048)
+    assert r.status_code == 422
+
+
 async def test_private_url_allowed_when_setting_on(api, auth):
     api.settings.webhook_allow_private = True
     r = await create(api, auth, url="http://127.0.0.1:9000/hook")

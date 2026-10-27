@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     # лимиты на входе: проверяем при загрузке, чтобы воркер не получал мусор
     max_file_mb: int = 20
     max_pages: int = 30
+    # потолок всего тела POST /v1/documents: 30 фото с телефона по ~5 МБ плюс запас; режется до разбора multipart
+    max_request_mb: int = 200
 
     # демо и e2e без модели: все экстракторы воркера отвечают заготовками из JSON {slug: ответ}
     fake_extractor: bool = False
