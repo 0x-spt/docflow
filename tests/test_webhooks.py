@@ -1,6 +1,7 @@
 import hmac
 import json
-from datetime import UTC, datetime
+import socket
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 
 import httpx
@@ -11,9 +12,26 @@ from sqlalchemy import select
 from docflow.db.models import Document, Tenant, WebhookDelivery, WebhookEndpoint
 from docflow.queue import DELIVER_WEBHOOK, ArqEnqueuer, ListEnqueuer
 from docflow.serializers import document_payload
-from docflow.webhooks import RETRY_DELAYS, deliver, enqueue_webhooks, sign
+from docflow.webhooks import (
+    RETRY_DELAYS,
+    check_webhook_url,
+    claim_attempt,
+    deliver,
+    enqueue_webhooks,
+    requeue_stale,
+    sign,
+)
 
 URL = "https://client.example/hook"
+
+
+def _resolve_to(monkeypatch, ip):
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: [(socket.AF_INET, 0, 0, "", (ip, 0))])
+
+
+@pytest.fixture(autouse=True)
+def _public_dns(monkeypatch):
+    _resolve_to(monkeypatch, "93.184.216.34")
 
 
 async def _setup(session, status="ok", events=("document.completed",), active=True):
@@ -53,17 +71,15 @@ async def test_arq_enqueuer_and_list():
     calls = []
 
     class Pool:
-        async def enqueue_job(self, job, *args, _defer_by=None):
-            calls.append((job, args, _defer_by))
+        async def enqueue_job(self, job, *args, _defer_by=None, _job_id=None):
+            calls.append((job, args, _defer_by, _job_id))
 
-    from datetime import timedelta
-
-    await ArqEnqueuer(Pool()).enqueue("j", 1, defer_by=10)
+    await ArqEnqueuer(Pool()).enqueue("j", 1, defer_by=10, job_id="x")
     await ArqEnqueuer(Pool()).enqueue("j", 2)
-    assert calls == [("j", (1,), timedelta(seconds=10)), ("j", (2,), None)]
+    assert calls == [("j", (1,), timedelta(seconds=10), "x"), ("j", (2,), None, None)]
     le = ListEnqueuer()
-    await le.enqueue("j", 1, defer_by=5)
-    assert le.calls == [("j", (1,), 5)]
+    await le.enqueue("j", 1, defer_by=5, job_id="y")
+    assert le.calls == [("j", (1,), 5, "y")]
 
 
 async def test_enqueue_idempotent_and_filters(session):
@@ -76,6 +92,7 @@ async def test_enqueue_idempotent_and_filters(session):
     assert await enqueue_webhooks(session, doc, q) == 1
     assert await enqueue_webhooks(session, doc, q) == 0
     assert len(q.calls) == 1 and q.calls[0][0] == DELIVER_WEBHOOK
+    assert q.calls[0][3] == f"deliver:{q.calls[0][1][0]}:0"
 
 
 async def test_enqueue_event_by_status(session):
@@ -126,7 +143,7 @@ async def test_deliver_500_retries(session):
     await session.refresh(d)
     assert d.attempt == 1 and d.status == "pending" and d.response_code == 500
     assert d.next_attempt_at is not None and len(d.last_error) <= 500
-    assert q.calls == [(DELIVER_WEBHOOK, (d.id,), 10)]
+    assert q.calls == [(DELIVER_WEBHOOK, (d.id,), 10, f"deliver:{d.id}:1")]
 
 
 @respx.mock
@@ -140,15 +157,103 @@ async def test_deliver_network_error_counts(session):
 
 
 @respx.mock
-async def test_fifth_failure_marks_failed(session):
+async def test_sixth_failure_marks_failed(session):
     _, _, d, q = await _delivery(session)
-    respx.post(URL).mock(return_value=httpx.Response(503))
+    route = respx.post(URL).mock(return_value=httpx.Response(503))
     async with httpx.AsyncClient() as http:
-        for _ in range(len(RETRY_DELAYS)):
+        for _ in range(len(RETRY_DELAYS) + 1):
             await deliver(session, d.id, http, q)
     await session.refresh(d)
-    assert d.status == "failed" and d.attempt == 5
-    assert [c[2] for c in q.calls] == [10, 60, 300, 1800]
+    assert d.status == "failed" and d.attempt == 6 and route.call_count == 6
+    assert [c[2] for c in q.calls] == list(RETRY_DELAYS)
+    assert q.calls[-1][3] == f"deliver:{d.id}:5"
+
+
+async def test_claim_attempt_is_exclusive(session):
+    _, _, d, _ = await _delivery(session)
+    assert await claim_attempt(session, d.id, 0) is True
+    assert await claim_attempt(session, d.id, 0) is False
+
+
+@respx.mock
+async def test_stale_worker_does_not_post(session, monkeypatch):
+    import docflow.webhooks as wh
+
+    _, _, d, q = await _delivery(session)
+    route = respx.post(URL).mock(return_value=httpx.Response(200))
+    real = wh.claim_attempt
+
+    async def racing(s, delivery_id, seen):
+        await real(s, delivery_id, seen)  # конкурент занял попытку раньше
+        return await real(s, delivery_id, seen)  # наш claim со старым seen
+
+    monkeypatch.setattr(wh, "claim_attempt", racing)
+    async with httpx.AsyncClient() as http:
+        await deliver(session, d.id, http, q)
+    assert route.call_count == 0 and q.calls == []
+
+
+async def test_requeue_stale(session):
+    _, _, d, _ = await _delivery(session)
+    q = ListEnqueuer()
+    now = datetime.now(UTC)
+    assert await requeue_stale(session, q, now) == 0
+    assert await requeue_stale(session, q, now + timedelta(minutes=6)) == 1
+    assert q.calls == [(DELIVER_WEBHOOK, (d.id,), None, f"deliver:{d.id}:0")]
+    d.next_attempt_at = now + timedelta(hours=1)
+    await session.commit()
+    assert await requeue_stale(session, ListEnqueuer(), now + timedelta(minutes=30)) == 0
+    assert await requeue_stale(session, ListEnqueuer(), now + timedelta(hours=2)) == 1
+    d.status = "delivered"
+    await session.commit()
+    assert await requeue_stale(session, ListEnqueuer(), now + timedelta(days=1)) == 0
+
+
+@pytest.mark.parametrize("ip", ["127.0.0.1", "10.0.0.5", "169.254.169.254", "0.0.0.0", "224.0.0.1", "::1"])
+def test_ssrf_rejects_private(monkeypatch, ip):
+    _resolve_to(monkeypatch, ip)
+    with pytest.raises(ValueError):
+        check_webhook_url("https://x.example/h")
+    check_webhook_url("https://x.example/h", allow_private=True)
+
+
+def test_ssrf_public_and_scheme():
+    check_webhook_url("https://x.example/h")
+    for bad in ("ftp://x.example/", "file:///etc/passwd", "https:///nohost"):
+        with pytest.raises(ValueError):
+            check_webhook_url(bad, allow_private=True)
+
+
+@respx.mock
+async def test_deliver_blocks_private_at_send(session, monkeypatch):
+    _, _, d, q = await _delivery(session)
+    _resolve_to(monkeypatch, "169.254.169.254")  # rebinding после регистрации
+    route = respx.post(URL).mock(return_value=httpx.Response(200))
+    async with httpx.AsyncClient() as http:
+        await deliver(session, d.id, http, q)
+    await session.refresh(d)
+    assert route.call_count == 0 and d.attempt == 1 and d.status == "pending"
+    assert "не публичный" in d.last_error
+    async with httpx.AsyncClient() as http:
+        await deliver(session, d.id, http, q, allow_private=True)
+    await session.refresh(d)
+    assert d.status == "delivered"
+
+
+@respx.mock
+async def test_deliver_missing_document_message(session):
+    from sqlalchemy import text
+
+    _, _, d, q = await _delivery(session)
+    did = d.id
+    await session.execute(text("PRAGMA foreign_keys=OFF"))
+    await session.execute(text("DELETE FROM documents"))
+    await session.commit()
+    session.expire_all()
+    async with httpx.AsyncClient() as http:
+        await deliver(session, did, http, q)
+    await session.refresh(d)
+    assert d.status == "failed" and "документ" in d.last_error
 
 
 @respx.mock
