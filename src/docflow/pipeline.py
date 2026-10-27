@@ -19,7 +19,7 @@ from docflow.extraction.normalize import normalize
 from docflow.imaging.load import UnsupportedFile
 from docflow.imaging.prepare import prepare_pages
 from docflow.pdf.build import NoOcr, OcrEngine, build_pdf
-from docflow.queue import Enqueuer
+from docflow.queue import PROCESS_DOCUMENT, Enqueuer
 from docflow.schemas.library import builtin_schemas
 from docflow.schemas.llm import UNCERTAIN
 from docflow.schemas.model import DocSchema
@@ -233,3 +233,39 @@ async def reap_stale_processing(
             reaped += 1
             await _enqueue_webhooks(session, document_id, enqueuer)
     return reaped
+
+
+def process_job_id(document_id: UUID | str) -> str:
+    """Один job_id на документ: arq не поставит вторую копию, пока первая в очереди или выполняется."""
+    return f"process:{document_id}"
+
+
+async def requeue_stale_queued(
+    session: AsyncSession, enqueuer: Enqueuer, now: datetime, older_than: timedelta
+) -> int:
+    """Документы, застрявшие в queued (задача потеряна: Redis упал/очищен, API упал между commit и enqueue),
+    ставит в очередь заново. Возвращает число документов, для которых вызвана постановка.
+
+    Повтор безопасен: с тем же job_id arq не создаст дубль, пока задача лежит в очереди или выполняется
+    (существует ключ задачи), а если дубль всё же отработает — второй _claim получит rowcount 0.
+    Ключ результата (он тоже блокирует постановку с тем же job_id) у process_document не пишется:
+    в WorkerSettings задаче выставлен keep_result=0, иначе задача, упавшая до claim, на час (keep_result
+    по умолчанию) заблокировала бы перепостановку своего документа.
+    """
+    cutoff = now - older_than
+    stale = (
+        await session.execute(
+            select(Document.id).where(Document.status == "queued", Document.created_at < cutoff)
+        )
+    ).scalars().all()
+    await session.commit()
+    requeued = 0
+    for document_id in stale:
+        try:
+            await enqueuer.enqueue(PROCESS_DOCUMENT, str(document_id), job_id=process_job_id(document_id))
+        except Exception:
+            # Redis недоступен — следующий проход крона попробует снова
+            logger.exception("не удалось перепоставить документ %s", document_id)
+            continue
+        requeued += 1
+    return requeued

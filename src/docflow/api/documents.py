@@ -15,6 +15,7 @@ from docflow.api.deps import BlobsDep, EnqueuerDep, ResolverDep, SessionDep, Set
 from docflow.api.limits import request_limit_bytes
 from docflow.db.models import Document
 from docflow.imaging.load import UnsupportedFile, count_pages, detect_kind
+from docflow.pipeline import process_job_id
 from docflow.queue import PROCESS_DOCUMENT
 from docflow.serializers import document_payload
 from docflow.storage.blobs import BlobNotFound, original_key, scan_key
@@ -201,7 +202,7 @@ async def upload_document(
     await session.commit()
 
     try:
-        await enqueuer.enqueue(PROCESS_DOCUMENT, str(doc_id), job_id=f"process:{doc_id}")
+        await enqueuer.enqueue(PROCESS_DOCUMENT, str(doc_id), job_id=process_job_id(doc_id))
     except Exception:
         # без задачи queued-документ завис бы навсегда; failed честнее, клиент повторит загрузку
         logger.exception("не удалось поставить документ %s в очередь", doc_id)

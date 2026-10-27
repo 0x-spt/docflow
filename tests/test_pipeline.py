@@ -22,6 +22,7 @@ from docflow.pipeline import (
     SchemaResolver,
     process_document,
     reap_stale_processing,
+    requeue_stale_queued,
 )
 from docflow.queue import DELIVER_WEBHOOK, PROCESS_DOCUMENT, ListEnqueuer
 from docflow.schemas.library import builtin_schemas
@@ -415,8 +416,81 @@ async def test_cron_task_reaps(sm, tmp_path):
     doc_id = await make_doc(deps, status="processing")
     await _set(deps, doc_id, claimed_at=datetime.now(UTC) - worker.STALE_PROCESSING - timedelta(seconds=1))
     result = await worker.requeue_stale_task({"deps": deps})
-    assert result == {"reaped_documents": 1, "requeued_deliveries": 0}
+    assert result == {"reaped_documents": 1, "requeued_documents": 0, "requeued_deliveries": 0}
     assert (await load(deps, doc_id)).status == "failed"
+
+
+def process_calls(deps):
+    return [c for c in deps.enqueuer.calls if c[0] == PROCESS_DOCUMENT]
+
+
+async def test_requeue_stale_queued(sm, tmp_path):
+    deps = make_deps(sm, tmp_path)
+    now = datetime.now(UTC)
+    old = await make_doc(deps)
+    fresh = await make_doc(deps)
+    old_processing = await make_doc(deps, status="processing")
+    old_ok = await make_doc(deps, status="ok")
+    old_failed = await make_doc(deps, status="failed")
+    for doc_id in (old, old_processing, old_ok, old_failed):
+        await _set(deps, doc_id, created_at=now - timedelta(minutes=6))
+    await _set(deps, fresh, created_at=now - timedelta(minutes=1))
+
+    async with deps.sessionmaker() as s:
+        assert await requeue_stale_queued(s, deps.enqueuer, now, timedelta(minutes=5)) == 1
+
+    assert process_calls(deps) == [(PROCESS_DOCUMENT, (str(old),), None, f"process:{old}")]
+    # сам документ не трогаем: claim сделает воркер
+    assert (await load(deps, old)).status == "queued"
+
+
+async def test_requeue_stale_queued_then_process_once(sm, tmp_path):
+    """Перепостановка идемпотентна: две отработавшие копии задачи дают один результат и один вебхук."""
+    deps = make_deps(sm, tmp_path)
+    now = datetime.now(UTC)
+    doc_id = await make_doc(deps)
+    await _set(deps, doc_id, created_at=now - timedelta(minutes=10))
+    async with deps.sessionmaker() as s:
+        assert await requeue_stale_queued(s, deps.enqueuer, now, timedelta(minutes=5)) == 1
+    await process_document(deps, doc_id)
+    await process_document(deps, doc_id)
+    assert (await load(deps, doc_id)).status == "ok"
+    assert len(webhook_calls(deps)) == 1
+    async with deps.sessionmaker() as s:  # документ уже не queued — больше не перепоставляется
+        assert await requeue_stale_queued(s, deps.enqueuer, now, timedelta(minutes=5)) == 0
+
+
+async def test_requeue_stale_queued_enqueue_error_is_skipped(sm, tmp_path):
+    class Down:
+        async def enqueue(self, *args, **kwargs):
+            raise ConnectionError("redis недоступен")
+
+    deps = make_deps(sm, tmp_path)
+    now = datetime.now(UTC)
+    doc_id = await make_doc(deps)
+    await _set(deps, doc_id, created_at=now - timedelta(minutes=10))
+    async with deps.sessionmaker() as s:
+        assert await requeue_stale_queued(s, Down(), now, timedelta(minutes=5)) == 0
+    assert (await load(deps, doc_id)).status == "queued"
+
+
+async def test_cron_task_requeues_queued(sm, tmp_path):
+    from docflow import worker
+
+    deps = make_deps(sm, tmp_path)
+    doc_id = await make_doc(deps)
+    await _set(deps, doc_id, created_at=datetime.now(UTC) - worker.STALE_QUEUED - timedelta(seconds=1))
+    result = await worker.requeue_stale_task({"deps": deps})
+    assert result == {"reaped_documents": 0, "requeued_documents": 1, "requeued_deliveries": 0}
+    assert process_calls(deps) == [(PROCESS_DOCUMENT, (str(doc_id),), None, f"process:{doc_id}")]
+
+
+def test_process_job_keeps_no_result():
+    """Ключ результата arq блокирует постановку с тем же job_id — у process_document его быть не должно."""
+    from docflow import worker
+
+    fn = next(f for f in worker.WorkerSettings.functions if f.name == PROCESS_DOCUMENT)
+    assert fn.keep_result_s == 0
 
 
 # --- SchemaResolver -------------------------------------------------------

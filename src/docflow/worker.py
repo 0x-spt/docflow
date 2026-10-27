@@ -20,7 +20,13 @@ from docflow.extraction.claude import ClaudeExtractor
 from docflow.extraction.fake import FakeExtractor
 from docflow.extraction.ollama import OllamaExtractor
 from docflow.pdf.build import OcrMyPdf
-from docflow.pipeline import Deps, SchemaResolver, process_document, reap_stale_processing
+from docflow.pipeline import (
+    Deps,
+    SchemaResolver,
+    process_document,
+    reap_stale_processing,
+    requeue_stale_queued,
+)
 from docflow.queue import DELIVER_WEBHOOK, PROCESS_DOCUMENT, ArqEnqueuer
 from docflow.storage.blobs import blob_store_from_settings
 from docflow.webhooks import deliver, requeue_stale
@@ -30,6 +36,8 @@ logger = logging.getLogger(__name__)
 JOB_TIMEOUT = 300
 # processing дольше job_timeout + запас — воркер точно мёртв (живой бы уже записал результат или failed)
 STALE_PROCESSING = timedelta(seconds=JOB_TIMEOUT) + timedelta(minutes=5)
+# queued дольше этого — задача, скорее всего, потеряна; перепостановка с тем же job_id безопасна и при живой задаче
+STALE_QUEUED = timedelta(minutes=5)
 
 
 def _extractors(settings: Settings) -> dict[str, Extractor]:
@@ -89,20 +97,24 @@ async def deliver_webhook_task(ctx: dict, delivery_id: str) -> None:
 
 
 async def requeue_stale_task(ctx: dict) -> dict[str, int]:
-    """Раз в 5 минут: закрыть документы убитых воркеров и вернуть в очередь потерянные доставки."""
+    """Раз в 5 минут: закрыть документы убитых воркеров, вернуть в очередь потерянные документы и доставки."""
     deps: Deps = ctx["deps"]
     now = datetime.now(UTC)
     async with deps.sessionmaker() as session:
         reaped = await reap_stale_processing(session, deps.enqueuer, now, STALE_PROCESSING)
     async with deps.sessionmaker() as session:
+        queued = await requeue_stale_queued(session, deps.enqueuer, now, STALE_QUEUED)
+    async with deps.sessionmaker() as session:
         requeued = await requeue_stale(session, deps.enqueuer, now)
-    return {"reaped_documents": reaped, "requeued_deliveries": requeued}
+    return {"reaped_documents": reaped, "requeued_documents": queued, "requeued_deliveries": requeued}
 
 
 class WorkerSettings:
     # имена задач — те же, что ставит Enqueuer (PROCESS_DOCUMENT, DELIVER_WEBHOOK), а не имена функций
     functions = [
-        func(process_document_task, name=PROCESS_DOCUMENT),
+        # результат не храним: статус документа живёт в БД, а ключ результата arq блокировал бы
+        # перепостановку с тем же job_id (см. requeue_stale_queued)
+        func(process_document_task, name=PROCESS_DOCUMENT, keep_result=0),
         func(deliver_webhook_task, name=DELIVER_WEBHOOK),
     ]
     cron_jobs = [cron(requeue_stale_task, minute=set(range(0, 60, 5)))]
