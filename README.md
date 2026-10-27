@@ -63,10 +63,15 @@ def verify(secret: str, body: bytes, signature: str) -> bool:
 
 | Сервис | На хосте | Внутри сети compose |
 |---|---|---|
-| API | 8000 | `api:8000` |
-| Postgres | **55432** (5432 оставлен локальному Postgres) | `postgres:5432` |
-| Redis | 6379 | `redis:6379` |
-| S3 (SeaweedFS) | 8333 | `s3:8333`, ключи — `docker/s3.json` |
+| API | 8000 (все интерфейсы — для dev) | `api:8000` |
+| Postgres | **127.0.0.1:55432** (5432 оставлен локальному Postgres) | `postgres:5432` |
+| Redis | 127.0.0.1:6379, с паролем | `redis:6379` |
+| S3 (SeaweedFS) | 127.0.0.1:8333 | `s3:8333` |
+
+Хранилища опубликованы только на loopback. Секреты (`DOCFLOW_PG_USER`/`DOCFLOW_PG_PASSWORD`,
+`DOCFLOW_REDIS_PASSWORD`, `DOCFLOW_S3_ACCESS_KEY`/`DOCFLOW_S3_SECRET_KEY`) compose берёт из окружения или `.env`
+(образец — `.env.example`); без них подставляются dev-значения. Файл ключей SeaweedFS генерируется при старте
+контейнера из `DOCFLOW_S3_*`.
 
 ## Лимиты
 
@@ -86,8 +91,8 @@ uv run ruff check
 
 ```
 # с хоста — Postgres и S3 (OCR-тест пропускается, если нет tesseract)
-DOCFLOW_DATABASE_URL=postgresql+asyncpg://docflow:docflow@localhost:55432/docflow \
-DOCFLOW_S3_ENDPOINT=http://localhost:8333 uv run pytest -m integration
+DOCFLOW_DATABASE_URL=postgresql+asyncpg://docflow:docflow@127.0.0.1:55432/docflow \
+DOCFLOW_S3_ENDPOINT=http://127.0.0.1:8333 uv run pytest -m integration
 # все, включая OCR, — внутри образа воркера, в сети стека
 docker compose --profile test run --rm test
 ```
@@ -118,4 +123,13 @@ ANTHROPIC_API_KEY=sk-... uv run docflow eval evals/invoice_ru --extractor claude
 API: `uvicorn --factory docflow.api.app:create_app`. Размер тела `POST /v1/documents` ограничен в самом приложении
 (`DOCFLOW_MAX_REQUEST_MB`, по умолчанию 200), но лимит нужен и на прокси перед ним — иначе прокси сам буферизует
 гигабайты: в nginx `client_max_body_size 200m;` (не больше `DOCFLOW_MAX_REQUEST_MB`).
-Задайте `DOCFLOW_PUBLIC_BASE_URL` (попадает в `pdf_url`) и смените ключи S3 в `docker/s3.json` и в окружении.
+Задайте `DOCFLOW_PUBLIC_BASE_URL` (попадает в `pdf_url`).
+
+Смените все три секрета: `DOCFLOW_PG_PASSWORD`, `DOCFLOW_REDIS_PASSWORD`, `DOCFLOW_S3_ACCESS_KEY` +
+`DOCFLOW_S3_SECRET_KEY` (пароль Postgres применяется только при создании тома `pgdata`; на живой базе — `ALTER
+USER`). Пароли подставляются в URL без экранирования — используйте буквы, цифры, `-` и `_`.
+
+Никогда не публикуйте наружу порты Redis, Postgres и S3 — в compose они привязаны к `127.0.0.1`, так и оставьте.
+Особенно Redis: arq хранит в нём задачи в pickle, и любой, кто может записать в Redis, исполнит свой код в
+воркере. API в `docker-compose.yml` слушает `0.0.0.0:8000` ради удобства dev; в проде ставьте его за прокси с TLS
+и публикуйте только прокси.

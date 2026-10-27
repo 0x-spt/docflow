@@ -1,13 +1,18 @@
 # Полный стек DocFlow: docker compose up -d --build
-# Порты на хосте: API 8000, Postgres 55432 (5432 часто занят локальным Postgres), Redis 6379, S3 8333.
+# Порты на хосте: API 8000 (0.0.0.0 — для dev), Postgres 55432 (5432 часто занят локальным Postgres), Redis 6379,
+# S3 8333. Хранилища опубликованы только на 127.0.0.1: в Redis лежат задачи arq в pickle — кто может писать
+# в Redis, тот исполняет код в воркере.
+# Секреты — из окружения хоста или .env рядом с этим файлом (образец — .env.example); значения по умолчанию
+# годятся только для локальной разработки.
 x-app-env: &app-env
-  DOCFLOW_DATABASE_URL: postgresql+asyncpg://docflow:docflow@postgres:5432/docflow
-  DOCFLOW_REDIS_URL: redis://redis:6379/0
+  DOCFLOW_DATABASE_URL: postgresql+asyncpg://${DOCFLOW_PG_USER:-docflow}:${DOCFLOW_PG_PASSWORD:-docflow}@postgres:5432/docflow
+  # пароль подставляется в URL как есть: в нём не должно быть символов, которые надо экранировать (@ : / %)
+  DOCFLOW_REDIS_URL: redis://:${DOCFLOW_REDIS_PASSWORD:-docflow-dev}@redis:6379/0
   DOCFLOW_BLOB_BACKEND: s3
   DOCFLOW_S3_ENDPOINT: http://s3:8333
   DOCFLOW_S3_BUCKET: docflow
-  DOCFLOW_S3_ACCESS_KEY: docflow
-  DOCFLOW_S3_SECRET_KEY: docflow-secret
+  DOCFLOW_S3_ACCESS_KEY: ${DOCFLOW_S3_ACCESS_KEY:-docflow}
+  DOCFLOW_S3_SECRET_KEY: ${DOCFLOW_S3_SECRET_KEY:-docflow-secret}
   DOCFLOW_PUBLIC_BASE_URL: ${DOCFLOW_PUBLIC_BASE_URL:-http://localhost:8000}
   DOCFLOW_ANTHROPIC_MODEL: ${DOCFLOW_ANTHROPIC_MODEL:-claude-opus-5-5}
   # ключ берётся с хоста; без него работают только fake-экстрактор и Ollama
@@ -17,34 +22,50 @@ services:
   postgres:
     image: postgres:16
     environment:
-      POSTGRES_USER: docflow
-      POSTGRES_PASSWORD: docflow
+      # пароль применяется только при первой инициализации тома pgdata; для смены — ALTER USER или новый том
+      POSTGRES_USER: ${DOCFLOW_PG_USER:-docflow}
+      POSTGRES_PASSWORD: ${DOCFLOW_PG_PASSWORD:-docflow}
       POSTGRES_DB: docflow
-    ports: ["55432:5432"]
+    ports: ["127.0.0.1:55432:5432"]
     volumes: ["pgdata:/var/lib/postgresql/data"]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U docflow -d docflow"]
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d docflow"]
       interval: 5s
       timeout: 3s
       retries: 20
 
   redis:
     image: redis:7
-    ports: ["6379:6379"]
+    # пароль — вторая линия обороны к привязке на 127.0.0.1; AOF — чтобы рестарт Redis не терял очередь
+    command: ["redis-server", "--requirepass", "${DOCFLOW_REDIS_PASSWORD:-docflow-dev}", "--appendonly", "yes"]
+    environment:
+      # redis-cli берёт пароль отсюда: healthcheck без пароля в аргументах
+      REDISCLI_AUTH: ${DOCFLOW_REDIS_PASSWORD:-docflow-dev}
+    ports: ["127.0.0.1:6379:6379"]
+    volumes: ["redisdata:/data"]
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
       interval: 5s
       timeout: 3s
       retries: 20
 
-  # S3-совместимое хранилище (SeaweedFS); ключи доступа — в docker/s3.json
+  # S3-совместимое хранилище (SeaweedFS). Файл identities не умеет подставлять переменные окружения,
+  # поэтому пишем его при старте из DOCFLOW_S3_* и передаём управление штатному entrypoint образа.
+  # Ключи — только буквы/цифры/-/_: они вставляются в JSON без экранирования.
   s3:
     image: chrislusf/seaweedfs:4.50
-    command: server -dir=/data -ip.bind=0.0.0.0 -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json
-    ports: ["8333:8333"]
+    environment:
+      S3_ACCESS_KEY: ${DOCFLOW_S3_ACCESS_KEY:-docflow}
+      S3_SECRET_KEY: ${DOCFLOW_S3_SECRET_KEY:-docflow-secret}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        (umask 077; printf '{"identities":[{"name":"docflow","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Admin","Read","Write","List","Tagging"]}]}' "$$S3_ACCESS_KEY" "$$S3_SECRET_KEY" > /tmp/s3.json)
+        chown seaweed /tmp/s3.json 2>/dev/null || true
+        exec /entrypoint.sh server -dir=/data -ip.bind=0.0.0.0 -s3 -s3.port=8333 -s3.config=/tmp/s3.json
+    ports: ["127.0.0.1:8333:8333"]
     volumes:
       - s3data:/data
-      - ./docker/s3.json:/etc/seaweedfs/s3.json:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8333/healthz"]
       interval: 5s
@@ -65,6 +86,7 @@ services:
     image: docflow-api
     build: {context: ., dockerfile: docker/Dockerfile, target: api}
     environment: *app-env
+    # API открыт на всех интерфейсах ради dev (телефон в той же сети); в проде — за прокси, см. README
     ports: ["8000:8000"]
     depends_on:
       migrate: {condition: service_completed_successfully}
@@ -108,4 +130,5 @@ services:
 
 volumes:
   pgdata:
+  redisdata:
   s3data:
