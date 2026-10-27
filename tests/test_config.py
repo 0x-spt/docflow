@@ -16,3 +16,8 @@ def test_defaults():
 
 def test_public_base_url_default():
     assert Settings().public_base_url == "http://localhost:8000"
+
+
+def test_webhook_allow_private_default_off(monkeypatch):
+    monkeypatch.delenv("DOCFLOW_WEBHOOK_ALLOW_PRIVATE", raising=False)
+    assert Settings(_env_file=None).webhook_allow_private is False
