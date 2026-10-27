@@ -95,5 +95,3 @@ rules:
     params: {table: items, column: amount_with_vat, total: total, tolerance: 0.01}
   - kind: table_row_product
     params: {table: items, qty: qty, price: price, amount: amount}
-  - kind: account_matches_bik
-    params: {account: account, bik: bik}

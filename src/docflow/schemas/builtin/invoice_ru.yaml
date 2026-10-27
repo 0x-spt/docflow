@@ -64,7 +64,10 @@ fields:
         description: "Цена ЗА ЕДИНИЦУ в рублях числом, без пробелов: «12 500,50» = 12500.5. null, если нет."
       - name: amount
         type: number
-        description: "Сумма по строке в рублях, как напечатана (не пересчитывай сам). null, если нет."
+        description: "Сумма по строке в рублях, как напечатана в графе «Сумма» (не пересчитывай сам). Если НДС начисляется сверху, это сумма БЕЗ НДС; если «в т.ч. НДС» — с НДС. null, если нет."
+  - name: subtotal
+    type: number
+    description: "Строка «Итого» под таблицей: сумма граф «Сумма» по всем строкам, в рублях ТАК, КАК НАПЕЧАТАНА, до начисления НДС сверху. Если строки «Итого» нет — null."
   - name: total
     type: number
     required: true
@@ -74,8 +77,8 @@ fields:
     description: "Сумма НДС в рублях, как напечатана. null, если «Без НДС» или не указан."
 rules:
   - kind: table_sum_equals
-    params: {table: items, column: amount, total: total, tolerance: 0.01}
+    params: {table: items, column: amount, total: subtotal, tolerance: 0.01}
   - kind: table_row_product
     params: {table: items, qty: qty, price: price, amount: amount}
   - kind: account_matches_bik
-    params: {account: corr_account, bik: bik}
+    params: {account: account, bik: bik}

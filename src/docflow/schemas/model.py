@@ -1,4 +1,5 @@
 """Описание типа документа как данных (DocSchema). Правила названы здесь, реализуются в validation."""
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -49,6 +50,44 @@ def _check_columns(names: list[str], what: str) -> None:
         raise ValueError(f"{what}: имена должны быть уникальны")
 
 
+# Какие параметры документных правил на что ссылаются: поля верхнего уровня / таблица / колонки таблицы.
+_DOC_RULE_PARAMS: dict[str, dict[str, tuple[str, ...]]] = {
+    "table_sum_equals": {"table": ("table",), "column": ("column",), "total": ("field",)},
+    "table_row_product": {"table": ("table",), "qty": ("column",), "price": ("column",), "amount": ("column",)},
+    "date_order": {"earlier": ("field",), "later": ("field",)},
+    "account_matches_bik": {"account": ("field",), "bik": ("field",)},
+}
+
+
+def _check_field_rule(field: "FieldSpec", rule: RuleSpec) -> None:
+    if rule.kind == "regex":
+        pattern = rule.params.get("pattern")
+        if not isinstance(pattern, str):
+            raise ValueError(f"«{field.name}»: правилу regex нужен параметр pattern")
+        try:
+            re.compile(pattern)
+        except re.error as e:
+            raise ValueError(f"«{field.name}»: pattern не компилируется: {e}") from e
+
+
+def _check_doc_rule(rule: RuleSpec, fields: dict[str, "FieldSpec"]) -> None:
+    spec = _DOC_RULE_PARAMS[rule.kind]
+    table: FieldSpec | None = None
+    if "table" in spec:
+        name = rule.params.get("table")
+        table = fields.get(name) if isinstance(name, str) else None
+        if table is None or table.type != "table":
+            raise ValueError(f"{rule.kind}: table «{name}» не является полем-таблицей")
+    for param, (kind,) in spec.items():
+        if kind == "table":
+            continue
+        value = rule.params.get(param)
+        if kind == "field" and value not in fields:
+            raise ValueError(f"{rule.kind}: {param}=«{value}» — нет такого поля")
+        if kind == "column" and value not in {c.name for c in (table.columns or [])}:
+            raise ValueError(f"{rule.kind}: {param}=«{value}» — нет такой колонки в таблице «{table.name}»")
+
+
 class DocSchema(BaseModel):
     slug: str = Field(pattern=r"^[a-z0-9_]{2,40}$")
     version: int = 1
@@ -66,7 +105,10 @@ class DocSchema(BaseModel):
             for r in f.rules:
                 if r.kind not in FIELD_RULES:
                     raise ValueError(f"«{f.name}»: неизвестное правило поля «{r.kind}»")
+                _check_field_rule(f, r)
+        by_name = {f.name: f for f in self.fields}
         for r in self.rules:
             if r.kind not in DOC_RULES:
                 raise ValueError(f"неизвестное правило документа «{r.kind}»")
+            _check_doc_rule(r, by_name)
         return self
