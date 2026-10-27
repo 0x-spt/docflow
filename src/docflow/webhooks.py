@@ -48,14 +48,10 @@ def check_webhook_url(url: str, *, allow_private: bool = False) -> None:
         raise ValueError(f"хост не резолвится: {exc}") from exc
     for info in infos:
         ip = ipaddress.ip_address(info[4][0].split("%")[0])
-        if (
-            ip.is_loopback
-            or ip.is_private
-            or ip.is_link_local
-            or ip.is_multicast
-            or ip.is_reserved
-            or ip.is_unspecified
-        ):
+        # is_global отсекает всё, что IANA не считает глобально маршрутизируемым: CGNAT 100.64/10,
+        # 192.0.0/24, бенчмарк 198.18/15, документационные сети и т. п. — список «запрещённых» не угнаться.
+        # Мультикаст is_global не ловит (224.0.0.0/4 вне реестра special-purpose), поэтому отдельно.
+        if not ip.is_global or ip.is_multicast:
             raise ValueError(f"адрес {ip} не публичный")
 
 

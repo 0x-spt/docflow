@@ -209,12 +209,34 @@ async def test_requeue_stale(session):
     assert await requeue_stale(session, ListEnqueuer(), now + timedelta(days=1)) == 0
 
 
-@pytest.mark.parametrize("ip", ["127.0.0.1", "10.0.0.5", "169.254.169.254", "0.0.0.0", "224.0.0.1", "::1"])
+@pytest.mark.parametrize(
+    "ip",
+    [
+        "127.0.0.1",
+        "10.0.0.5",
+        "169.254.169.254",
+        "0.0.0.0",
+        "224.0.0.1",
+        "::1",
+        "100.64.0.1",  # CGNAT
+        "100.127.255.254",
+        "198.18.0.1",  # бенчмарк-сеть
+        "192.0.0.8",
+        "fc00::1",  # IPv6 ULA
+        "::ffff:127.0.0.1",  # IPv4-mapped loopback
+    ],
+)
 def test_ssrf_rejects_private(monkeypatch, ip):
     _resolve_to(monkeypatch, ip)
     with pytest.raises(ValueError):
         check_webhook_url("https://x.example/h")
     check_webhook_url("https://x.example/h", allow_private=True)
+
+
+@pytest.mark.parametrize("ip", ["93.184.216.34", "100.128.0.1", "2606:2800:220:1::1"])
+def test_ssrf_allows_global(monkeypatch, ip):
+    _resolve_to(monkeypatch, ip)
+    check_webhook_url("https://x.example/h")
 
 
 def test_ssrf_public_and_scheme():
