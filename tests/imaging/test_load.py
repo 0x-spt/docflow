@@ -1,9 +1,13 @@
+import io
+
 import img2pdf
+import pypdfium2 as pdfium
 import pytest
 from conftest import to_bytes
 from PIL import Image
 
 from docflow.imaging import UnsupportedFile, load_images
+from docflow.imaging.load import count_pages
 
 
 def test_exif_rotation_applied():
@@ -57,3 +61,39 @@ def test_decompression_bomb_rejected(monkeypatch):
     data = to_bytes(Image.new("RGB", (100, 100), "white"), "PNG")  # 10 000 px > 2*100
     with pytest.raises(UnsupportedFile, match="bomb.png"):
         load_images(data, "bomb.png")
+
+
+def test_16bit_tiff_keeps_contrast():
+    import numpy as np
+
+    grad = np.tile(np.linspace(0, 65535, 256).astype(np.uint16), (64, 1))
+    buf = io.BytesIO()
+    Image.fromarray(grad).save(buf, format="TIFF")
+    [img] = load_images(buf.getvalue(), "scan16.tif")
+    arr = np.asarray(img)
+    assert arr.std() > 50  # не почти-однородный
+    assert arr[:, :10].mean() < 30  # тёмное осталось тёмным
+    assert arr[:, -10:].mean() > 225
+
+
+def test_multipage_tiff_all_frames():
+    a, b = Image.new("RGB", (30, 30), "white"), Image.new("RGB", (30, 30), "black")
+    buf = io.BytesIO()
+    a.save(buf, format="TIFF", save_all=True, append_images=[b])
+    assert count_pages(buf.getvalue(), "m.tif") == 2
+    assert len(load_images(buf.getvalue(), "m.tif")) == 2
+
+
+def test_big_pdf_page_capped():
+    pdf = pdfium.PdfDocument.new()
+    pdf.new_page(3000, 3000)
+    buf = io.BytesIO()
+    pdf.save(buf)
+    [img] = load_images(buf.getvalue(), "poster.pdf")
+    assert max(img.size) <= 3000
+
+
+def test_big_photo_capped():
+    data = to_bytes(Image.new("RGB", (4000, 2000), "white"))
+    [img] = load_images(data, "big.jpg")
+    assert max(img.size) == 3000
