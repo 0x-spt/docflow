@@ -189,6 +189,25 @@ def test_account_matches_bik():
     assert evaluate(s, {"account": None, "bik": BIK}, today=TODAY) == []
 
 
+ACC_RULE = {"kind": "account_matches_bik", "params": {"account": "account", "bik": "bik"}}
+
+
+def test_invalid_bik_reported_without_field_level_bik_rule():
+    s = schema([{"name": "account", "type": "string"}, {"name": "bik", "type": "string"}], [ACC_RULE])
+    issues = evaluate(s, {"account": "40702810200000000002", "bik": "014525225"}, today=TODAY)
+    assert codes(issues) == [("bik", "checksum")]
+    assert "014525225" in issues[0].message
+
+
+def test_invalid_bik_reported_once_when_both_rules_present():
+    s = schema(
+        [{"name": "account", "type": "string"}, {"name": "bik", "type": "string", "rules": [{"kind": "bik"}]}],
+        [ACC_RULE],
+    )
+    issues = evaluate(s, {"account": ACCOUNT, "bik": "014525225"}, today=TODAY)
+    assert codes(issues) == [("bik", "checksum")]
+
+
 def test_decide_status():
     assert decide_status([]) == "ok"
     assert decide_status([Issue("a", "checksum", "m")]) == "needs_review"

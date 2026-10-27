@@ -142,8 +142,11 @@ def _date_order(data: dict[str, Any], p: dict[str, Any]) -> list[Issue]:
 
 def _account_matches_bik(data: dict[str, Any], p: dict[str, Any]) -> list[Issue]:
     account, bik = data.get(p["account"]), data.get(p["bik"])
-    if account is None or bik is None or not checksums.valid_bik(str(bik)):
-        return []  # неверный БИК уже отмечен правилом bik на своём поле
+    if account is None or bik is None:
+        return []
+    if not checksums.valid_bik(str(bik)):
+        # без верного БИК р/с не проверить; сообщаем сами, не полагаясь на правило bik у поля
+        return [Issue(p["bik"], "checksum", f"БИК «{bik}» некорректен, р/с «{account}» проверить нельзя")]
     if checksums.valid_account(str(account), str(bik)):
         return []
     return [Issue(p["account"], "checksum", f"счёт «{account}» не сходится с БИК «{bik}» по контрольному ключу")]
@@ -181,7 +184,18 @@ def evaluate(schema: DocSchema, data: dict[str, Any], *, today: date | None = No
         issues.append(Issue(str(name), "uncertain", f"модель не уверена в значении «{name}»"))
     for r in schema.rules:
         issues += DOC_REGISTRY[r.kind](data, r.params)
-    return issues
+    return _dedupe(issues)
+
+
+def _dedupe(issues: list[Issue]) -> list[Issue]:
+    """Одно и то же (поле, код) не повторяем: полевое и документное правила могут ловить одно и то же."""
+    seen: set[tuple[str | None, str]] = set()
+    out = []
+    for i in issues:
+        if (i.field, i.code) not in seen:
+            seen.add((i.field, i.code))
+            out.append(i)
+    return out
 
 
 def decide_status(issues: list[Issue]) -> Status:
