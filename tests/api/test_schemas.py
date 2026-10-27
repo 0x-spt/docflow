@@ -51,7 +51,11 @@ async def test_tenant_schema_shadows_builtin(api, auth, make_tenant):
     override = {**MY_SCHEMA, "slug": "invoice_ru", "title": "Наш счёт"}
     assert (await api.client.post("/v1/schemas", headers=auth, json=override)).status_code == 201
     items = {i["slug"]: i for i in (await api.client.get("/v1/schemas", headers=auth)).json()}
-    assert items["invoice_ru"] == {"slug": "invoice_ru", "version": 1, "title": "Наш счёт", "builtin": False}
+    # версии своей схемы идут после встроенной: перекрытие встроенной v1 — v2
+    builtin_version = builtin_schemas()["invoice_ru"].version
+    assert items["invoice_ru"] == {
+        "slug": "invoice_ru", "version": builtin_version + 1, "title": "Наш счёт", "builtin": False
+    }
     # другой тенант по-прежнему видит встроенную
     other = await make_tenant("Другой")
     items = {i["slug"]: i for i in (await api.client.get("/v1/schemas", headers=other)).json()}
@@ -81,3 +85,32 @@ async def test_unknown_schema_404(api, auth, path):
     r = await api.client.get(path, headers=auth)
     assert r.status_code == 404
     assert "detail" in r.json()
+
+
+async def test_override_version_follows_builtin_and_v1_stays_builtin(api, auth):
+    builtin = builtin_schemas()["invoice_ru"]
+    override = {**MY_SCHEMA, "slug": "invoice_ru", "title": "Наш счёт"}
+    r = await api.client.post("/v1/schemas", headers=auth, json=override)
+    assert r.json()["version"] == builtin.version + 1
+    r = await api.client.post("/v1/schemas", headers=auth, json={**override, "title": "Наш счёт 2"})
+    assert r.json()["version"] == builtin.version + 2
+    # явная версия встроенной находит встроенную, хотя у тенанта есть своя схема с этим slug
+    pinned = (await api.client.get("/v1/schemas/invoice_ru", params={"version": builtin.version}, headers=auth)).json()
+    assert pinned["title"] == builtin.title
+    latest = (await api.client.get("/v1/schemas/invoice_ru", headers=auth)).json()
+    assert latest["title"] == "Наш счёт 2"
+
+
+async def test_override_version_follows_builtin_seeded_in_db(api, auth):
+    """Встроенная версия, засеянная в БД новее библиотечной, тоже учитывается."""
+    from docflow.db.models import SchemaRecord
+
+    builtin = builtin_schemas()["invoice_ru"]
+    seeded = builtin.model_copy(update={"version": builtin.version + 4, "title": "Встроенный v+4"})
+    async with api.sessionmaker() as s:
+        body = seeded.model_dump(mode="json")
+        s.add(SchemaRecord(tenant_id=None, slug="invoice_ru", version=seeded.version, body=body))
+        await s.commit()
+    override = {**MY_SCHEMA, "slug": "invoice_ru", "title": "Наш счёт"}
+    r = await api.client.post("/v1/schemas", headers=auth, json=override)
+    assert r.json()["version"] == seeded.version + 1

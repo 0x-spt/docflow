@@ -401,3 +401,32 @@ async def test_idempotency_race_returns_winner(api, auth, monkeypatch):
     assert r.json() == winner
     assert await doc_count(api) == 1
     assert len(api.enqueuer.calls) == 1
+
+
+async def test_upload_pinned_builtin_version_with_tenant_override(api, auth):
+    """Тенант перекрыл invoice_ru (его версия — v2), но schema_version=1 берёт встроенную схему."""
+    from docflow.schemas.library import builtin_schemas
+
+    builtin = builtin_schemas()["invoice_ru"]
+    override = {
+        "slug": "invoice_ru",
+        "title": "Наш счёт",
+        "description": "d",
+        "fields": [{"name": "number", "type": "string", "description": "номер"}],
+    }
+    assert (await api.client.post("/v1/schemas", headers=auth, json=override)).json()["version"] == builtin.version + 1
+
+    pinned = await upload(api, auth, schema_version=str(builtin.version))
+    latest = await upload(api, auth)
+    assert (pinned.status_code, latest.status_code) == (202, 202)
+    async with api.sessionmaker() as s:
+        p = await s.get(Document, uuid.UUID(pinned.json()["id"]))
+        l_ = await s.get(Document, uuid.UUID(latest.json()["id"]))
+    assert (p.schema_slug, p.schema_version) == ("invoice_ru", builtin.version)
+    assert (l_.schema_slug, l_.schema_version) == ("invoice_ru", builtin.version + 1)
+    # и воркер по закреплённой версии возьмёт тело встроенной схемы
+    from docflow.pipeline import SchemaResolver
+
+    async with api.sessionmaker() as s:
+        resolved = await SchemaResolver().resolve(s, p.tenant_id, "invoice_ru", builtin.version)
+    assert resolved.title == builtin.title and len(resolved.fields) == len(builtin.fields)

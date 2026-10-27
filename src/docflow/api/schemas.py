@@ -50,26 +50,39 @@ async def list_schemas(tenant_id: TenantDep, session: SessionDep) -> list[dict[s
     return sorted(items.values(), key=lambda i: i["slug"])
 
 
+async def _latest_visible_version(session, tenant_id, slug: str) -> int:
+    """Старшая версия slug среди своих схем тенанта, встроенных в БД и встроенных в библиотеке.
+
+    Своя версия не должна совпадать со встроенной: иначе `version=1` у загрузки значил бы то встроенную,
+    то перекрытие — смотря есть ли у тенанта своя схема.
+    """
+    stored = (
+        await session.execute(
+            select(func.max(SchemaRecord.version)).where(
+                SchemaRecord.slug == slug,
+                or_(SchemaRecord.tenant_id == tenant_id, SchemaRecord.tenant_id.is_(None)),
+            )
+        )
+    ).scalar_one_or_none()
+    library = builtin_schemas().get(slug)
+    return max(stored or 0, library.version if library else 0)
+
+
 @router.post(
     "",
     status_code=status.HTTP_201_CREATED,
     summary="Добавить схему",
     description=(
-        "Тело — схема документа (поля, правила проверки). Версия назначается сервером: 1 для нового slug, "
-        "иначе следующая за последней своей; `version` из тела игнорируется. Можно перекрыть встроенную схему, "
-        "взяв её slug. Ошибка в схеме — 422."
+        "Тело — схема документа (поля, правила проверки). Версия назначается сервером: следующая за последней "
+        "видимой тенанту версией этого slug (своей или встроенной), 1 для нового slug; `version` из тела "
+        "игнорируется. Можно перекрыть встроенную схему, взяв её slug: перекрытие встроенной v1 станет v2, "
+        "и `version=1` по-прежнему означает встроенную. Ошибка в схеме — 422."
     ),
 )
 async def create_schema(schema: DocSchema, tenant_id: TenantDep, session: SessionDep) -> dict[str, Any]:
     for _ in range(SAVE_ATTEMPTS):
-        current = (
-            await session.execute(
-                select(func.max(SchemaRecord.version)).where(
-                    SchemaRecord.tenant_id == tenant_id, SchemaRecord.slug == schema.slug
-                )
-            )
-        ).scalar_one_or_none()
-        stored = schema.model_copy(update={"version": (current or 0) + 1})
+        current = await _latest_visible_version(session, tenant_id, schema.slug)
+        stored = schema.model_copy(update={"version": current + 1})
         body = stored.model_dump(mode="json")
         session.add(SchemaRecord(tenant_id=tenant_id, slug=stored.slug, version=stored.version, body=body))
         try:
