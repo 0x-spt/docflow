@@ -6,7 +6,7 @@
 import asyncio
 import logging
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import select, update
@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 INTERNAL_ERROR = "внутренняя ошибка обработки"
 TIMEOUT_ERROR = "обработка прервана: превышено время или воркер остановлен"
+REAPED_ERROR = "обработка прервана (воркер остановился)"
 
 
 class SchemaNotFound(LookupError):
@@ -84,11 +85,21 @@ async def _claim(session: AsyncSession, document_id: UUID) -> bool:
     res = await session.execute(
         update(Document)
         .where(Document.id == document_id, Document.status == "queued")
-        .values(status="processing")
+        .values(status="processing", claimed_at=datetime.now(UTC))
         .execution_options(synchronize_session=False)
     )
     await session.commit()
     return res.rowcount == 1
+
+
+def _finish(document_id: UUID, **values):
+    """UPDATE только из processing: поздний результат не перетрёт failed от жнеца и наоборот."""
+    return (
+        update(Document)
+        .where(Document.id == document_id, Document.status == "processing")
+        .values(finished_at=datetime.now(UTC), **values)
+        .execution_options(synchronize_session=False)
+    )
 
 
 async def _scan_pdf(deps: Deps, pages) -> bytes:
@@ -101,64 +112,81 @@ async def _scan_pdf(deps: Deps, pages) -> bytes:
         return pdf
 
 
-async def _run(deps: Deps, session: AsyncSession, document: Document) -> None:
+async def _render(deps: Deps, document_id: UUID, keys: list[str], mode: str) -> tuple[list[bytes], int]:
+    """Файлы → scan.pdf в хранилище; наружу только JPEG для модели.
+
+    Исходники, полноразмерные страницы и PDF живут только внутри этой функции: на время вызова модели
+    (до минут) в памяти не держим ~1 ГБ на задачу.
+    """
+    files = [(await deps.blobs.get(key), key.rsplit("/", 1)[-1]) for key in keys]
+    pages = await asyncio.to_thread(prepare_pages, files, mode, deps.max_pages)
+    del files
+    pdf = await _scan_pdf(deps, pages)
+    await deps.blobs.put(scan_key(str(document_id)), pdf, "application/pdf")
+    return [p.model_jpeg for p in pages], len(pages)
+
+
+async def _run(deps: Deps, session: AsyncSession, document_id: UUID) -> bool:
+    """True, если результат записан (документ ещё был в processing)."""
+    document = await session.get(Document, document_id)
     tenant = await session.get(Tenant, document.tenant_id)
     kind = tenant.extractor if tenant else None
     extractor = deps.extractors.get(kind) if kind else None
     if extractor is None:
         raise _Failure(f"Экстрактор «{kind}» не настроен")
     schema = await deps.schemas.resolve(session, document.tenant_id, document.schema_slug, document.schema_version)
+    keys, mode = list(document.files), document.mode
+    # Закрываем читающую транзакцию: OCR и модель идут минутами, idle in transaction на Postgres не нужен
+    await session.commit()
 
-    files = [(await deps.blobs.get(key), key.rsplit("/", 1)[-1]) for key in document.files]
-    pages = await asyncio.to_thread(prepare_pages, files, document.mode, deps.max_pages)
-    pdf = await _scan_pdf(deps, pages)
-    await deps.blobs.put(scan_key(str(document.id)), pdf, "application/pdf")
-
-    extraction = await asyncio.to_thread(extractor.extract, schema, [p.model_jpeg for p in pages])
+    images, n_pages = await _render(deps, document_id, keys, mode)
+    extraction = await asyncio.to_thread(extractor.extract, schema, images)
+    del images
     data, issues = normalize(schema, extraction.raw)
     issues += evaluate(schema, data)
     data.pop(UNCERTAIN, None)  # неуверенность уже стала issues с кодом uncertain
 
-    document.status = decide_status(issues)
-    document.data = data
-    document.issues = [asdict(i) for i in issues]
-    document.error = None
-    document.model = extraction.model
-    document.input_tokens = extraction.input_tokens
-    document.output_tokens = extraction.output_tokens
-    document.pages = len(pages)
-    document.finished_at = datetime.now(UTC)
-    await session.commit()
-
-
-async def _mark_failed(session: AsyncSession, document_id: UUID, error: str) -> Document:
-    await session.rollback()  # сбрасываем недописанные поля и сломанную транзакцию
-    await session.execute(
-        update(Document)
-        .where(Document.id == document_id)
-        .values(status="failed", error=error, finished_at=datetime.now(UTC))
-        .execution_options(synchronize_session=False)
+    res = await session.execute(
+        _finish(
+            document_id,
+            status=decide_status(issues),
+            data=data,
+            issues=[asdict(i) for i in issues],
+            error=None,
+            model=extraction.model,
+            input_tokens=extraction.input_tokens,
+            output_tokens=extraction.output_tokens,
+            pages=n_pages,
+        )
     )
     await session.commit()
-    return await session.get(Document, document_id, populate_existing=True)
+    return res.rowcount == 1
 
 
-async def _enqueue_webhooks(deps: Deps, session: AsyncSession, document: Document) -> None:
+async def _mark_failed(session: AsyncSession, document_id: UUID, error: str) -> bool:
+    await session.rollback()  # сбрасываем сломанную транзакцию, если она была
+    res = await session.execute(_finish(document_id, status="failed", error=error))
+    await session.commit()
+    return res.rowcount == 1
+
+
+async def _enqueue_webhooks(session: AsyncSession, document_id: UUID, enqueuer: Enqueuer) -> None:
     try:
-        await enqueue_webhooks(session, document, deps.enqueuer)
+        document = await session.get(Document, document_id, populate_existing=True)
+        await enqueue_webhooks(session, document, enqueuer)
     except Exception:
         # Документ уже в финальном статусе; закоммиченные доставки поднимет requeue_stale
-        logger.exception("не удалось поставить вебхуки документа %s", document.id)
+        logger.exception("не удалось поставить вебхуки документа %s", document_id)
 
 
 async def process_document(deps: Deps, document_id: UUID) -> None:
     async with deps.sessionmaker() as session:
         if not await _claim(session, document_id):
             return
-        document = await session.get(Document, document_id)
         error: str | None = None
+        finished = False
         try:
-            await _run(deps, session, document)
+            finished = await _run(deps, session, document_id)
         except (UnsupportedFile, _Failure, SchemaNotFound) as exc:
             error = str(exc)
         except BlobNotFound as exc:
@@ -168,12 +196,40 @@ async def process_document(deps: Deps, document_id: UUID) -> None:
         except asyncio.CancelledError:
             # job_timeout arq или остановка воркера: не оставляем документ в processing
             logger.warning("обработка документа %s прервана", document_id)
-            document = await _mark_failed(session, document_id, TIMEOUT_ERROR)
-            await _enqueue_webhooks(deps, session, document)
+            if await _mark_failed(session, document_id, TIMEOUT_ERROR):
+                await _enqueue_webhooks(session, document_id, deps.enqueuer)
             raise
         except Exception:
             logger.exception("ошибка обработки документа %s", document_id)
             error = INTERNAL_ERROR
         if error is not None:
-            document = await _mark_failed(session, document_id, error)
-        await _enqueue_webhooks(deps, session, document)
+            finished = await _mark_failed(session, document_id, error)
+        # rowcount 0 — документ уже закрыл жнец (и поставил вебхуки сам)
+        if finished:
+            await _enqueue_webhooks(session, document_id, deps.enqueuer)
+
+
+async def reap_stale_processing(
+    session: AsyncSession, enqueuer: Enqueuer, now: datetime, older_than: timedelta
+) -> int:
+    """Документы, застрявшие в processing (воркер убит после claim), переводит в failed с вебхуком."""
+    cutoff = now - older_than
+    stale = (
+        await session.execute(
+            select(Document.id).where(Document.status == "processing", Document.claimed_at < cutoff)
+        )
+    ).scalars().all()
+    await session.commit()
+    reaped = 0
+    for document_id in stale:
+        res = await session.execute(
+            update(Document)
+            .where(Document.id == document_id, Document.status == "processing", Document.claimed_at < cutoff)
+            .values(status="failed", error=REAPED_ERROR, finished_at=now)
+            .execution_options(synchronize_session=False)
+        )
+        await session.commit()
+        if res.rowcount == 1:
+            reaped += 1
+            await _enqueue_webhooks(session, document_id, enqueuer)
+    return reaped

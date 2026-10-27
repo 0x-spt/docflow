@@ -88,6 +88,7 @@ def upgrade() -> None:
         sa.Column("output_tokens", sa.Integer(), nullable=False),
         sa.Column("pages", sa.Integer(), nullable=False),
         _created(),
+        sa.Column("claimed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("finished_at", sa.DateTime(timezone=True), nullable=True),
         sa.CheckConstraint(
             "status IN ('queued', 'processing', 'ok', 'needs_review', 'failed')", name=op.f("ck_documents_status")

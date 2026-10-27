@@ -1,8 +1,10 @@
 import asyncio
 import io
 import json
+import sqlite3
 import time
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from PIL import Image, ImageDraw
@@ -13,7 +15,14 @@ from docflow.db.session import make_engine, make_sessionmaker
 from docflow.extraction.base import ExtractionError
 from docflow.extraction.fake import FakeExtractor
 from docflow.pdf.build import NoOcr
-from docflow.pipeline import Deps, SchemaResolver, process_document
+from docflow.pipeline import (
+    INTERNAL_ERROR,
+    REAPED_ERROR,
+    Deps,
+    SchemaResolver,
+    process_document,
+    reap_stale_processing,
+)
 from docflow.queue import DELIVER_WEBHOOK, PROCESS_DOCUMENT, ListEnqueuer
 from docflow.schemas.library import builtin_schemas
 from docflow.storage.blobs import LocalBlobStore, original_key, scan_key
@@ -244,7 +253,7 @@ async def test_ocr_failure_keeps_image_pdf(sm, tmp_path):
     await process_document(deps, doc_id)
 
     doc = await load(deps, doc_id)
-    assert doc.status in ("ok", "needs_review")
+    assert doc.status == "ok", doc.issues
     assert (await deps.blobs.get(scan_key(str(doc_id)))).startswith(b"%PDF-")
 
 
@@ -285,6 +294,129 @@ async def test_timeout_marks_failed(sm, tmp_path):
     doc = await load(deps, doc_id)
     assert doc.status == "failed"
     assert doc.finished_at is not None
+    assert len(webhook_calls(deps)) == 1
+
+
+async def test_missing_blob_failed(sm, tmp_path):
+    deps = make_deps(sm, tmp_path)
+    doc_id = await make_doc(deps)
+    key = (await load(deps, doc_id)).files[0]
+    (tmp_path / "blobs" / key).unlink()
+    await process_document(deps, doc_id)
+
+    doc = await load(deps, doc_id)
+    assert doc.status == "failed"
+    assert "не найден" in doc.error and key in doc.error
+    assert len(webhook_calls(deps)) == 1
+
+
+class ChecksConnection:
+    """Во время вызова модели у пайплайна не должно быть занятого соединения (и транзакции)."""
+
+    model = "checks"
+
+    def __init__(self, engine):
+        self.engine = engine
+        self.checked_out = None
+
+    def extract(self, schema, images):
+        self.checked_out = self.engine.sync_engine.pool.checkedout()
+        return FakeExtractor({schema.slug: INVOICE}).extract(schema, images)
+
+
+async def test_no_connection_held_during_extraction(sm, tmp_path):
+    ex = ChecksConnection(sm.kw["bind"])
+    deps = make_deps(sm, tmp_path, extractor=ex)
+    doc_id = await make_doc(deps)
+    await process_document(deps, doc_id)
+    assert ex.checked_out == 0
+    assert (await load(deps, doc_id)).status == "ok"
+
+
+class ReapedMidway:
+    """Пока модель думает, жнец (другой процесс) переводит документ в failed; затем результат или ошибка."""
+
+    model = "reaped"
+
+    def __init__(self, db_file, then_raise):
+        self.db_file = db_file
+        self.then_raise = then_raise
+
+    def extract(self, schema, images):
+        with sqlite3.connect(self.db_file) as conn:
+            conn.execute("UPDATE documents SET status='failed', error='reaped'")
+        if self.then_raise:
+            raise RuntimeError("boom")
+        return FakeExtractor({schema.slug: INVOICE}).extract(schema, images)
+
+
+@pytest.mark.parametrize("then_raise", [False, True])
+async def test_late_result_does_not_overwrite_failed(sm, tmp_path, then_raise):
+    deps = make_deps(sm, tmp_path, extractor=ReapedMidway(tmp_path / "db.sqlite", then_raise))
+    doc_id = await make_doc(deps)
+    await process_document(deps, doc_id)
+    doc = await load(deps, doc_id)
+    assert doc.status == "failed" and doc.error == "reaped"
+    assert doc.data is None
+    assert webhook_calls(deps) == []  # вебхуки ставит тот, кто закрыл документ
+
+
+# --- жнец застрявших processing ---------------------------------------------
+
+
+async def _set(deps, doc_id, **values):
+    async with deps.sessionmaker() as s:
+        doc = await s.get(Document, doc_id)
+        for k, v in values.items():
+            setattr(doc, k, v)
+        await s.commit()
+
+
+async def test_reap_stale_processing(sm, tmp_path):
+    deps = make_deps(sm, tmp_path)
+    now = datetime.now(UTC)
+    stale = await make_doc(deps, status="processing")
+    fresh = await make_doc(deps, status="processing")
+    done = await make_doc(deps, status="ok")
+    await _set(deps, stale, claimed_at=now - timedelta(minutes=11))
+    await _set(deps, fresh, claimed_at=now - timedelta(minutes=1))
+    await _set(deps, done, claimed_at=now - timedelta(hours=1), finished_at=now - timedelta(minutes=59))
+
+    async with deps.sessionmaker() as s:
+        assert await reap_stale_processing(s, deps.enqueuer, now, timedelta(minutes=10)) == 1
+
+    d = await load(deps, stale)
+    assert d.status == "failed" and d.error == REAPED_ERROR and d.finished_at is not None
+    assert len(webhook_calls(deps)) == 1
+    f = await load(deps, fresh)
+    assert f.status == "processing" and f.finished_at is None
+    o = await load(deps, done)
+    assert o.status == "ok" and o.error is None and o.finished_at == now - timedelta(minutes=59)
+
+    async with deps.sessionmaker() as s:  # повторный проход ничего не делает
+        assert await reap_stale_processing(s, deps.enqueuer, now, timedelta(minutes=10)) == 0
+    assert len(webhook_calls(deps)) == 1
+
+
+async def test_claim_sets_claimed_at(sm, tmp_path):
+    deps = make_deps(sm, tmp_path, extractor=Raising(RuntimeError("boom")))
+    doc_id = await make_doc(deps)
+    before = datetime.now(UTC)
+    await process_document(deps, doc_id)
+    doc = await load(deps, doc_id)
+    assert doc.error == INTERNAL_ERROR
+    assert before <= doc.claimed_at <= doc.finished_at
+
+
+async def test_cron_task_reaps(sm, tmp_path):
+    from docflow import worker
+
+    deps = make_deps(sm, tmp_path)
+    doc_id = await make_doc(deps, status="processing")
+    await _set(deps, doc_id, claimed_at=datetime.now(UTC) - worker.STALE_PROCESSING - timedelta(seconds=1))
+    result = await worker.requeue_stale_task({"deps": deps})
+    assert result == {"reaped_documents": 1, "requeued_deliveries": 0}
+    assert (await load(deps, doc_id)).status == "failed"
 
 
 # --- SchemaResolver -------------------------------------------------------

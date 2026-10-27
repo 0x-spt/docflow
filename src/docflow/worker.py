@@ -5,7 +5,7 @@
 
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import httpx
@@ -20,12 +20,16 @@ from docflow.extraction.claude import ClaudeExtractor
 from docflow.extraction.fake import FakeExtractor
 from docflow.extraction.ollama import OllamaExtractor
 from docflow.pdf.build import OcrMyPdf
-from docflow.pipeline import Deps, SchemaResolver, process_document
+from docflow.pipeline import Deps, SchemaResolver, process_document, reap_stale_processing
 from docflow.queue import DELIVER_WEBHOOK, PROCESS_DOCUMENT, ArqEnqueuer
 from docflow.storage.blobs import blob_store_from_settings
 from docflow.webhooks import deliver, requeue_stale
 
 logger = logging.getLogger(__name__)
+
+JOB_TIMEOUT = 300
+# processing дольше job_timeout + запас — воркер точно мёртв (живой бы уже записал результат или failed)
+STALE_PROCESSING = timedelta(seconds=JOB_TIMEOUT) + timedelta(minutes=5)
 
 
 def _extractors(settings: Settings) -> dict[str, Extractor]:
@@ -84,10 +88,15 @@ async def deliver_webhook_task(ctx: dict, delivery_id: str) -> None:
         )
 
 
-async def requeue_stale_task(ctx: dict) -> int:
+async def requeue_stale_task(ctx: dict) -> dict[str, int]:
+    """Раз в 5 минут: закрыть документы убитых воркеров и вернуть в очередь потерянные доставки."""
     deps: Deps = ctx["deps"]
+    now = datetime.now(UTC)
     async with deps.sessionmaker() as session:
-        return await requeue_stale(session, deps.enqueuer, datetime.now(UTC))
+        reaped = await reap_stale_processing(session, deps.enqueuer, now, STALE_PROCESSING)
+    async with deps.sessionmaker() as session:
+        requeued = await requeue_stale(session, deps.enqueuer, now)
+    return {"reaped_documents": reaped, "requeued_deliveries": requeued}
 
 
 class WorkerSettings:
@@ -101,4 +110,4 @@ class WorkerSettings:
     on_shutdown = shutdown
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)
     max_jobs = 4
-    job_timeout = 300
+    job_timeout = JOB_TIMEOUT

@@ -149,6 +149,8 @@ class Document(Base):
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     pages: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = _created()
+    # когда воркер взял документ в processing: по нему жнец находит задачи убитых воркеров
+    claimed_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
 
 
