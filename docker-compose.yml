@@ -17,6 +17,9 @@ x-app-env: &app-env
   DOCFLOW_ANTHROPIC_MODEL: ${DOCFLOW_ANTHROPIC_MODEL:-claude-opus-5-5}
   # ключ берётся с хоста; без него работают только fake-экстрактор и Ollama
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  # локальный режим (152-ФЗ): Ollama на хосте; в проде — адрес GPU-сервера внутри периметра клиента
+  DOCFLOW_OLLAMA_URL: ${DOCFLOW_OLLAMA_URL:-http://host.docker.internal:11434}
+  DOCFLOW_OLLAMA_MODEL: ${DOCFLOW_OLLAMA_MODEL:-qwen2.5vl:7b}
 
 services:
   postgres:
@@ -104,6 +107,8 @@ services:
     image: docflow-worker
     build: {context: ., dockerfile: docker/Dockerfile, target: worker}
     environment: *app-env
+    # host.docker.internal на Linux-хостах (в Docker Desktop есть и так)
+    extra_hosts: ["host.docker.internal:host-gateway"]
     depends_on:
       migrate: {condition: service_completed_successfully}
       redis: {condition: service_healthy}

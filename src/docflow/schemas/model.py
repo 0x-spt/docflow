@@ -10,7 +10,14 @@ ColumnType = Literal["string", "integer", "number", "date", "boolean", "enum"]
 # Правила одного поля (применяются к его значению) и правила документа (ссылаются на поля по имени).
 FIELD_RULES = frozenset({"inn", "kpp", "ogrn", "snils", "bik", "regex", "date_not_future"})
 DOC_RULES = frozenset(
-    {"table_sum_equals", "table_row_product", "date_order", "account_matches_bik", "total_consistent"}
+    {
+        "table_sum_equals",
+        "table_row_product",
+        "table_product_sum",
+        "date_order",
+        "account_matches_bik",
+        "total_consistent",
+    }
 )
 
 
@@ -56,6 +63,8 @@ def _check_columns(names: list[str], what: str) -> None:
 _DOC_RULE_PARAMS: dict[str, dict[str, tuple[str, ...]]] = {
     "table_sum_equals": {"table": ("table",), "column": ("column",), "total": ("field",)},
     "table_row_product": {"table": ("table",), "qty": ("column",), "price": ("column",), "amount": ("column",)},
+    # итог без графы «сумма»: Σ количество × цена по строкам
+    "table_product_sum": {"table": ("table",), "qty": ("column",), "price": ("column",), "total": ("field",)},
     "date_order": {"earlier": ("field",), "later": ("field",)},
     "account_matches_bik": {"account": ("field",), "bik": ("field",)},
     # итог к оплате сверяется с подытогом (или суммой строк таблицы) и НДС

@@ -121,6 +121,23 @@ def _table_row_product(data: dict[str, Any], p: dict[str, Any]) -> list[Issue]:
     return issues
 
 
+def _table_product_sum(data: dict[str, Any], p: dict[str, Any]) -> list[Issue]:
+    """Итог = Σ количество × цена, когда графы «сумма» в таблице нет (заказ-наряды, акты)."""
+    total = data.get(p["total"])
+    rows = _rows(data, p["table"])
+    if not _is_number(total) or not rows:
+        return []
+    pairs = [(r.get(p["qty"]), r.get(p["price"])) for r in rows]
+    if not all(_is_number(q) and _is_number(pr) for q, pr in pairs):
+        return []  # неполная строка дала бы ложное расхождение
+    s = sum(q * pr for q, pr in pairs)
+    tolerance = float(p.get("tolerance", 0.01))
+    if abs(s - total) > tolerance + _EPS:
+        detail = " + ".join(f"{_num(q)} × {_num(pr)}" for q, pr in pairs)
+        return [Issue(p["total"], "sum_mismatch", f"итого {_num(total)} ≠ {detail} = {_num(s)}")]
+    return []
+
+
 def _date_order(data: dict[str, Any], p: dict[str, Any]) -> list[Issue]:
     earlier, later = data.get(p["earlier"]), data.get(p["later"])
     if earlier is None or later is None:
@@ -197,6 +214,7 @@ DOC_REGISTRY: dict[str, DocRule] = {
     "total_consistent": _total_consistent,
     "table_sum_equals": _table_sum_equals,
     "table_row_product": _table_row_product,
+    "table_product_sum": _table_product_sum,
     "date_order": _date_order,
     "account_matches_bik": _account_matches_bik,
 }

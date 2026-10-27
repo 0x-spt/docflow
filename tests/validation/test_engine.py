@@ -271,3 +271,39 @@ def test_total_consistent_minimal_params():
     )
     assert evaluate(s, {"subtotal": 10, "total": 10}, today=TODAY) == []
     assert codes(evaluate(s, {"subtotal": 10, "total": 12}, today=TODAY)) == [("total", "sum_mismatch")]
+
+
+PRODUCT_SUM_RULE = {
+    "kind": "table_product_sum",
+    "params": {"table": "works", "qty": "qty", "price": "price", "total": "total"},
+}
+ORDER = schema(
+    [
+        {
+            "name": "works",
+            "type": "table",
+            "columns": [{"name": "qty", "type": "number"}, {"name": "price", "type": "number"}],
+        },
+        {"name": "total", "type": "number"},
+    ],
+    [PRODUCT_SUM_RULE],
+)
+
+
+def test_product_sum_matches():
+    data = {"works": [{"qty": 2, "price": 9000}, {"qty": 1, "price": 2500}], "total": 20500}
+    assert evaluate(ORDER, data, today=TODAY) == []
+
+
+def test_product_sum_mismatch():
+    # заказ-наряд: 3 зуба, а в графе «Ед.» 1 — итого 4 500 не сходится с 1 × 1 500
+    issues = evaluate(ORDER, {"works": [{"qty": 1, "price": 1500}], "total": 4500}, today=TODAY)
+    assert codes(issues) == [("total", "sum_mismatch")]
+    assert "4500" in issues[0].message and "1500" in issues[0].message
+
+
+def test_product_sum_skipped_when_incomplete():
+    # неполная строка дала бы ложное расхождение; пропуск в ней подсветит missing/uncertain
+    assert evaluate(ORDER, {"works": [{"qty": None, "price": 1500}], "total": 4500}, today=TODAY) == []
+    assert evaluate(ORDER, {"works": [], "total": 4500}, today=TODAY) == []
+    assert evaluate(ORDER, {"works": [{"qty": 1, "price": 1500}], "total": None}, today=TODAY) == []
