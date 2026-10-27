@@ -3,6 +3,8 @@
 #   uv run pytest -m e2e -v
 x-e2e-env: &e2e-env
   DOCFLOW_FAKE_EXTRACTOR: "1"
+  # без второго флага воркер с fake-экстрактором не стартует
+  DOCFLOW_ALLOW_FAKE: "1"
   DOCFLOW_FAKE_RESPONSES: /app/tests/e2e/fake_responses.json
   DOCFLOW_WEBHOOK_ALLOW_PRIVATE: "true"
 

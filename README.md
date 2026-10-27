@@ -98,6 +98,8 @@ docker compose --profile test run --rm test
 ```
 
 Сквозной: настоящие API, очередь, S3 и OCR; экстрактор — заготовка `tests/e2e/fake_responses.json`, ключ не нужен.
+Fake-режим включается парой `DOCFLOW_FAKE_EXTRACTOR=1` + `DOCFLOW_ALLOW_FAKE=1` (обе в `docker-compose.e2e.yml`):
+с одним первым флагом воркер не стартует.
 
 ```
 docker compose -f docker-compose.yml -f docker-compose.e2e.yml up -d --build

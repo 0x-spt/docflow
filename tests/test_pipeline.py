@@ -565,6 +565,7 @@ async def test_worker_startup_fake_mode(tmp_path, monkeypatch):
     monkeypatch.setenv("DOCFLOW_DATABASE_URL", f"sqlite+aiosqlite:///{(tmp_path / 'w.sqlite').as_posix()}")
     monkeypatch.setenv("DOCFLOW_BLOB_ROOT", str(tmp_path / "blobs"))
     monkeypatch.setenv("DOCFLOW_FAKE_EXTRACTOR", "1")
+    monkeypatch.setenv("DOCFLOW_ALLOW_FAKE", "1")
     monkeypatch.setenv("DOCFLOW_FAKE_RESPONSES", str(responses))
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     get_settings.cache_clear()
@@ -599,6 +600,30 @@ async def test_worker_startup_real_mode_without_key(tmp_path, monkeypatch):
         assert isinstance(extractors["claude"], ClaudeExtractor)
         assert extractors["claude"].model == get_settings().anthropic_model
         assert isinstance(extractors["ollama"], OllamaExtractor)
+        await worker.shutdown(ctx)
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.parametrize("allow", [None, "0"])
+async def test_worker_refuses_fake_without_allow(tmp_path, monkeypatch, allow):
+    from docflow import worker
+    from docflow.config import get_settings
+
+    responses = tmp_path / "fake.json"
+    responses.write_text(json.dumps({"invoice_ru": INVOICE}), encoding="utf-8")
+    monkeypatch.setenv("DOCFLOW_DATABASE_URL", f"sqlite+aiosqlite:///{(tmp_path / 'w.sqlite').as_posix()}")
+    monkeypatch.setenv("DOCFLOW_FAKE_EXTRACTOR", "1")
+    monkeypatch.setenv("DOCFLOW_FAKE_RESPONSES", str(responses))
+    if allow is None:
+        monkeypatch.delenv("DOCFLOW_ALLOW_FAKE", raising=False)
+    else:
+        monkeypatch.setenv("DOCFLOW_ALLOW_FAKE", allow)
+    get_settings.cache_clear()
+    try:
+        ctx = {"redis": object()}
+        with pytest.raises(worker.FakeExtractorNotAllowed, match="DOCFLOW_ALLOW_FAKE"):
+            await worker.startup(ctx)
         await worker.shutdown(ctx)
     finally:
         get_settings.cache_clear()

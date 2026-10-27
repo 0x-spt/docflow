@@ -47,8 +47,17 @@ STALE_PROCESSING = timedelta(seconds=JOB_TIMEOUT) + timedelta(minutes=5)
 STALE_QUEUED = timedelta(minutes=5)
 
 
+class FakeExtractorNotAllowed(RuntimeError):
+    pass
+
+
 def _extractors(settings: Settings) -> dict[str, Extractor]:
     if settings.fake_extractor:
+        if not settings.allow_fake:
+            # заготовки вместо модели — тихая порча данных клиентов; без явного второго флага не стартуем
+            raise FakeExtractorNotAllowed(
+                "DOCFLOW_FAKE_EXTRACTOR=1 без DOCFLOW_ALLOW_FAKE=1: fake-экстрактор только для демо и e2e"
+            )
         responses = json.loads(settings.fake_responses.read_text(encoding="utf-8"))
         fake = FakeExtractor(responses)
         return {"claude": fake, "ollama": fake}
@@ -61,6 +70,8 @@ def _extractors(settings: Settings) -> dict[str, Extractor]:
 
 async def startup(ctx: dict) -> None:
     settings = get_settings()
+    # экстракторы — первыми: запрет fake-режима должен сработать до открытия соединений
+    extractors = _extractors(settings)
     engine = make_engine(settings.database_url)
     ctx["settings"] = settings
     ctx["engine"] = engine
@@ -69,7 +80,7 @@ async def startup(ctx: dict) -> None:
         sessionmaker=make_sessionmaker(engine),
         blobs=blob_store_from_settings(settings),
         ocr=OcrMyPdf(),
-        extractors=_extractors(settings),
+        extractors=extractors,
         schemas=SchemaResolver(),
         enqueuer=ArqEnqueuer(ctx["redis"]),
         max_pages=settings.max_pages,

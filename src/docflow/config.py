@@ -40,6 +40,9 @@ class Settings(BaseSettings):
 
     # демо и e2e без модели: все экстракторы воркера отвечают заготовками из JSON {slug: ответ}
     fake_extractor: bool = False
+    # второй ключ-предохранитель: один случайно оставленный FAKE_EXTRACTOR в проде не должен подменить
+    # извлечение заготовками — воркер без ALLOW_FAKE откажется стартовать
+    allow_fake: bool = False
     fake_responses: Path = Path("tests/e2e/fake_responses.json")
 
 
