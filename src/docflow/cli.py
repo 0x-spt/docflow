@@ -26,7 +26,7 @@ class UserError(Exception):
     """Ошибка пользователя: печатаем сообщение без трейсбека, код возврата 1."""
 
 
-def _make_extractor(kind: str, fake_responses: Path | None) -> Extractor:
+def _make_extractor(kind: str, fake_responses: Path | None, slug: str) -> Extractor:
     settings = get_settings()
     if kind == "fake":
         path = fake_responses or settings.fake_responses
@@ -35,9 +35,12 @@ def _make_extractor(kind: str, fake_responses: Path | None) -> Extractor:
         from docflow.extraction.fake import FakeExtractor
 
         try:
-            return FakeExtractor(json.loads(path.read_text(encoding="utf-8")))
+            responses = json.loads(path.read_text(encoding="utf-8"))
         except ValueError as e:
             raise UserError(f"{path}: некорректный JSON ({e})") from e
+        if not isinstance(responses, dict) or slug not in responses:
+            raise UserError(f"в {path} нет ответа для схемы «{slug}»")
+        return FakeExtractor(responses)
     if kind == "ollama":
         from docflow.extraction.ollama import OllamaExtractor
 
@@ -51,7 +54,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
     root: Path = args.dir
     if not root.is_dir():
         raise UserError(f"папка набора не найдена: {root}")
-    extractor = _make_extractor(args.extractor, args.fake_responses)
+    extractor = _make_extractor(args.extractor, args.fake_responses, root.name)
     try:
         report = run_eval(root, extractor, mode=args.mode)
     except ValueError as e:
@@ -79,10 +82,11 @@ async def _create_tenant(name: str, extractor: str) -> str:
 
 
 def cmd_create_tenant(args: argparse.Namespace) -> int:
-    if not args.name.strip():
+    name = args.name.strip()
+    if not name:
         raise UserError("имя клиента не может быть пустым")
-    key = asyncio.run(_create_tenant(args.name.strip(), args.extractor))
-    print(f"Клиент «{args.name}» создан.")
+    key = asyncio.run(_create_tenant(name, args.extractor))
+    print(f"Клиент «{name}» создан.")
     print(f"API-ключ: {key}")
     print("ВНИМАНИЕ: ключ больше не будет показан. Сохраните его сейчас.")
     return 0
@@ -147,6 +151,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Ошибка: {e}", file=sys.stderr)
     except (SQLAlchemyError, OSError) as e:
         print(f"Ошибка: {type(e).__name__}: {str(e).splitlines()[0] if str(e) else ''}", file=sys.stderr)
+    except Exception as e:  # оператору — сообщение, а не трейсбек
+        print(f"Ошибка: {type(e).__name__}: {e}", file=sys.stderr)
     return 1
 
 

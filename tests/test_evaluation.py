@@ -151,3 +151,49 @@ def test_run_eval_unknown_slug(tmp_path):
     root.mkdir()
     with pytest.raises(ValueError, match="nope"):
         run_eval(root, Scripted())
+
+
+def test_compare_bool_is_not_one_and_empty_table_needs_list():
+    assert compare({"b": True}, {"b": 1}).items == {"b": False}
+    assert compare({"b": True}, {"b": True}).items == {"b": True}
+    assert compare({"items": []}, {"items": None}).items == {"items": False}
+    assert compare({"items": []}, {}).items == {"items": False}
+
+
+def test_empty_scores_are_not_all_correct():
+    assert not compare({}, {"a": 1}).all_correct
+
+
+def test_precision_and_rate_none_without_ok_docs(tmp_path):
+    root = tmp_path / "invoice_ru"
+    _case(root, "a")
+    report = run_eval(root, Scripted(ExtractionError("refusal")))
+    assert report.ok_precision is None and report.ok_rate == 0.0
+
+
+def test_needs_review_doc_is_not_ok(tmp_path):
+    root = tmp_path / "invoice_ru"
+    _case(root, "a")
+    report = run_eval(root, Scripted({**GOOD, "supplier_inn": "123"}))  # плохая контрольная сумма ИНН
+    assert report.cases[0].status == "needs_review"
+    assert report.ok_precision is None and report.ok_rate == 0.0
+
+
+def test_cost_none_for_unknown_claude_model_and_zero_for_local(tmp_path):
+    root = tmp_path / "invoice_ru"
+    _case(root, "a")
+    ex = Scripted(GOOD)
+    ex.model = "claude-future-9"
+    assert run_eval(root, ex).cost_usd is None
+    ex = Scripted(GOOD)
+    ex.model = "qwen2.5vl:7b"
+    assert run_eval(root, ex).cost_usd == 0.0
+
+
+@pytest.mark.parametrize("content", ["{broken", "[1, 2]", "5", "{}", '{"items": [1]}'])
+def test_bad_expected_json_raises_valueerror_with_case_name(tmp_path, content):
+    root = tmp_path / "invoice_ru"
+    d = _case(root, "badcase")
+    (d / "expected.json").write_text(content, encoding="utf-8")
+    with pytest.raises(ValueError, match="badcase"):
+        run_eval(root, Scripted(GOOD))

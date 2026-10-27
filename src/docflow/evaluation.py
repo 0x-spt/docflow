@@ -49,6 +49,8 @@ def _equal(expected: Any, actual: Any) -> bool:
         return False
     if expected is None:
         return actual is None
+    if isinstance(expected, bool):
+        return isinstance(actual, bool) and expected == actual  # True не равно 1
     if _is_number(expected):
         return _is_number(actual) and abs(expected - actual) <= NUMBER_TOLERANCE
     if isinstance(expected, str):
@@ -64,7 +66,8 @@ class FieldScores:
 
     @property
     def all_correct(self) -> bool:
-        return all(self.items.values())
+        # пустая оценка — не «всё верно»: иначе пустой эталон завышает ok_precision
+        return bool(self.items) and all(self.items.values())
 
     @property
     def correct(self) -> int:
@@ -85,7 +88,7 @@ def compare(expected: dict, actual: dict) -> FieldScores:
             continue
         act_rows = act if isinstance(act, list) else []
         if not exp and not act_rows:
-            scores.items[name] = act is not _MISSING
+            scores.items[name] = isinstance(act, list)
             continue
         for i in range(max(len(exp), len(act_rows))):
             if i >= len(exp):
@@ -172,7 +175,8 @@ class EvalReport:
     def cost_usd(self) -> float | None:
         price = PRICES.get(self.model)
         if price is None:
-            # неизвестная модель Claude -> цена неизвестна; всё остальное (ollama, fake) локальное и бесплатное
+            # не-claude модели считаем локальными (ollama, fake): цена 0.
+            # Неизвестная модель Claude -> цена неизвестна.
             return None if self.model.startswith("claude") else 0.0
         return (self.input_tokens * price[0] + self.output_tokens * price[1]) / 1_000_000
 
@@ -235,6 +239,22 @@ def _run_case(case: Path, expected: dict, schema, extractor: Extractor, mode: Mo
     )
 
 
+def _load_expected(case: Path) -> dict:
+    path = case / "expected.json"
+    try:
+        expected = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError) as e:
+        raise ValueError(f"кейс «{case.name}»: не удалось прочитать {path}: {e}") from e
+    if not isinstance(expected, dict):
+        raise ValueError(f"кейс «{case.name}»: {path} должен быть объектом {{поле: значение}}")
+    if not expected:
+        raise ValueError(f"кейс «{case.name}»: {path} пуст, оценивать нечего")
+    for key, value in expected.items():
+        if isinstance(value, list) and not all(isinstance(r, dict) for r in value):
+            raise ValueError(f"кейс «{case.name}»: {path}, поле «{key}»: строки таблицы должны быть объектами")
+    return expected
+
+
 def run_eval(root: Path, extractor: Extractor, mode: Mode = "gray", max_pages: int = 30) -> EvalReport:
     """root = evals/<slug>; slug — имя папки, обязан быть встроенной схемой."""
     root = Path(root)
@@ -248,7 +268,7 @@ def run_eval(root: Path, extractor: Extractor, mode: Mode = "gray", max_pages: i
             log.warning("кейс %s пропущен: нет expected.json", case.name)
             report.skipped.append(case.name)
             continue
-        expected = json.loads(exp_file.read_text(encoding="utf-8"))
+        expected = _load_expected(case)
         report.cases.append(_run_case(case, expected, schema, extractor, mode, max_pages))
     return report
 

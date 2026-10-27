@@ -116,3 +116,19 @@ def test_eval_user_errors(tmp_path, capsys):
     bad = tmp_path / "unknown_slug"
     bad.mkdir()
     assert main(["eval", str(bad), "--extractor", "fake"]) == 1
+
+
+def test_create_tenant_empty_name_exit_1(db_url, capsys):
+    assert main(["create-tenant", "   "]) == 1
+    assert capsys.readouterr().err.startswith("Ошибка")
+
+
+def test_eval_bad_expected_and_missing_fake_slug_exit_1(tmp_path, capsys):
+    root, fake = _dataset(tmp_path)
+    (root / "a" / "expected.json").write_text("{oops", encoding="utf-8")
+    assert main(["eval", str(root), "--extractor", "fake", "--fake-responses", str(fake)]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("Ошибка") and "a" in err and "Traceback" not in err
+    fake.write_text("{}", encoding="utf-8")
+    assert main(["eval", str(root), "--extractor", "fake", "--fake-responses", str(fake)]) == 1
+    assert "invoice_ru" in capsys.readouterr().err
