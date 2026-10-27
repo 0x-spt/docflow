@@ -79,3 +79,26 @@ def test_regex_rule_needs_valid_pattern():
         with pytest.raises(ValidationError):
             _schema(FieldSpec(name="a", type="string", rules=[{"kind": "regex", "params": params}]))
     assert _schema(FieldSpec(name="a", type="string", rules=[{"kind": "regex", "params": {"pattern": r"^\d+$"}}]))
+
+
+def test_total_consistent_params_cross_checked():
+    total = FieldSpec(name="total", type="number")
+    sub = FieldSpec(name="subtotal", type="number")
+    vat = FieldSpec(name="vat", type="number")
+    full = {"total": "total", "subtotal": "subtotal", "vat": "vat", "table": "items", "column": "amount"}
+    assert _schema(_tbl(), total, sub, vat, rules=[{"kind": "total_consistent", "params": full}])
+    # необязательные параметры можно опустить
+    minimal = {"kind": "total_consistent", "params": {"total": "total", "subtotal": "subtotal"}}
+    assert _schema(total, sub, rules=[minimal])
+    for bad in (
+        {"subtotal": "subtotal"},  # нет total
+        {**full, "total": "totl"},
+        {**full, "subtotal": "sub"},
+        {**full, "vat": "nds"},
+        {**full, "table": "total"},  # не таблица
+        {**full, "column": "amout"},
+        {"total": "total", "table": "items"},  # таблица без колонки
+        {"total": "total", "column": "amount"},  # колонка без таблицы
+    ):
+        with pytest.raises(ValidationError):
+            _schema(_tbl(), total, sub, vat, rules=[{"kind": "total_consistent", "params": bad}])

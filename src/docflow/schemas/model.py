@@ -9,7 +9,9 @@ ColumnType = Literal["string", "integer", "number", "date", "boolean", "enum"]
 
 # Правила одного поля (применяются к его значению) и правила документа (ссылаются на поля по имени).
 FIELD_RULES = frozenset({"inn", "kpp", "ogrn", "snils", "bik", "regex", "date_not_future"})
-DOC_RULES = frozenset({"table_sum_equals", "table_row_product", "date_order", "account_matches_bik"})
+DOC_RULES = frozenset(
+    {"table_sum_equals", "table_row_product", "date_order", "account_matches_bik", "total_consistent"}
+)
 
 
 class RuleSpec(BaseModel):
@@ -56,6 +58,18 @@ _DOC_RULE_PARAMS: dict[str, dict[str, tuple[str, ...]]] = {
     "table_row_product": {"table": ("table",), "qty": ("column",), "price": ("column",), "amount": ("column",)},
     "date_order": {"earlier": ("field",), "later": ("field",)},
     "account_matches_bik": {"account": ("field",), "bik": ("field",)},
+    # итог к оплате сверяется с подытогом (или суммой строк таблицы) и НДС
+    "total_consistent": {
+        "total": ("field",),
+        "subtotal": ("field",),
+        "vat": ("field",),
+        "table": ("table",),
+        "column": ("column",),
+    },
+}
+# Необязательные параметры: проверяются, только если заданы.
+_DOC_RULE_OPTIONAL: dict[str, frozenset[str]] = {
+    "total_consistent": frozenset({"subtotal", "vat", "table", "column"}),
 }
 
 
@@ -71,7 +85,15 @@ def _check_field_rule(field: "FieldSpec", rule: RuleSpec) -> None:
 
 
 def _check_doc_rule(rule: RuleSpec, fields: dict[str, "FieldSpec"]) -> None:
-    spec = _DOC_RULE_PARAMS[rule.kind]
+    optional = _DOC_RULE_OPTIONAL.get(rule.kind, frozenset())
+    spec = {
+        param: kind
+        for param, kind in _DOC_RULE_PARAMS[rule.kind].items()
+        if param not in optional or rule.params.get(param) is not None
+    }
+    # таблица и колонка ссылаются друг на друга: одна без другой бессмысленна
+    if ("table" in spec) != ("column" in spec) and {"table", "column"} <= optional:
+        raise ValueError(f"{rule.kind}: table и column задаются вместе")
     table: FieldSpec | None = None
     if "table" in spec:
         name = rule.params.get("table")

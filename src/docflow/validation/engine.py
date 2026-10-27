@@ -152,7 +152,49 @@ def _account_matches_bik(data: dict[str, Any], p: dict[str, Any]) -> list[Issue]
     return [Issue(p["account"], "checksum", f"счёт «{account}» не сходится с БИК «{bik}» по контрольному ключу")]
 
 
+def _is_number(v: Any) -> bool:
+    return isinstance(v, int | float) and not isinstance(v, bool)
+
+
+def _total_consistent(data: dict[str, Any], p: dict[str, Any]) -> list[Issue]:
+    """Итог к оплате = подытог (НДС внутри) или подытог + НДС (НДС сверху).
+
+    Подытог — поле subtotal, а без него сумма колонки таблицы, если все ячейки заполнены числами:
+    неполная таблица дала бы ложное расхождение.
+    """
+    total = data.get(p["total"])
+    if not _is_number(total):
+        return []
+    base: float | None = None
+    base_label = "подытог"
+    subtotal = data.get(p["subtotal"]) if p.get("subtotal") else None
+    if _is_number(subtotal):
+        base = float(subtotal)
+    elif p.get("table") and p.get("column"):
+        cells = [r.get(p["column"]) for r in _rows(data, p["table"])]
+        if cells and all(_is_number(c) for c in cells):
+            base = float(sum(cells))
+            base_label = "сумма строк"
+    if base is None:
+        return []
+    vat = data.get(p["vat"]) if p.get("vat") else None
+    tolerance = float(p.get("tolerance", 0.01)) + _EPS
+    if abs(total - base) <= tolerance:
+        return []
+    if _is_number(vat) and abs(total - (base + vat)) <= tolerance:
+        return []
+    if _is_number(vat):
+        message = (
+            f"итого к оплате {_num(total)} не сходится: {base_label} {_num(base)}, "
+            f"с НДС {_num(vat)} — {_num(base + vat)}"
+        )
+    else:
+        message = f"итого к оплате {_num(total)} ≠ {base_label} {_num(base)}"
+    return [Issue(p["total"], "sum_mismatch", message)]
+
+
 DOC_REGISTRY: dict[str, DocRule] = {
+    "total_consistent": _total_consistent,
     "table_sum_equals": _table_sum_equals,
     "table_row_product": _table_row_product,
     "date_order": _date_order,

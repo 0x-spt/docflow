@@ -211,3 +211,63 @@ def test_invalid_bik_reported_once_when_both_rules_present():
 def test_decide_status():
     assert decide_status([]) == "ok"
     assert decide_status([Issue("a", "checksum", "m")]) == "needs_review"
+
+
+# --- total_consistent ---------------------------------------------------------
+
+TOTAL_RULE = {
+    "kind": "total_consistent",
+    "params": {"total": "total", "subtotal": "subtotal", "vat": "vat", "table": "items", "column": "amount"},
+}
+PAYABLE = schema(
+    [ITEMS] + [{"name": n, "type": "number"} for n in ("subtotal", "vat", "total")],
+    [TOTAL_RULE],
+)
+
+
+def test_total_consistent_vat_on_top():
+    data = {"items": rows((10, 350, 3500), (1, 500, 500)), "subtotal": 4000, "vat": 800, "total": 4800}
+    assert evaluate(PAYABLE, data, today=TODAY) == []
+
+
+def test_total_consistent_vat_included():
+    # «в т.ч. НДС»: подытог уже с НДС, итог к оплате равен ему
+    data = {"items": rows((1, 1200, 1200)), "subtotal": 1200, "vat": 200, "total": 1200}
+    assert evaluate(PAYABLE, data, today=TODAY) == []
+
+
+def test_total_consistent_without_subtotal_uses_items():
+    data = {"items": rows((10, 350, 3500), (1, 500, 500)), "subtotal": None, "vat": 800, "total": 4800}
+    assert evaluate(PAYABLE, data, today=TODAY) == []
+    issues = evaluate(PAYABLE, {**data, "total": 5800}, today=TODAY)
+    assert codes(issues) == [("total", "sum_mismatch")]
+    assert "сумма строк 4000" in issues[0].message
+
+
+def test_total_consistent_mismatch():
+    data = {"items": rows((1, 4000, 4000)), "subtotal": 4000, "vat": 800, "total": 4900}
+    issues = evaluate(PAYABLE, data, today=TODAY)
+    assert codes(issues) == [("total", "sum_mismatch")]
+    assert "4900" in issues[0].message and "4000" in issues[0].message and "4800" in issues[0].message
+    # без НДС: итог обязан совпасть с подытогом
+    no_vat = evaluate(PAYABLE, {**data, "vat": None, "total": 4800}, today=TODAY)
+    assert codes(no_vat) == [("total", "sum_mismatch")]
+    # в пределах допуска — не расхождение
+    assert evaluate(PAYABLE, {**data, "total": 4800.004}, today=TODAY) == []
+
+
+def test_total_consistent_skips_without_base():
+    assert evaluate(PAYABLE, {"items": rows((1, 1, 1)), "subtotal": 1, "vat": None, "total": None}, today=TODAY) == []
+    # нет подытога, а в таблице пустая ячейка — по неполной сумме не судим
+    data = {"items": rows((1, 10, 10), (1, 5, None)), "subtotal": None, "vat": None, "total": 999}
+    assert evaluate(PAYABLE, data, today=TODAY) == []
+    assert evaluate(PAYABLE, {"items": [], "subtotal": None, "vat": None, "total": 999}, today=TODAY) == []
+
+
+def test_total_consistent_minimal_params():
+    s = schema(
+        [{"name": "subtotal", "type": "number"}, {"name": "total", "type": "number"}],
+        [{"kind": "total_consistent", "params": {"total": "total", "subtotal": "subtotal"}}],
+    )
+    assert evaluate(s, {"subtotal": 10, "total": 10}, today=TODAY) == []
+    assert codes(evaluate(s, {"subtotal": 10, "total": 12}, today=TODAY)) == [("total", "sum_mismatch")]

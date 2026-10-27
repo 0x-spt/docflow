@@ -82,3 +82,6 @@ rules:
     params: {table: items, qty: qty, price: price, amount: amount}
   - kind: account_matches_bik
     params: {account: account, bik: bik}
+  # итог к оплате = подытог (или сумма строк) либо подытог + НДС
+  - kind: total_consistent
+    params: {total: total, subtotal: subtotal, vat: vat, table: items, column: amount, tolerance: 0.01}
