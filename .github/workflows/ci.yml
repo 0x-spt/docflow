@@ -1,0 +1,51 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --all-extras
+      - run: uv run ruff check
+      - run: uv run pytest -m "not integration and not e2e"
+
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: docflow
+          POSTGRES_PASSWORD: docflow
+          POSTGRES_DB: docflow
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U docflow" --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
+      # образ minio/minio нельзя запустить как service-контейнер (нужна команда server), поэтому стартуем шагом ниже
+    env:
+      DOCFLOW_DATABASE_URL: postgresql+asyncpg://docflow:docflow@localhost:5432/docflow
+      DOCFLOW_REDIS_URL: redis://localhost:6379/0
+      DOCFLOW_S3_ENDPOINT: http://localhost:9000
+      DOCFLOW_S3_ACCESS_KEY: minioadmin
+      DOCFLOW_S3_SECRET_KEY: minioadmin
+    steps:
+      - uses: actions/checkout@v4
+      - name: MinIO
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio server /data
+      - name: Системные пакеты для OCR
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr tesseract-ocr-rus ghostscript
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --all-extras
+      - run: uv run pytest -m integration

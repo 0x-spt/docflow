@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "docflow"
+version = "0.1.0"
+description = "API распознавания документов: скан с текстовым слоем + данные по схеме документа"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "python-multipart>=0.0.9",
+    "pydantic-settings>=2.4",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.29",
+    "aiosqlite>=0.20",
+    "alembic>=1.13",
+    "arq>=0.26",
+    "boto3>=1.34",
+    "opencv-python-headless>=4.9",
+    "pillow>=10",
+    "pillow-heif>=0.18",
+    "pypdfium2>=4.30",
+    "img2pdf>=0.5",
+    "ocrmypdf>=16",
+    "anthropic>=2.2",
+    "httpx>=0.27",
+    "pyyaml>=6",
+]
+
+[project.optional-dependencies]
+# jsonschema — проверка схем, собранных из схемы документа; respx — подмена httpx (Ollama, вебхуки) без сети
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.6", "respx>=0.21", "jsonschema>=4"]
+
+[project.scripts]
+docflow = "docflow.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+# integration и e2e требуют Postgres/Redis/MinIO/tesseract или реальных моделей — в обычном прогоне их нет
+markers = [
+    "integration: нужны сервисы из docker-compose и системные tesseract/ghostscript",
+    "e2e: сквозной прогон, может ходить во внешние модели",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
