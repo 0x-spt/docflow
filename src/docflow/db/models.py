@@ -15,8 +15,10 @@ from sqlalchemy import (
     Integer,
     MetaData,
     String,
+    TypeDecorator,
     UniqueConstraint,
     Uuid,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -34,6 +36,25 @@ NAMING_CONVENTION = {
 JsonType = JSON().with_variant(JSONB(), "postgresql")
 
 
+class UtcDateTime(TypeDecorator):
+    """DateTime(timezone=True), который и на SQLite отдаёт aware-значения в UTC."""
+
+    impl = DateTime(timezone=True)
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            raise ValueError("naive datetime не допускается, нужен aware (UTC)")
+        return value.astimezone(UTC)
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
 def _now() -> datetime:
     return datetime.now(UTC)
 
@@ -47,7 +68,7 @@ def _id() -> Mapped[uuid.UUID]:
 
 
 def _created() -> Mapped[datetime]:
-    return mapped_column(DateTime(timezone=True), default=_now)
+    return mapped_column(UtcDateTime(), default=_now)
 
 
 def hash_key(plain: str) -> str:
@@ -79,12 +100,21 @@ class ApiKey(Base):
     prefix: Mapped[str] = mapped_column(String)
     key_hash: Mapped[str] = mapped_column(String)
     created_at: Mapped[datetime] = _created()
-    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
 
 
 class SchemaRecord(Base):
     __tablename__ = "schemas"
-    __table_args__ = (UniqueConstraint("tenant_id", "slug", "version", name="tenant_slug_version"),)
+    __table_args__ = (UniqueConstraint("tenant_id", "slug", "version", name="tenant_slug_version"),
+        # NULL в UNIQUE считаются разными, поэтому встроенные схемы дедуплицируем отдельным индексом
+        Index(
+            "uq_schemas_builtin_slug_version",
+            "slug",
+            "version",
+            unique=True,
+            postgresql_where=text("tenant_id IS NULL"),
+            sqlite_where=text("tenant_id IS NULL"),
+        ),)
 
     id: Mapped[uuid.UUID] = _id()
     # None — встроенная схема, общая для всех
@@ -119,7 +149,7 @@ class Document(Base):
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     pages: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = _created()
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
 
 
 class WebhookEndpoint(Base):
@@ -148,7 +178,7 @@ class WebhookDelivery(Base):
     event: Mapped[str] = mapped_column(String)
     attempt: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String, default="pending")
-    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
     last_error: Mapped[str | None] = mapped_column(String, nullable=True)
     response_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = _created()

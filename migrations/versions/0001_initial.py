@@ -62,6 +62,14 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id", name=op.f("pk_schemas")),
         sa.UniqueConstraint("tenant_id", "slug", "version", name=op.f("uq_schemas_tenant_slug_version")),
     )
+    op.create_index(
+        "uq_schemas_builtin_slug_version",
+        "schemas",
+        ["slug", "version"],
+        unique=True,
+        postgresql_where=sa.text("tenant_id IS NULL"),
+        sqlite_where=sa.text("tenant_id IS NULL"),
+    )
     op.create_table(
         "documents",
         _id(),

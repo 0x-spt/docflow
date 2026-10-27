@@ -6,7 +6,8 @@ from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from docflow.config import Settings
@@ -60,14 +61,33 @@ def _postgres_reachable(url: str) -> bool:
         return False
 
 
+def _test_db_url(url: str) -> str:
+    return make_url(url).set(database="docflow_test").render_as_string(hide_password=False)
+
+
+async def _ensure_database(url: str) -> None:
+    # отдельная база, чтобы downgrade не трогал dev-данные; CREATE DATABASE нельзя внутри транзакции
+    admin = create_async_engine(make_url(url).set(database="postgres"), isolation_level="AUTOCOMMIT")
+    try:
+        async with admin.connect() as conn:
+            exists = await conn.scalar(text("SELECT 1 FROM pg_database WHERE datname = 'docflow_test'"))
+            if not exists:
+                await conn.execute(text("CREATE DATABASE docflow_test"))
+    finally:
+        await admin.dispose()
+
+
 @pytest.mark.integration
 def test_migration_upgrade():
-    url = Settings().database_url
-    if not url.startswith("postgresql") or not _postgres_reachable(url):
+    base_url = Settings().database_url
+    if not base_url.startswith("postgresql") or not _postgres_reachable(base_url):
         pytest.skip("Postgres недоступен (docker compose up -d postgres)")
+    asyncio.run(_ensure_database(base_url))
+    url = _test_db_url(base_url)
     cfg = _config(url)
     command.downgrade(cfg, "base")
     command.upgrade(cfg, "head")
+
     async def check():
         engine = create_async_engine(url)
         async with engine.connect() as conn:

@@ -142,3 +142,38 @@ async def test_webhook_delivery_unique_and_cascade(session):
     await session.delete(ep)
     await session.commit()
     assert (await session.execute(select(WebhookDelivery))).first() is None
+
+
+async def test_builtin_schema_unique_slug_version(session):
+    session.add(SchemaRecord(slug="invoice", version=1, body={}))
+    await session.commit()
+    session.add(SchemaRecord(slug="invoice", version=1, body={}))
+    with pytest.raises(IntegrityError):
+        await session.commit()
+    await session.rollback()
+    session.add(SchemaRecord(slug="invoice", version=2, body={}))
+    await session.commit()
+
+
+async def test_datetimes_roundtrip_as_utc(session):
+    from datetime import UTC, datetime
+
+    t = await _tenant(session)
+    k = ApiKey(tenant_id=t.id, prefix="dfk_aaaa", key_hash="h2", revoked_at=datetime(2026, 1, 1, tzinfo=UTC))
+    session.add(k)
+    await session.commit()
+    key_id = k.id
+    session.expire_all()
+    got = (await session.execute(select(ApiKey).where(ApiKey.id == key_id))).scalar_one()
+    assert got.revoked_at.tzinfo is not None and got.revoked_at.utcoffset().total_seconds() == 0
+    assert got.revoked_at == datetime(2026, 1, 1, tzinfo=UTC)
+    assert got.created_at.tzinfo is not None
+
+
+async def test_naive_datetime_rejected(session):
+    from datetime import datetime
+
+    t = await _tenant(session)
+    session.add(ApiKey(tenant_id=t.id, prefix="p", key_hash="h3", revoked_at=datetime(2026, 1, 1)))
+    with pytest.raises(Exception, match="naive"):
+        await session.commit()
