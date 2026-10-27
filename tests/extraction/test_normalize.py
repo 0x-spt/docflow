@@ -49,7 +49,7 @@ def test_number_ok(raw, expected):
     assert value == expected and isinstance(value, float) and issues == []
 
 
-@pytest.mark.parametrize("raw", ["abc", True, "1,2,3", "nan"])
+@pytest.mark.parametrize("raw", ["abc", True, "1,2,3", "nan", "12.500", "1.234.567", "1,5.00", "1.2.3,4"])
 def test_number_bad(raw):
     value, issues = _one("total", raw)
     assert value is None
@@ -114,3 +114,15 @@ def test_extra_keys_dropped_and_uncertain_filtered():
     assert data["_uncertain"] == ["total"]
     assert data["note"] is None
     assert normalize(_schema(), {})[0]["_uncertain"] == []
+
+
+def test_dot_thousands_integer_is_bad():
+    value, issues = _one("count", "12.000")
+    assert value is None and issues[0].code == "bad_value"
+
+
+def test_plain_dot_decimal_ok():
+    assert _one("total", "7.5") == (7.5, [])
+    assert _one("total", "12.50") == (12.5, [])
+    assert _one("total", "1.234,50") == (1234.5, [])
+    assert _one("total", "1,234.50") == (1234.5, [])

@@ -1,3 +1,4 @@
+import base64
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -57,16 +58,21 @@ def test_request_shape_and_parse():
     content = kw["messages"][0]["content"]
     assert [b["type"] for b in content] == ["image", "image", "image", "text"]
     assert content[0]["source"]["media_type"] == "image/jpeg"
+    assert [b["source"]["data"] for b in content[:3]] == [base64.b64encode(x).decode() for x in (b"a", b"b", b"c")]
     assert "3" in content[-1]["text"]
     assert kw["system"] == system_prompt(SCHEMA)
 
 
-@pytest.mark.parametrize("stop", ["refusal", "max_tokens"])
-def test_stop_reasons_raise(stop):
+@pytest.mark.parametrize(
+    "stop,reason",
+    [("refusal", "refusal"), ("max_tokens", "max_tokens"), ("model_context_window_exceeded", "max_tokens"),
+     ("pause_turn", "api_error")],
+)
+def test_stop_reasons_raise(stop, reason):
     ex = ClaudeExtractor(client=_client(_response([_text("{}")], stop_reason=stop)))
     with pytest.raises(ExtractionError) as e:
         ex.extract(SCHEMA, [b"a"])
-    assert e.value.reason == stop
+    assert e.value.reason == reason
 
 
 def test_invalid_json():
@@ -80,6 +86,7 @@ def test_api_errors_wrapped():
     req = httpx.Request("POST", "https://x")
     excs = [
         anthropic.APIConnectionError(request=req),
+        anthropic.APIResponseValidationError(response=httpx.Response(200, request=req), body=None),
         anthropic.BadRequestError("bad", response=httpx.Response(400, request=req), body=None),
     ]
     for exc in excs:

@@ -39,11 +39,15 @@ class ClaudeExtractor:
                 betas=_BETAS,
                 fallbacks="default",
             )
-        except (anthropic.APIStatusError, anthropic.APIConnectionError) as e:
+        except anthropic.APIError as e:
             # Auth/BadRequest — ошибки конфигурации, не временные: сообщение оставляем видимым.
             raise ExtractionError("api_error", str(e)) from e
-        if response.stop_reason in ("refusal", "max_tokens"):
-            raise ExtractionError(response.stop_reason)
+        if response.stop_reason == "refusal":
+            raise ExtractionError("refusal")
+        if response.stop_reason in ("max_tokens", "model_context_window_exceeded"):
+            raise ExtractionError("max_tokens")
+        if response.stop_reason != "end_turn":
+            raise ExtractionError("api_error", f"неожиданный stop_reason: {response.stop_reason}")
         text = next((b.text for b in response.content if b.type == "text"), None)
         if text is None:
             raise ExtractionError("invalid_json", "в ответе нет текстового блока")

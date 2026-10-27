@@ -11,6 +11,7 @@ from docflow.validation.engine import Issue
 _SPACES = re.compile(r"[\s   ]+")
 _NUM = re.compile(r"[+-]?\d+(\.\d+)?")
 _DMY = re.compile(r"^(\d{1,2})\.(\d{1,2})\.(\d{4}|\d{2})$")
+_DOT_THOUSANDS = re.compile(r"[+-]?\d{1,3}(\.\d{3})+")
 _ISO = re.compile(r"\d{4}-\d{2}-\d{2}")
 _TRUE = {"true", "да"}
 _FALSE = {"false", "нет"}
@@ -31,15 +32,17 @@ def _parse_number(v: Any) -> float:
         raise _Bad
     s = _SPACES.sub("", v)
     if "," in s and "." in s:
-        # последний разделитель — десятичный, другой — разделитель тысяч
+        # последний разделитель — десятичный, другой — разделитель тысяч и стоит только в целой части группами по 3
         dec, thou = (",", ".") if s.rfind(",") > s.rfind(".") else (".", ",")
-        if s.count(dec) != 1:
+        if s.count(dec) != 1 or not re.fullmatch(rf"[+-]?\d{{1,3}}(?:{re.escape(thou)}\d{{3}})*", s.split(dec)[0]):
             raise _Bad
         s = s.replace(thou, "").replace(dec, ".")
     elif "," in s:
         if s.count(",") != 1:
             raise _Bad  # «1,234,567» неоднозначно
         s = s.replace(",", ".")
+    elif _DOT_THOUSANDS.fullmatch(s):
+        raise _Bad  # «12.500» — скорее всего двенадцать тысяч пятьсот, а не 12,5
     if not _NUM.fullmatch(s):
         raise _Bad
     return float(s)
