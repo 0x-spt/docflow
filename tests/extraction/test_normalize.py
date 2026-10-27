@@ -108,12 +108,37 @@ def test_table_none_is_empty():
     assert _one("items", None) == ([], [])
 
 
-def test_extra_keys_dropped_and_uncertain_filtered():
-    data, _ = normalize(_schema(), {"total": "1", "ghost": 5, "_uncertain": ["total", "ghost"]})
+def test_extra_keys_dropped_and_unknown_uncertain_reported():
+    data, issues = normalize(_schema(), {"total": "1", "ghost": 5, "_uncertain": ["total", "ghost"]})
     assert "ghost" not in data
     assert data["_uncertain"] == ["total"]
     assert data["note"] is None
+    # неизвестное имя не теряется молча: документ всё равно уйдёт на проверку
+    assert [(i.field, i.code) for i in issues] == [(None, "uncertain")]
+    assert "«ghost»" in issues[0].message
     assert normalize(_schema(), {})[0]["_uncertain"] == []
+    assert normalize(_schema(), {})[1] == []
+
+
+def test_uncertain_not_a_list_fails_closed():
+    for bad in ("total", {"total": True}, 5, True):
+        data, issues = normalize(_schema(), {"total": "1", "_uncertain": bad})
+        assert data["_uncertain"] == []
+        assert [(i.field, i.code) for i in issues] == [("_uncertain", "uncertain")]
+
+
+def test_uncertain_nested_path_maps_to_top_level_field():
+    raw = {"_uncertain": ["items[0].qty", "items[1].title", "items.qty", "day", "day"]}
+    data, issues = normalize(_schema(), raw)
+    assert data["_uncertain"] == ["items", "day"]
+    assert issues == []
+
+
+def test_uncertain_non_string_entries_reported():
+    data, issues = normalize(_schema(), {"_uncertain": ["total", 7, None, "itemz[0].qty"]})
+    assert data["_uncertain"] == ["total"]
+    assert [(i.field, i.code) for i in issues] == [(None, "uncertain")]
+    assert "«7»" in issues[0].message and "«None»" in issues[0].message and "«itemz[0].qty»" in issues[0].message
 
 
 def test_dot_thousands_integer_is_bad():

@@ -139,7 +139,37 @@ def normalize(schema: DocSchema, raw: dict) -> tuple[dict, list[Issue]]:
             cells = {c.name: _scalar(c, row.get(c.name), f"{f.name}[{i}].{c.name}", issues) for c in f.columns or []}
             rows.append(cells)
         out[f.name] = rows
-    names = {f.name for f in schema.fields}
-    unc = raw.get(UNCERTAIN)
-    out[UNCERTAIN] = [n for n in unc if isinstance(n, str) and n in names] if isinstance(unc, list) else []
+    out[UNCERTAIN] = _uncertain(schema, raw.get(UNCERTAIN), issues)
     return out, issues
+
+
+_TOP_LEVEL = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:[\[.]|$)")
+
+
+def _uncertain(schema: DocSchema, unc: Any, issues: list[Issue]) -> list[str]:
+    """Список полей, в которых модель не уверена, — только имена верхнего уровня.
+
+    Неуверенность модели нельзя молча терять: она переводит документ в needs_review. Поэтому всё, что не
+    удалось сопоставить полю, не отбрасывается, а становится замечанием uncertain (fail closed).
+    """
+    if unc is None:
+        return []  # ключа нет — модель ни в чём не сомневается
+    if not isinstance(unc, list):
+        issues.append(Issue(UNCERTAIN, "uncertain", f"модель вернула неуверенность не списком: «{unc}»"))
+        return []
+    names = {f.name for f in schema.fields}
+    found: list[str] = []
+    unknown: list[str] = []
+    for entry in unc:
+        # «items[0].price» или «items.price» — неуверенность внутри таблицы относится к полю items
+        m = _TOP_LEVEL.match(entry) if isinstance(entry, str) else None
+        name = m[1] if m else None
+        if name in names:
+            if name not in found:
+                found.append(name)
+        else:
+            unknown.append(str(entry))
+    if unknown:
+        listed = ", ".join(f"«{u}»" for u in unknown)
+        issues.append(Issue(None, "uncertain", f"модель не уверена в значениях, которых нет в схеме: {listed}"))
+    return found
