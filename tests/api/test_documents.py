@@ -174,6 +174,24 @@ async def test_enqueue_failure_marks_failed_503(api, auth, monkeypatch):
         doc = (await s.execute(select(Document))).scalar_one()
     assert doc.status == "failed"
     assert doc.error
+    assert doc.finished_at is not None
+
+
+async def test_enqueue_failure_after_worker_claimed_is_202(api, auth, monkeypatch):
+    """Redis принял задачу и оборвал ответ, воркер уже забрал документ: его не перетираем в failed."""
+
+    async def accepted_then_broken(job, document_id, **_k):
+        await set_status(api, document_id, status="processing")
+        raise ConnectionError("ответ Redis потерян")
+
+    monkeypatch.setattr(api.enqueuer, "enqueue", accepted_then_broken)
+    h = {**auth, "Idempotency-Key": "keep-me"}
+    r = await upload(api, h)
+    assert r.status_code == 202, r.text
+    async with api.sessionmaker() as s:
+        doc = (await s.execute(select(Document))).scalar_one()
+    assert doc.status == "processing" and doc.error is None and doc.finished_at is None
+    assert doc.idempotency_key == "keep-me"
 
 
 async def test_enqueue_failure_frees_idempotency_key(api, auth, monkeypatch):

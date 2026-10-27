@@ -3,11 +3,12 @@
 import asyncio
 import logging
 import uuid
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, File, Form, Header, HTTPException, Response, UploadFile, status
 from fastapi.responses import JSONResponse
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -204,14 +205,21 @@ async def upload_document(
     try:
         await enqueuer.enqueue(PROCESS_DOCUMENT, str(doc_id), job_id=process_job_id(doc_id))
     except Exception:
-        # без задачи queued-документ завис бы навсегда; failed честнее, клиент повторит загрузку
+        # без задачи queued-документ ждал бы крона перепостановки; failed сразу честнее — клиент повторит загрузку
         logger.exception("не удалось поставить документ %s в очередь", doc_id)
-        document.status = "failed"
-        document.error = ENQUEUE_ERROR
-        # освобождаем ключ: повтор клиента с тем же Idempotency-Key должен создать документ заново
-        document.idempotency_key = None
+        # Ошибка enqueue не значит, что задачи нет: Redis мог принять её и оборвать ответ, а воркер — уже
+        # забрать документ. Поэтому failed только из queued, условным UPDATE, а не перезаписью статуса.
+        res = await session.execute(
+            update(Document)
+            .where(Document.id == doc_id, Document.status == "queued")
+            # освобождаем ключ: повтор клиента с тем же Idempotency-Key должен создать документ заново
+            .values(status="failed", error=ENQUEUE_ERROR, idempotency_key=None, finished_at=datetime.now(UTC))
+            .execution_options(synchronize_session=False)
+        )
         await session.commit()
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, ENQUEUE_ERROR) from None
+        if res.rowcount == 1:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, ENQUEUE_ERROR) from None
+        logger.info("документ %s уже забран воркером, ошибка постановки не влияет", doc_id)
     return _accepted(document)
 
 
