@@ -1,0 +1,16 @@
+.venv
+.git
+.github
+.superpowers
+.pytest_cache
+.ruff_cache
+**/__pycache__
+**/*.pyc
+*.egg-info
+build
+dist
+data
+evals/*/
+evals/*.json
+.env
+docs

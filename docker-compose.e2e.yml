@@ -1,0 +1,17 @@
+# Сквозной тест без ключа и без сети: экстрактор отвечает заготовкой, вебхуки разрешены на хост.
+#   docker compose -f docker-compose.yml -f docker-compose.e2e.yml up -d --build
+#   uv run pytest -m e2e -v
+x-e2e-env: &e2e-env
+  DOCFLOW_FAKE_EXTRACTOR: "1"
+  DOCFLOW_FAKE_RESPONSES: /app/tests/e2e/fake_responses.json
+  DOCFLOW_WEBHOOK_ALLOW_PRIVATE: "true"
+
+services:
+  api:
+    environment: *e2e-env
+  worker:
+    environment: *e2e-env
+    volumes:
+      - ./tests/e2e/fake_responses.json:/app/tests/e2e/fake_responses.json:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

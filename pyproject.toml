@@ -42,10 +42,10 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-# integration и e2e требуют Postgres/Redis/MinIO/tesseract или реальных моделей — в обычном прогоне их нет
+# integration и e2e требуют сервисов (Postgres/Redis/S3/tesseract) или запущенного стека — в обычном прогоне их нет
 markers = [
     "integration: нужны сервисы из docker-compose и системные tesseract/ghostscript",
-    "e2e: сквозной прогон, может ходить во внешние модели",
+    "e2e: сквозной прогон против стека docker-compose.yml + docker-compose.e2e.yml на localhost:8000",
 ]
 
 [tool.ruff]

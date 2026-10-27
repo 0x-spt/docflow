@@ -110,4 +110,6 @@ class WorkerSettings:
     on_shutdown = shutdown
     redis_settings = RedisSettings.from_dsn(get_settings().redis_url)
     max_jobs = 4
+    # ключ здоровья в Redis обновляется раз в минуту: на нём держится `arq --check` (healthcheck контейнера)
+    health_check_interval = 60
     job_timeout = JOB_TIMEOUT

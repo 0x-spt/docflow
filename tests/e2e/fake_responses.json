@@ -1,0 +1,22 @@
+{
+  "invoice_ru": {
+    "number": "СЧ-0042",
+    "issued": "2026-10-01",
+    "supplier": "ООО «Ромашка»",
+    "supplier_inn": "7707083893",
+    "supplier_kpp": "770701001",
+    "buyer": "ООО «Василёк»",
+    "buyer_inn": "7736050003",
+    "bik": "044525225",
+    "account": "40702810200000000001",
+    "corr_account": "30101810400000000225",
+    "items": [
+      {"name": "Бумага офисная А4", "qty": 10, "unit": "пач.", "price": 350, "amount": 3500},
+      {"name": "Доставка", "qty": 1, "unit": "усл.", "price": 500, "amount": 500}
+    ],
+    "subtotal": 4000,
+    "total": 4800,
+    "vat": 800,
+    "_uncertain": []
+  }
+}

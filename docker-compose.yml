@@ -1,4 +1,18 @@
-# Только внешние сервисы; API и воркер в разработке запускаются через uv run.
+# Полный стек DocFlow: docker compose up -d --build
+# Порты на хосте: API 8000, Postgres 55432 (5432 часто занят локальным Postgres), Redis 6379, S3 8333.
+x-app-env: &app-env
+  DOCFLOW_DATABASE_URL: postgresql+asyncpg://docflow:docflow@postgres:5432/docflow
+  DOCFLOW_REDIS_URL: redis://redis:6379/0
+  DOCFLOW_BLOB_BACKEND: s3
+  DOCFLOW_S3_ENDPOINT: http://s3:8333
+  DOCFLOW_S3_BUCKET: docflow
+  DOCFLOW_S3_ACCESS_KEY: docflow
+  DOCFLOW_S3_SECRET_KEY: docflow-secret
+  DOCFLOW_PUBLIC_BASE_URL: ${DOCFLOW_PUBLIC_BASE_URL:-http://localhost:8000}
+  DOCFLOW_ANTHROPIC_MODEL: ${DOCFLOW_ANTHROPIC_MODEL:-claude-opus-5-5}
+  # ключ берётся с хоста; без него работают только fake-экстрактор и Ollama
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+
 services:
   postgres:
     image: postgres:16
@@ -6,19 +20,92 @@ services:
       POSTGRES_USER: docflow
       POSTGRES_PASSWORD: docflow
       POSTGRES_DB: docflow
-    ports: ["5432:5432"]
+    ports: ["55432:5432"]
     volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U docflow -d docflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   redis:
     image: redis:7
     ports: ["6379:6379"]
-  minio:
-    image: minio/minio
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-    ports: ["9000:9000", "9001:9001"]
-    volumes: ["miniodata:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # S3-совместимое хранилище (SeaweedFS); ключи доступа — в docker/s3.json
+  s3:
+    image: chrislusf/seaweedfs:4.50
+    command: server -dir=/data -ip.bind=0.0.0.0 -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json
+    ports: ["8333:8333"]
+    volumes:
+      - s3data:/data
+      - ./docker/s3.json:/etc/seaweedfs/s3.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8333/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  # одноразовый: миграции и встроенные схемы, потом api/worker стартуют
+  migrate:
+    build: {context: ., dockerfile: docker/Dockerfile, target: api}
+    image: docflow-api
+    command: ["sh", "-c", "alembic upgrade head && docflow seed-schemas"]
+    environment: *app-env
+    depends_on:
+      postgres: {condition: service_healthy}
+    restart: "no"
+
+  api:
+    image: docflow-api
+    build: {context: ., dockerfile: docker/Dockerfile, target: api}
+    environment: *app-env
+    ports: ["8000:8000"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      s3: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 5
+    restart: unless-stopped
+
+  worker:
+    image: docflow-worker
+    build: {context: ., dockerfile: docker/Dockerfile, target: worker}
+    environment: *app-env
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      s3: {condition: service_healthy}
+    healthcheck:
+      # arq --check: свежий ли ключ здоровья, который воркер пишет в Redis раз в health_check_interval
+      test: ["CMD", "arq", "--check", "docflow.worker.WorkerSettings"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+    restart: unless-stopped
+
+  # интеграционные тесты внутри сети стека (tesseract есть только в образе воркера):
+  #   docker compose --profile test run --rm test
+  test:
+    profiles: ["test"]
+    image: docflow-test
+    build: {context: ., dockerfile: docker/Dockerfile, target: test}
+    environment: *app-env
+    depends_on:
+      postgres: {condition: service_healthy}
+      s3: {condition: service_healthy}
+
 volumes:
   pgdata:
-  miniodata:
+  s3data:
