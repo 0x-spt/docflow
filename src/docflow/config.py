@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     max_file_mb: int = 20
     max_pages: int = 30
 
+    # демо и e2e без модели: все экстракторы воркера отвечают заготовками из JSON {slug: ответ}
+    fake_extractor: bool = False
+    fake_responses: Path = Path("tests/e2e/fake_responses.json")
+
 
 @lru_cache
 def get_settings() -> Settings:
