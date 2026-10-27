@@ -12,3 +12,7 @@ def test_settings_env_prefix(monkeypatch):
 
 def test_defaults():
     assert Settings().anthropic_model == "claude-opus-5-5"
+
+
+def test_public_base_url_default():
+    assert Settings().public_base_url == "http://localhost:8000"

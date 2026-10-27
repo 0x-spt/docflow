@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     ollama_url: str = "http://localhost:11434"
     ollama_model: str = "qwen2.5vl:7b"
 
+    # внешний адрес API: попадает в pdf_url в ответах и вебхуках
+    public_base_url: str = "http://localhost:8000"
+
     # лимиты на входе: проверяем при загрузке, чтобы воркер не получал мусор
     max_file_mb: int = 20
     max_pages: int = 30
