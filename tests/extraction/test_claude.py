@@ -105,3 +105,13 @@ def test_system_prompt_deterministic_and_has_title():
 def test_fake():
     ex = FakeExtractor({"t_doc": {"total": 1}})
     assert ex.extract(SCHEMA, []).raw == {"total": 1}
+
+
+def test_default_client_fits_job_timeout(monkeypatch):
+    """Свой клиент SDK: таймаут и повторы укладываются в job_timeout воркера, а не SDK-шные 10 минут × 3."""
+    from docflow.worker import JOB_TIMEOUT
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    ex = ClaudeExtractor()
+    assert ex.client.timeout == 240.0 < JOB_TIMEOUT
+    assert ex.client.max_retries == 1

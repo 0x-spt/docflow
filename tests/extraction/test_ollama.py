@@ -56,3 +56,10 @@ def test_errors_mapped():
     with pytest.raises(ExtractionError) as e:
         OllamaExtractor(URL, "m").extract(SCHEMA, [b"x"])
     assert e.value.reason == "invalid_json"
+
+
+def test_default_http_timeout_fits_job_timeout():
+    from docflow.worker import JOB_TIMEOUT
+
+    ex = OllamaExtractor("http://localhost:11434", "m")
+    assert ex.http.timeout.read == 240.0 < JOB_TIMEOUT

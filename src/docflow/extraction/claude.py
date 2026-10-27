@@ -9,13 +9,19 @@ from docflow.schemas.llm import to_json_schema
 from docflow.schemas.model import DocSchema
 
 _BETAS = ["server-side-fallback-2026-07-01"]
+# Бюджет одного запроса должен укладываться в job_timeout воркера (300 с, см. worker.JOB_TIMEOUT):
+# по умолчанию SDK ждёт до 10 минут и делает 2 повтора — задачу убил бы arq, а поток с запросом жил бы дальше.
+# Один повтор оставлен для быстрых отказов (429/529/обрыв соединения); повтор после таймаута в бюджет
+# не влезет — тогда документ закроет job_timeout как failed.
+CLIENT_TIMEOUT = 240.0
+CLIENT_MAX_RETRIES = 1
 
 
 class ClaudeExtractor:
     def __init__(self, model: str = "claude-opus-5-5", client: anthropic.Anthropic | None = None, effort: str = "high"):
         self.model = model
         self.effort = effort
-        self.client = client or anthropic.Anthropic()
+        self.client = client or anthropic.Anthropic(timeout=CLIENT_TIMEOUT, max_retries=CLIENT_MAX_RETRIES)
 
     def extract(self, schema: DocSchema, images: list[bytes]) -> Extraction:
         content: list[dict] = [

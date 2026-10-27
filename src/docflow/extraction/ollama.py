@@ -8,7 +8,9 @@ from docflow.extraction.base import Extraction, ExtractionError, system_prompt
 from docflow.schemas.llm import to_json_schema
 from docflow.schemas.model import DocSchema
 
-_TIMEOUT = 300.0  # локальная 7B VLM медленная
+# локальная 7B VLM медленная, но ответ обязан успеть до job_timeout воркера (300 с, см. worker.JOB_TIMEOUT)
+# вместе с подготовкой страниц и OCR; без повторов
+_TIMEOUT = 240.0
 
 
 class OllamaExtractor:
