@@ -14,10 +14,15 @@ function str(form: FormData, key: string): string {
   return typeof v === "string" ? v.trim() : "";
 }
 
-/** Сообщение валидации FastAPI/pydantic без служебного префикса «Value error, ». */
+// известные русские ответы API (src/docflow/api/leads.py); прочий текст 422 (pydantic, по-английски) не показываем
+const KNOWN_422: Record<string, string> = {
+  "нужно согласие на обработку персональных данных":
+    "Без согласия на обработку персональных данных мы не можем принять заявку.",
+};
+
 function humanize(detail: string): string {
-  const text = detail.replace(/Value error,\s*/g, "").trim();
-  return text ? text.charAt(0).toUpperCase() + text.slice(1) : FAILED;
+  for (const [needle, text] of Object.entries(KNOWN_422)) if (detail.includes(needle)) return text;
+  return FAILED;
 }
 
 /** Заявка на аудит: проверка полей, затем POST /v1/leads без сессии. */
@@ -43,7 +48,7 @@ export async function submitLead(_prev: LeadState, form: FormData): Promise<Lead
     documents: values.documents || undefined,
     message: values.message || undefined,
     consent: true,
-    website: str(form, "website") || undefined,
+    website: str(form, "hp_field_x") || undefined,
   };
 
   try {

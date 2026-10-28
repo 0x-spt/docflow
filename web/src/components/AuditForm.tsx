@@ -12,10 +12,14 @@ export function AuditForm() {
   const [state, action, pending] = useActionState(submitLead, INITIAL_LEAD_STATE);
   const doneRef = useRef<HTMLHeadingElement>(null);
   const messageRef = useRef<HTMLDivElement>(null);
+  const formRef = useRef<HTMLFormElement>(null);
 
+  // после ответа сервера фокус — на результат: заголовок успеха, первое ошибочное поле или общее сообщение
   useEffect(() => {
     if (state.ok) doneRef.current?.focus();
-    else if (state.message) messageRef.current?.focus();
+    else if (state.errors && Object.keys(state.errors).length) {
+      formRef.current?.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus();
+    } else if (state.message) messageRef.current?.focus();
   }, [state]);
 
   if (state.ok) {
@@ -40,6 +44,7 @@ export function AuditForm() {
     // key: после ответа сервера поля пересоздаются с введёнными значениями (React сбрасывает форму после action)
     <form
       key={JSON.stringify(state)}
+      ref={formRef}
       action={action}
       noValidate
       aria-busy={pending}
@@ -115,10 +120,10 @@ export function AuditForm() {
         defaultValue={v.message}
       />
 
-      {/* приманка для ботов: человек это поле не видит и не заполняет */}
-      <div aria-hidden="true" className="absolute -left-[10000px] top-auto h-px w-px overflow-hidden">
-        <label htmlFor="f-website">Сайт (оставьте пустым)</label>
-        <input id="f-website" name="website" type="text" tabIndex={-1} autoComplete="off" defaultValue="" />
+      {/* приманка для ботов: вне экрана и inert — человек и автозаполнение её не трогают; в API уходит как website */}
+      <div inert className="absolute -left-[10000px] top-auto h-px w-px overflow-hidden">
+        <label htmlFor="f-hp_field_x">Не заполняйте это поле</label>
+        <input id="f-hp_field_x" name="hp_field_x" type="text" tabIndex={-1} autoComplete="off" defaultValue="" />
       </div>
 
       <div className="flex flex-col gap-1.5">

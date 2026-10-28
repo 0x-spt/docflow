@@ -1,7 +1,6 @@
 import { Button, StatusBadge } from "@/components/ui";
 
 const ROWS = [
-  { field: "Дата", value: "24.10.2026", ok: true, check: "дата корректна" },
   { field: "Сумма строк", value: "20 000,00", ok: true, check: "сложено по таблице" },
   { field: "Итог", value: "21 000,00", ok: false, check: "не сходится с суммой строк" },
 ];
@@ -20,7 +19,7 @@ export function Hero() {
       <div className="mt-12 grid gap-12 lg:mt-16 lg:grid-cols-12 lg:gap-8">
         <div className="lg:col-span-6">
           <p className="max-w-xl text-xl leading-relaxed sm:text-2xl sm:leading-snug">
-            Фото или скан любого документа превращается в чистый PDF с поиском по тексту и в данные по вашей
+            Фото или скан вашего документа превращается в чистый PDF с поиском по тексту и в данные по вашей
             схеме. Каждое поле проверяется по правилам — спорное идёт человеку, остальное уходит в вашу систему.
           </p>
           <div className="mt-10 flex flex-col gap-4 sm:flex-row">
