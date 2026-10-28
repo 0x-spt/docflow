@@ -1,7 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { unstable_rethrow } from "next/navigation";
+import { redirect, unstable_rethrow } from "next/navigation";
 
 import { ApiError } from "@/lib/api";
 import { apiFetchAuthed } from "@/lib/session";
@@ -27,14 +27,25 @@ export async function createKey(): Promise<KeyState> {
   }
 }
 
+const ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Коды ошибок для ?err=… — страница показывает по ним фиксированный текст. */
+export type SettingsErr = "key_forbidden" | "key_failed" | "hook_failed";
+
 export async function revokeKey(id: string): Promise<void> {
-  try {
-    await apiFetchAuthed<void>(`/v1/api-keys/${encodeURIComponent(id)}`, { method: "DELETE" });
-  } catch (e) {
-    unstable_rethrow(e);
-    if (!(e instanceof ApiError && (e.status === 404 || e.status === 403))) console.error("ключ не отозван", e);
+  let err: SettingsErr | null = null;
+  if (!ID_RE.test(id)) err = "key_failed";
+  else {
+    try {
+      await apiFetchAuthed<void>(`/v1/api-keys/${id}`, { method: "DELETE" });
+    } catch (e) {
+      unstable_rethrow(e);
+      err = e instanceof ApiError && e.status === 403 ? "key_forbidden" : "key_failed";
+      if (!(e instanceof ApiError)) console.error("ключ не отозван", e);
+    }
   }
   revalidatePath("/app/settings");
+  redirect(err ? `/app/settings?err=${err}` : "/app/settings");
 }
 
 export async function createWebhook(_prev: WebhookState, form: FormData): Promise<WebhookState> {
@@ -59,11 +70,19 @@ export async function createWebhook(_prev: WebhookState, form: FormData): Promis
 }
 
 export async function deleteWebhook(id: string): Promise<void> {
-  try {
-    await apiFetchAuthed<void>(`/v1/webhooks/${encodeURIComponent(id)}`, { method: "DELETE" });
-  } catch (e) {
-    unstable_rethrow(e);
-    if (!(e instanceof ApiError && e.status === 404)) console.error("вебхук не удалён", e);
+  let err: SettingsErr | null = null;
+  if (!ID_RE.test(id)) err = "hook_failed";
+  else {
+    try {
+      await apiFetchAuthed<void>(`/v1/webhooks/${id}`, { method: "DELETE" });
+    } catch (e) {
+      unstable_rethrow(e);
+      if (!(e instanceof ApiError && e.status === 404)) {
+        err = "hook_failed";
+        if (!(e instanceof ApiError)) console.error("вебхук не удалён", e);
+      }
+    }
   }
   revalidatePath("/app/settings");
+  redirect(err ? `/app/settings?err=${err}` : "/app/settings");
 }

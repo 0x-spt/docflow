@@ -12,6 +12,9 @@ export type DictState = { error?: string; saved?: boolean; name?: string; title?
 const NAME_RE = /^[a-z0-9_]{2,40}$/;
 const FAILED = "Не удалось сохранить справочник: сервис недоступен. Попробуйте ещё раз.";
 
+/** Коды ошибок для ?error=… — страница показывает по ним фиксированный текст. */
+export type DictErr = "conflict" | "failed" | "delete_failed";
+
 const path = (name: string) => `/v1/dictionaries/${encodeURIComponent(name)}`;
 
 function put(name: string, title: string, entries: DictionaryEntry[]) {
@@ -41,11 +44,12 @@ export async function createDictionary(_prev: DictState, form: FormData): Promis
     console.error("справочник не создан", e);
     return { ...keep, error: FAILED };
   }
-  redirect(`/app/dictionaries/${name}`);
+  redirect(`/app/dictionaries/${encodeURIComponent(name)}`);
 }
 
 /** Сохранить справочник целиком: поля `value` и `aliases` идут парами в порядке строк. */
 export async function saveDictionary(name: string, _prev: DictState, form: FormData): Promise<DictState> {
+  if (!NAME_RE.test(name)) return { error: "Некорректное имя справочника" };
   const title = String(form.get("title") ?? "").trim();
   const values = form.getAll("value").map(String);
   const aliases = form.getAll("aliases").map(String);
@@ -73,7 +77,8 @@ export async function saveDictionary(name: string, _prev: DictState, form: FormD
 
 /** Подсказка → в справочник. Справочник перечитываем: правки в другой вкладке не должны теряться. */
 async function applySuggestion(name: string, value: string, nearest: string | null) {
-  let error: string | null = null;
+  if (!NAME_RE.test(name)) redirect("/app/dictionaries");
+  let error: DictErr | null = null;
   try {
     const dict = await apiFetchAuthed<Dictionary>(path(name));
     const entries = (dict.entries ?? []).map((e) => ({ value: e.value, aliases: [...e.aliases] }));
@@ -86,11 +91,11 @@ async function applySuggestion(name: string, value: string, nearest: string | nu
     await put(name, dict.title, entries);
   } catch (e) {
     unstable_rethrow(e);
-    error = e instanceof ApiError ? e.detail : FAILED;
+    error = e instanceof ApiError && e.status === 422 ? "conflict" : "failed";
     if (!(e instanceof ApiError)) console.error("подсказка не применена", name, e);
   }
   revalidatePath(`/app/dictionaries/${name}`);
-  redirect(`/app/dictionaries/${name}${error ? `?error=${encodeURIComponent(error)}` : ""}`);
+  redirect(`/app/dictionaries/${encodeURIComponent(name)}${error ? `?error=${error}` : ""}`);
 }
 
 export async function addAlias(name: string, value: string, nearest: string): Promise<void> {
@@ -102,13 +107,14 @@ export async function addEntry(name: string, value: string): Promise<void> {
 }
 
 export async function deleteDictionary(name: string): Promise<void> {
+  if (!NAME_RE.test(name)) redirect("/app/dictionaries");
   try {
     await apiFetchAuthed<void>(path(name), { method: "DELETE" });
   } catch (e) {
     unstable_rethrow(e);
     if (!(e instanceof ApiError && e.status === 404)) {
       console.error("справочник не удалён", name, e);
-      redirect(`/app/dictionaries/${name}?error=${encodeURIComponent("Не удалось удалить справочник")}`);
+      redirect(`/app/dictionaries/${encodeURIComponent(name)}?error=delete_failed`);
     }
   }
   redirect("/app/dictionaries");

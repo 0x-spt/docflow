@@ -1,5 +1,6 @@
 "use server";
 
+import { randomUUID } from "node:crypto";
 import { redirect, unstable_rethrow } from "next/navigation";
 
 import { ApiError } from "@/lib/api";
@@ -11,13 +12,12 @@ const MODES = new Set(["gray", "color", "bw"]);
 const FAILED = "Не удалось загрузить документ: сервис недоступен. Попробуйте ещё раз.";
 
 /**
- * Загрузка документа: пересылаем файлы в API как multipart. Ключ идемпотентности приходит из формы
- * (один на показ страницы), поэтому двойной клик или повтор не создадут второй документ.
+ * Загрузка документа: пересылаем файлы в API как multipart. Ключ идемпотентности — новый на каждую отправку:
+ * ключ «на показ страницы» после «Назад» вернул бы старый документ вместо нового.
  */
 export async function uploadDocument(_prev: UploadState, form: FormData): Promise<UploadState> {
   const schema = String(form.get("schema") ?? "").trim();
   const mode = String(form.get("mode") ?? "gray");
-  const key = String(form.get("idempotency_key") ?? "").trim();
   // пустое поле выбора файла браузер присылает как File без имени и размера
   const files = form.getAll("files").filter((f): f is File => f instanceof File && f.size > 0);
 
@@ -34,7 +34,7 @@ export async function uploadDocument(_prev: UploadState, form: FormData): Promis
   try {
     const accepted = await apiFetchAuthed<{ id: string; status: string }>("/v1/documents", {
       method: "POST",
-      headers: key ? { "Idempotency-Key": key.slice(0, 255) } : undefined,
+      headers: { "Idempotency-Key": randomUUID() },
       body,
     });
     id = accepted.id;

@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 import { UploadForm } from "@/components/app/UploadForm";
 import { apiFetchAuthed } from "@/lib/session";
 import type { SchemaListItem } from "@/lib/types";
@@ -19,8 +17,7 @@ export default async function UploadPage() {
       {schemas.length === 0 ? (
         <p className="border-2 border-ink bg-card p-6">Нет доступных типов документов.</p>
       ) : (
-        // ключ создаётся при показе страницы: повторная отправка той же формы не создаст второй документ
-        <UploadForm schemas={schemas} idempotencyKey={randomUUID()} />
+        <UploadForm schemas={schemas} />
       )}
     </div>
   );

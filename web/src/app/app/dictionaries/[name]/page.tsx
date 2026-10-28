@@ -11,6 +11,11 @@ import type { Dictionary, Suggestion } from "@/lib/types";
 export const metadata = { title: "Справочник — DocFlow" };
 
 const LINK = "underline decoration-2 underline-offset-4 hover:text-accent-text";
+const ERRORS: Record<string, string> = {
+  conflict: "Не удалось добавить: значение совпадает с другой записью справочника.",
+  failed: "Не удалось применить подсказку. Попробуйте ещё раз.",
+  delete_failed: "Не удалось удалить справочник. Попробуйте ещё раз.",
+};
 const NAME_RE = /^[a-z0-9_]{2,40}$/;
 
 function one(v: string | string[] | undefined): string | undefined {
@@ -27,7 +32,8 @@ export default async function DictionaryPage({
   const { name } = await params;
   if (!NAME_RE.test(name)) notFound();
   const sp = await searchParams;
-  const error = one(sp.error);
+  const errCode = one(sp.error);
+  const error = errCode && Object.hasOwn(ERRORS, errCode) ? ERRORS[errCode] : undefined;
   const confirmDelete = one(sp.confirm) === "delete";
 
   let dict: Dictionary;

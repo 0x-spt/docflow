@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 import { CreateKeyForm } from "@/components/app/CreateKeyForm";
 import { CreateWebhookForm } from "@/components/app/CreateWebhookForm";
 import { Section } from "@/components/ui";
@@ -16,7 +18,28 @@ function publicApiUrl(): string {
   return (process.env.DOCFLOW_PUBLIC_API_URL ?? "http://localhost:8000").replace(/\/+$/, "");
 }
 
-export default async function SettingsPage() {
+const ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ERRORS: Record<string, string> = {
+  key_forbidden: "Ключами управляет только владелец аккаунта.",
+  key_failed: "Не удалось отозвать ключ. Проверьте соединение и попробуйте ещё раз.",
+  hook_failed: "Не удалось удалить вебхук. Проверьте соединение и попробуйте ещё раз.",
+};
+
+function one(v: string | string[] | undefined): string | undefined {
+  return Array.isArray(v) ? v[0] : v;
+}
+
+export default async function SettingsPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const sp = await searchParams;
+  const errCode = one(sp.err);
+  const errorText = errCode && Object.hasOwn(ERRORS, errCode) ? ERRORS[errCode] : null;
+  // подтверждение без JS-диалогов: ?confirm=key:<uuid> или ?confirm=webhook:<uuid>
+  const [confirmKind, confirmId] = (one(sp.confirm) ?? "").split(":");
+  const confirming = confirmId && ID_RE.test(confirmId) ? { kind: confirmKind, id: confirmId } : null;
   const me = await requireMe();
   const isOwner = me.user?.role === "owner";
   const [keys, hooks] = await Promise.all([
@@ -39,6 +62,12 @@ export default async function SettingsPage() {
         <h1 className="text-4xl font-semibold tracking-tight">Интеграции</h1>
         <p className="mt-1 text-muted">Ключи API и вебхуки: подключите DocFlow к своей учётной системе.</p>
       </div>
+
+      {errorText ? (
+        <div role="alert" className="mb-4 border-2 border-accent-text bg-paper p-4 font-medium text-accent-text">
+          {errorText}
+        </div>
+      ) : null}
 
       <Section num="01" title="Ключи API" meta={isOwner ? `${keys.filter((k) => !k.revoked_at).length} активных` : undefined}>
         {isOwner ? (
@@ -72,12 +101,25 @@ export default async function SettingsPage() {
                           )}
                         </td>
                         <td className="px-3 py-1.5">
-                          {k.revoked_at ? null : (
-                            <form action={revokeKey.bind(null, k.id)}>
-                              <button type="submit" className={SMALL_BTN} aria-label={`Отозвать ключ ${k.prefix}`}>
-                                Отозвать
-                              </button>
-                            </form>
+                          {k.revoked_at ? null : confirming?.kind === "key" && confirming.id === k.id ? (
+                            <div className="flex flex-wrap items-center gap-2">
+                              <form action={revokeKey.bind(null, k.id)}>
+                                <button type="submit" className={SMALL_BTN}>
+                                  Точно отозвать?
+                                </button>
+                              </form>
+                              <Link href="/app/settings" className={SMALL_BTN}>
+                                Отмена
+                              </Link>
+                            </div>
+                          ) : (
+                            <Link
+                              href={`/app/settings?confirm=key:${k.id}`}
+                              className={SMALL_BTN}
+                              aria-label={`Отозвать ключ ${k.prefix}`}
+                            >
+                              Отозвать
+                            </Link>
                           )}
                         </td>
                       </tr>
@@ -122,11 +164,26 @@ export default async function SettingsPage() {
                         {formatDateTime(h.created_at)}
                       </td>
                       <td className="px-3 py-1.5">
-                        <form action={deleteWebhook.bind(null, h.id)}>
-                          <button type="submit" className={SMALL_BTN} aria-label={`Удалить вебхук ${h.url}`}>
+                        {confirming?.kind === "webhook" && confirming.id === h.id ? (
+                          <div className="flex flex-wrap items-center gap-2">
+                            <form action={deleteWebhook.bind(null, h.id)}>
+                              <button type="submit" className={SMALL_BTN}>
+                                Точно удалить?
+                              </button>
+                            </form>
+                            <Link href="/app/settings" className={SMALL_BTN}>
+                              Отмена
+                            </Link>
+                          </div>
+                        ) : (
+                          <Link
+                            href={`/app/settings?confirm=webhook:${h.id}`}
+                            className={SMALL_BTN}
+                            aria-label={`Удалить вебхук ${h.url}`}
+                          >
                             Удалить
-                          </button>
-                        </form>
+                          </Link>
+                        )}
                       </td>
                     </tr>
                   ))}

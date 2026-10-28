@@ -22,7 +22,7 @@ function size(bytes: number): string {
 }
 
 /** Форма загрузки: схема, файлы (input + перетаскивание), режим. Без JS работает как обычная форма. */
-export function UploadForm({ schemas, idempotencyKey }: { schemas: SchemaListItem[]; idempotencyKey: string }) {
+export function UploadForm({ schemas }: { schemas: SchemaListItem[] }) {
   const [state, action, pending] = useActionState(uploadDocument, INITIAL);
   const [files, setFiles] = useState<File[]>([]);
   const [over, setOver] = useState(false);
@@ -60,8 +60,6 @@ export function UploadForm({ schemas, idempotencyKey }: { schemas: SchemaListIte
 
   return (
     <form action={action} onSubmit={onSubmit} aria-busy={pending} className="flex flex-col gap-6">
-      <input type="hidden" name="idempotency_key" value={idempotencyKey} />
-
       {state.error ? (
         <div
           ref={alertRef}
