@@ -106,6 +106,38 @@ class ApiKey(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
 
 
+class User(Base):
+    """Человек, входящий в кабинет. Пароль — argon2id; сам пароль нигде не храним."""
+
+    __tablename__ = "users"
+    __table_args__ = (
+        CheckConstraint("role IN ('owner', 'operator')", name="role"),
+        UniqueConstraint("email", name="email"),
+    )
+
+    id: Mapped[uuid.UUID] = _id()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"))
+    email: Mapped[str] = mapped_column(String)  # всегда в нижнем регистре
+    password_hash: Mapped[str] = mapped_column(String)
+    role: Mapped[str] = mapped_column(String, default="owner")
+    created_at: Mapped[datetime] = _created()
+    disabled_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+
+
+class Session(Base):
+    """Сессия человека (токен dfs_…). В БД только sha256 токена."""
+
+    __tablename__ = "sessions"
+    __table_args__ = (UniqueConstraint("token_hash", name="token_hash"),)
+
+    id: Mapped[uuid.UUID] = _id()
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    token_hash: Mapped[str] = mapped_column(String)
+    created_at: Mapped[datetime] = _created()
+    expires_at: Mapped[datetime] = mapped_column(UtcDateTime())
+    revoked_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+
+
 class SchemaRecord(Base):
     __tablename__ = "schemas"
     __table_args__ = (UniqueConstraint("tenant_id", "slug", "version", name="tenant_slug_version"),

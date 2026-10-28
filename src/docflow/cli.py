@@ -8,15 +8,18 @@ import argparse
 import asyncio
 import json
 import logging
+import secrets
+import string
 import sys
 import uuid
 from pathlib import Path
 
 from sqlalchemy import select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
+from docflow.auth import MIN_PASSWORD, hash_password
 from docflow.config import get_settings
-from docflow.db.models import ApiKey, SchemaRecord, Tenant, generate_api_key
+from docflow.db.models import ApiKey, SchemaRecord, Tenant, User, generate_api_key
 from docflow.db.session import make_engine, make_sessionmaker
 from docflow.evaluation import format_report, run_eval
 from docflow.extraction.base import Extractor
@@ -131,6 +134,43 @@ def cmd_set_auto_ok(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _create_user(tenant_id: uuid.UUID, email: str, role: str, password: str) -> None:
+    engine = make_engine(get_settings().database_url)
+    try:
+        async with make_sessionmaker(engine)() as session:
+            if await session.get(Tenant, tenant_id) is None:
+                raise UserError(f"клиент {tenant_id} не найден")
+            if (await session.execute(select(User.id).where(User.email == email))).first() is not None:
+                raise UserError(f"пользователь {email} уже есть")
+            session.add(User(tenant_id=tenant_id, email=email, password_hash=hash_password(password), role=role))
+            try:
+                await session.commit()
+            except IntegrityError:  # гонка двух одинаковых create-user
+                raise UserError(f"пользователь {email} уже есть") from None
+    finally:
+        await engine.dispose()
+
+
+def cmd_create_user(args: argparse.Namespace) -> int:
+    try:
+        tenant_id = uuid.UUID(args.tenant_id)
+    except ValueError:
+        raise UserError(f"«{args.tenant_id}» — не id клиента") from None
+    email = args.email.strip().lower()
+    if "@" not in email:
+        raise UserError(f"«{args.email}» — не email")
+    generated = args.password is None
+    password = args.password or "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(16))
+    if len(password) < MIN_PASSWORD:
+        raise UserError(f"пароль короче {MIN_PASSWORD} символов")
+    asyncio.run(_create_user(tenant_id, email, args.role, password))
+    print(f"Пользователь {email} создан, роль {args.role}.")
+    if generated:
+        print(f"Пароль: {password}")
+        print("ВНИМАНИЕ: пароль больше не будет показан. Передайте его сейчас.")
+    return 0
+
+
 async def _seed_schemas() -> int:
     engine = make_engine(get_settings().database_url)
     added = 0
@@ -182,6 +222,13 @@ def build_parser() -> argparse.ArgumentParser:
     sa.add_argument("tenant_id", help="id клиента (печатается при create-tenant)")
     sa.add_argument("value", choices=["yes", "no"])
     sa.set_defaults(func=cmd_set_auto_ok)
+
+    cu = sub.add_parser("create-user", help="создать пользователя кабинета для клиента")
+    cu.add_argument("tenant_id", help="id клиента (печатается при create-tenant)")
+    cu.add_argument("email")
+    cu.add_argument("--role", choices=["owner", "operator"], default="owner")
+    cu.add_argument("--password", help=f"пароль (от {MIN_PASSWORD} символов); без него будет сгенерирован")
+    cu.set_defaults(func=cmd_create_user)
 
     ss = sub.add_parser("seed-schemas", help="загрузить встроенные схемы в БД (повторный запуск безопасен)")
     ss.set_defaults(func=cmd_seed_schemas)

@@ -171,3 +171,58 @@ def test_set_auto_ok(db_url, capsys):
 def test_set_auto_ok_unknown_tenant_exit_1(db_url, capsys):
     assert main(["set-auto-ok", "00000000-0000-0000-0000-000000000000", "yes"]) == 1
     assert main(["set-auto-ok", "not-a-uuid", "yes"]) == 1
+
+
+def _make_tenant_id(db_url):
+    async def make(s):
+        t = Tenant(name="Ромашка")
+        s.add(t)
+        await s.commit()
+        return t.id
+
+    return _query(db_url, make)
+
+
+def test_create_user_prints_password_once(db_url, capsys):
+    from docflow.auth import verify_password
+    from docflow.db.models import User
+
+    tid = _make_tenant_id(db_url)
+    assert main(["create-user", str(tid), "  Anna@Example.com "]) == 0
+    out = capsys.readouterr().out
+    password = next(line.split(": ", 1)[1].strip() for line in out.splitlines() if line.startswith("Пароль: "))
+    assert len(password) == 16
+
+    u = _query(db_url, lambda s: s.scalar(select(User)))
+    assert u.email == "anna@example.com" and u.role == "owner" and u.tenant_id == tid
+    assert verify_password(u.password_hash, password)
+
+
+def test_create_user_explicit_password_and_role(db_url, capsys):
+    from docflow.db.models import User
+
+    tid = _make_tenant_id(db_url)
+    assert main(["create-user", str(tid), "op@example.com", "--role", "operator", "--password", "long-enough-1"]) == 0
+    assert "long-enough-1" not in capsys.readouterr().out
+    assert _query(db_url, lambda s: s.scalar(select(User.role))) == "operator"
+
+
+def test_create_user_short_password_exit_1(db_url, capsys):
+    tid = _make_tenant_id(db_url)
+    assert main(["create-user", str(tid), "a@example.com", "--password", "short"]) == 1
+    assert "10" in capsys.readouterr().err
+
+
+def test_create_user_duplicate_email_exit_1(db_url, capsys):
+    tid = _make_tenant_id(db_url)
+    assert main(["create-user", str(tid), "a@example.com"]) == 0
+    capsys.readouterr()
+    assert main(["create-user", str(tid), "A@example.com"]) == 1
+    assert "уже" in capsys.readouterr().err
+
+
+def test_create_user_unknown_tenant_exit_1(db_url, capsys):
+    import uuid
+
+    assert main(["create-user", str(uuid.uuid4()), "a@example.com"]) == 1
+    assert "не найден" in capsys.readouterr().err

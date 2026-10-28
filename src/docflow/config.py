@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     # потолок всего тела POST /v1/documents: 30 фото с телефона по ~5 МБ плюс запас; режется до разбора multipart
     max_request_mb: int = 200
 
+    # общий секрет сайта и API: только с ним API верит заголовку X-Client-IP (иначе адрес берётся из соединения)
+    internal_token: str = ""
+
     # демо и e2e без модели: все экстракторы воркера отвечают заготовками из JSON {slug: ответ}
     fake_extractor: bool = False
     # второй ключ-предохранитель: один случайно оставленный FAKE_EXTRACTOR в проде не должен подменить
