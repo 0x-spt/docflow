@@ -13,7 +13,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from docflow.api import auth, dictionaries, documents, schemas, webhooks
+from docflow.api import auth, dictionaries, documents, leads, schemas, webhooks
 from docflow.api.limits import RequestSizeLimit
 from docflow.api.ratelimit import SlidingWindowLimiter
 from docflow.config import Settings, get_settings
@@ -73,6 +73,8 @@ def create_app(
     # попытки входа считаем в памяти процесса; у каждого приложения свои счётчики
     app.state.login_email_limiter = SlidingWindowLimiter(limit=5, window_s=900)
     app.state.login_ip_limiter = SlidingWindowLimiter(limit=20, window_s=900)
+    # заявки с сайта: 5 в час с одного адреса
+    app.state.leads_limiter = SlidingWindowLimiter(limit=5, window_s=3600)
     app.add_exception_handler(Exception, _unhandled)
     app.add_middleware(RequestSizeLimit)
 
@@ -81,6 +83,7 @@ def create_app(
         return {"status": "ok"}
 
     app.include_router(auth.router)
+    app.include_router(leads.router)
     app.include_router(documents.router)
     app.include_router(schemas.router)
     app.include_router(webhooks.router)

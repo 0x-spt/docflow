@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     # общий секрет сайта и API: только с ним API верит заголовку X-Client-IP (иначе адрес берётся из соединения)
     internal_token: str = ""
 
+    # уведомления о заявках с сайта в Telegram; пусто = не отправлять
+    leads_tg_token: str = ""
+    leads_tg_chat: str = ""
+
     # демо и e2e без модели: все экстракторы воркера отвечают заготовками из JSON {slug: ответ}
     fake_extractor: bool = False
     # второй ключ-предохранитель: один случайно оставленный FAKE_EXTRACTOR в проде не должен подменить

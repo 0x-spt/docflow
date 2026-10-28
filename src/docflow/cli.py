@@ -19,7 +19,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from docflow.auth import MIN_PASSWORD, hash_password
 from docflow.config import get_settings
-from docflow.db.models import ApiKey, SchemaRecord, Tenant, User, generate_api_key
+from docflow.db.models import ApiKey, Lead, SchemaRecord, Tenant, User, generate_api_key
 from docflow.db.session import make_engine, make_sessionmaker
 from docflow.evaluation import format_report, run_eval
 from docflow.extraction.base import Extractor
@@ -196,6 +196,34 @@ def cmd_seed_schemas(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _recent_leads(limit: int) -> list[Lead]:
+    engine = make_engine(get_settings().database_url)
+    try:
+        async with make_sessionmaker(engine)() as session:
+            q = select(Lead).order_by(Lead.created_at.desc()).limit(limit)
+            return list((await session.execute(q)).scalars())
+    finally:
+        await engine.dispose()
+
+
+def cmd_leads(args: argparse.Namespace) -> int:
+    if args.limit < 1:
+        raise UserError("--limit должен быть больше нуля")
+    leads = asyncio.run(_recent_leads(args.limit))
+    if not leads:
+        print("Заявок пока нет.")
+        return 0
+    rows = [("Дата", "Имя", "Компания", "Контакт", "Объём")]
+    rows += [
+        (lead.created_at.strftime("%Y-%m-%d %H:%M"), lead.name, lead.company or "-", lead.contact, lead.volume)
+        for lead in leads
+    ]
+    widths = [max(len(r[i]) for r in rows) for i in range(5)]
+    for row in rows:
+        print("  ".join(cell.ljust(w) for cell, w in zip(row, widths, strict=True)).rstrip())
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="docflow", description="DocFlow: команды оператора")
     sub = parser.add_subparsers(dest="command", required=True, metavar="команда")
@@ -229,6 +257,10 @@ def build_parser() -> argparse.ArgumentParser:
     cu.add_argument("--role", choices=["owner", "operator"], default="owner")
     cu.add_argument("--password", help=f"пароль (от {MIN_PASSWORD} символов); без него будет сгенерирован")
     cu.set_defaults(func=cmd_create_user)
+
+    ld = sub.add_parser("leads", help="последние заявки на аудит с сайта")
+    ld.add_argument("--limit", type=int, default=20, help="сколько заявок показать (по умолчанию 20)")
+    ld.set_defaults(func=cmd_leads)
 
     ss = sub.add_parser("seed-schemas", help="загрузить встроенные схемы в БД (повторный запуск безопасен)")
     ss.set_defaults(func=cmd_seed_schemas)

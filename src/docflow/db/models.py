@@ -234,3 +234,22 @@ class WebhookDelivery(Base):
     last_error: Mapped[str | None] = mapped_column(String, nullable=True)
     response_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = _created()
+
+
+class Lead(Base):
+    """Заявка на аудит с публичного сайта."""
+
+    __tablename__ = "leads"
+
+    id: Mapped[uuid.UUID] = _id()
+    created_at: Mapped[datetime] = _created()
+    name: Mapped[str] = mapped_column(String)
+    company: Mapped[str | None] = mapped_column(String, nullable=True)
+    contact: Mapped[str] = mapped_column(String)
+    niche: Mapped[str | None] = mapped_column(String, nullable=True)
+    volume: Mapped[str] = mapped_column(String)
+    documents: Mapped[str | None] = mapped_column(String, nullable=True)
+    message: Mapped[str | None] = mapped_column(String, nullable=True)
+    ip: Mapped[str | None] = mapped_column(String, nullable=True)
+    # ушло ли уведомление в Telegram
+    notified: Mapped[bool] = mapped_column(Boolean, default=False)

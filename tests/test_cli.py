@@ -8,7 +8,7 @@ from sqlalchemy import func, select
 
 from docflow.cli import main
 from docflow.config import get_settings
-from docflow.db.models import ApiKey, Base, SchemaRecord, Tenant, hash_key
+from docflow.db.models import ApiKey, Base, Lead, SchemaRecord, Tenant, hash_key
 from docflow.db.session import make_engine, make_sessionmaker
 from docflow.schemas.library import builtin_schemas
 
@@ -226,3 +226,27 @@ def test_create_user_unknown_tenant_exit_1(db_url, capsys):
 
     assert main(["create-user", str(uuid.uuid4()), "a@example.com"]) == 1
     assert "не найден" in capsys.readouterr().err
+
+
+def test_leads_lists_recent(db_url, capsys):
+    async def add(s):
+        s.add(Lead(name="Иван Петров", company="ООО Ромашка", contact="@ivan", volume="100-1000"))
+        s.add(Lead(name="Анна", contact="anna@example.com", volume="unknown"))
+        await s.commit()
+
+    _query(db_url, add)
+    assert main(["leads", "--limit", "10"]) == 0
+    out = capsys.readouterr().out
+    assert "Иван Петров" in out and "ООО Ромашка" in out and "@ivan" in out and "100-1000" in out
+    assert "Анна" in out and "anna@example.com" in out
+
+
+def test_leads_limit(db_url, capsys):
+    async def add(s):
+        for i in range(3):
+            s.add(Lead(name=f"Клиент{i}", contact="12345", volume="unknown"))
+        await s.commit()
+
+    _query(db_url, add)
+    assert main(["leads", "--limit", "2"]) == 0
+    assert capsys.readouterr().out.count("Клиент") == 2
