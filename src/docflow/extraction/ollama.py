@@ -8,9 +8,11 @@ from docflow.extraction.base import Extraction, ExtractionError, system_prompt
 from docflow.schemas.llm import to_json_schema
 from docflow.schemas.model import DocSchema
 
-# локальная 7B VLM медленная, но ответ обязан успеть до job_timeout воркера (300 с, см. worker.JOB_TIMEOUT)
+# локальная VLM медленная, но ответ обязан успеть до job_timeout воркера (300 с, см. worker.JOB_TIMEOUT)
 # вместе с подготовкой страниц и OCR; без повторов
 _TIMEOUT = 240.0
+# держать модель загруженной между документами: загрузка крупной модели — минуты и съела бы таймаут
+_KEEP_ALIVE = "1h"
 
 
 class OllamaExtractor:
@@ -33,6 +35,7 @@ class OllamaExtractor:
                 },
             ],
             "options": {"temperature": 0},
+            "keep_alive": _KEEP_ALIVE,
         }
         try:
             r = self.http.post(f"{self.url}/api/chat", json=payload, timeout=_TIMEOUT)

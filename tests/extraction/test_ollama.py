@@ -25,6 +25,8 @@ def test_payload_has_schema_and_images():
     assert body["model"] == "qwen2.5vl:7b" and body["stream"] is False
     assert body["format"]["type"] == "object" and "total" in body["format"]["properties"]
     assert body["options"] == {"temperature": 0}
+    # модель держится в памяти между документами: холодная загрузка 30B-модели съедает весь таймаут
+    assert body["keep_alive"] == "1h"
     assert body["messages"][0]["role"] == "system"
     assert body["messages"][1]["images"] == [base64.b64encode(b"x").decode(), base64.b64encode(b"y").decode()]
 
