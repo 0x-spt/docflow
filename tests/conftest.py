@@ -23,3 +23,28 @@ async def session():
 
 
 __all__ = ["AsyncSession"]
+
+
+_FONT_CANDIDATES = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "C:/Windows/Fonts/DejaVuSans.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+]
+
+
+@pytest.fixture
+def digital_font(monkeypatch):
+    """Шрифт с кириллицей для цифрового PDF: по настройке, затем в системе; иначе тест пропускается.
+    Ставить раньше `api` в аргументах: шрифт читается из окружения при создании настроек."""
+    from pathlib import Path
+
+    from docflow.config import Settings, get_settings
+
+    for cand in [Settings().pdf_font_path, *_FONT_CANDIDATES]:
+        if Path(cand).exists():
+            monkeypatch.setenv("DOCFLOW_PDF_FONT_PATH", cand)
+            get_settings.cache_clear()
+            yield cand
+            get_settings.cache_clear()
+            return
+    pytest.skip("не найден шрифт с кириллицей для цифрового PDF")

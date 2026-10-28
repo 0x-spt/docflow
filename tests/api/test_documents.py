@@ -320,13 +320,23 @@ async def test_get_document_payload(api, auth):
     body = r.json()
     assert set(body) == {
         "id", "status", "schema", "data", "issues", "error", "pages", "model", "created_at", "finished_at",
-        "review", "pdf_url",
+        "review", "pdf_url", "digital_pdf_url",
     }
     assert body["status"] == "queued"
-    assert body["pdf_url"] is None
+    assert body["pdf_url"] is None and body["digital_pdf_url"] is None
     await set_status(api, doc_id, status="ok", data={"number": "1"}, finished_at=datetime.now(UTC))
     body = (await api.client.get(f"/v1/documents/{doc_id}", headers=auth)).json()
     assert body["pdf_url"] == f"{BASE_URL}/v1/documents/{doc_id}/pdf"
+    assert body["digital_pdf_url"] == f"{BASE_URL}/v1/documents/{doc_id}/digital.pdf"
+
+
+async def test_payload_digital_url(api, auth):
+    doc_id = (await upload(api, auth)).json()["id"]
+    await set_status(api, doc_id, status="failed", error="плохо")
+    assert (await api.client.get(f"/v1/documents/{doc_id}", headers=auth)).json()["digital_pdf_url"] is None
+    await set_status(api, doc_id, status="needs_review", data={})
+    body = (await api.client.get(f"/v1/documents/{doc_id}", headers=auth)).json()
+    assert body["digital_pdf_url"].endswith(f"/v1/documents/{doc_id}/digital.pdf")
 
 
 async def test_404_other_tenant_document(api, auth, make_tenant):
@@ -569,3 +579,42 @@ async def test_page_preview_foreign_404(api, auth, make_tenant):
     doc_id = await add_doc(api, other)
     await api.blobs.put(page_key(doc_id, 1), b"\xff\xd8jpeg", "image/jpeg")
     assert (await api.client.get(f"/v1/documents/{doc_id}/pages/1", headers=auth)).status_code == 404
+
+
+# --- цифровая версия -----------------------------------------------------
+
+
+async def test_digital_pdf_endpoint_ok(digital_font, api, auth):
+    import pypdfium2 as pdfium
+
+    doc_id = (await upload(api, auth)).json()["id"]
+    data = {"number": "СЧ-15/А", "issued": "2026-03-05", "total": 12500.5, "items": []}
+    await set_status(api, doc_id, status="ok", data=data, finished_at=datetime.now(UTC))
+    r = await api.client.get(f"/v1/documents/{doc_id}/digital.pdf", headers=auth)
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "application/pdf"
+    assert r.headers["content-disposition"] == 'inline; filename="invoice_ru-15.pdf"'
+    assert "12 500,50" in pdfium.PdfDocument(r.content)[0].get_textpage().get_text_range()
+
+
+async def test_digital_pdf_filename_falls_back_to_id(digital_font, api, auth):
+    doc_id = (await upload(api, auth)).json()["id"]
+    await set_status(api, doc_id, status="needs_review", data={"number": "№ ?"})
+    r = await api.client.get(f"/v1/documents/{doc_id}/digital.pdf", headers=auth)
+    assert r.headers["content-disposition"] == f'inline; filename="invoice_ru-{doc_id[:8]}.pdf"'
+
+
+@pytest.mark.parametrize("status", ["queued", "processing", "failed"])
+async def test_digital_pdf_conflict_for_failed(api, auth, status):
+    doc_id = (await upload(api, auth)).json()["id"]
+    await set_status(api, doc_id, status=status)
+    r = await api.client.get(f"/v1/documents/{doc_id}/digital.pdf", headers=auth)
+    assert r.status_code == 409
+    assert "ok и needs_review" in r.json()["detail"]
+
+
+async def test_digital_pdf_foreign_404(api, auth, make_tenant):
+    other = await make_tenant("Чужой")
+    doc_id = (await upload(api, auth)).json()["id"]
+    await set_status(api, doc_id, status="ok", data={})
+    assert (await api.client.get(f"/v1/documents/{doc_id}/digital.pdf", headers=other)).status_code == 404

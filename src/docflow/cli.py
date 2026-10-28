@@ -24,6 +24,7 @@ from docflow.db.session import make_engine, make_sessionmaker
 from docflow.evaluation import format_report, run_eval
 from docflow.extraction.base import Extractor
 from docflow.schemas.library import builtin_schemas
+from docflow.targets import targets_text
 
 
 class UserError(Exception):
@@ -213,12 +214,19 @@ def cmd_leads(args: argparse.Namespace) -> int:
     if not leads:
         print("Заявок пока нет.")
         return 0
-    rows = [("Дата", "Имя", "Компания", "Контакт", "Объём")]
+    rows = [("Дата", "Имя", "Компания", "Контакт", "Объём", "Куда выгружать")]
     rows += [
-        (lead.created_at.strftime("%Y-%m-%d %H:%M"), lead.name, lead.company or "-", lead.contact, lead.volume)
+        (
+            lead.created_at.strftime("%Y-%m-%d %H:%M"),
+            lead.name,
+            lead.company or "-",
+            lead.contact,
+            lead.volume,
+            targets_text(lead.targets) or "-",
+        )
         for lead in leads
     ]
-    widths = [max(len(r[i]) for r in rows) for i in range(5)]
+    widths = [max(len(r[i]) for r in rows) for i in range(6)]
     for row in rows:
         print("  ".join(cell.ljust(w) for cell, w in zip(row, widths, strict=True)).rstrip())
     return 0

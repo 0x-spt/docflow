@@ -133,3 +133,24 @@ async def test_lead_without_telegram_settings_makes_no_request(api):
     route = respx.post(url__regex=r"https://api\.telegram\.org/.*").mock(return_value=httpx.Response(200))
     assert (await api.client.post("/v1/leads", json=GOOD)).status_code == 201
     assert not route.called
+
+
+async def test_lead_targets_saved_and_optional(api):
+    r = await api.client.post("/v1/leads", json={**GOOD, "targets": ["1c", "excel"]})
+    assert r.status_code == 201
+    assert (await api.client.post("/v1/leads", json=GOOD)).status_code == 201  # без targets
+    assert {tuple(lead.targets) for lead in await _leads(api)} == {("1c", "excel"), ()}
+
+
+@pytest.mark.parametrize(
+    "targets",
+    [
+        ["sap"],
+        ["1c", "1c"],
+        ["1c", "bitrix24", "amocrm", "google_sheets", "excel", "own_system", "unknown", "1c"],
+        "1c",
+    ],
+)
+async def test_lead_targets_invalid_422(api, targets):
+    r = await api.client.post("/v1/leads", json={**GOOD, "targets": targets})
+    assert r.status_code == 422

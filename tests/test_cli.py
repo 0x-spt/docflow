@@ -250,3 +250,15 @@ def test_leads_limit(db_url, capsys):
     _query(db_url, add)
     assert main(["leads", "--limit", "2"]) == 0
     assert capsys.readouterr().out.count("Клиент") == 2
+
+
+def test_leads_shows_targets(db_url, capsys):
+    async def add(s):
+        s.add(Lead(name="Иван", contact="@ivan", volume="unknown", targets=["bitrix24", "own_system"]))
+        s.add(Lead(name="Анна", contact="anna@example.com", volume="unknown"))
+        await s.commit()
+
+    _query(db_url, add)
+    assert main(["leads"]) == 0
+    out = capsys.readouterr().out
+    assert "Битрикс24, Своя система" in out

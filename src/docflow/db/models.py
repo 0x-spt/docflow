@@ -254,6 +254,8 @@ class Lead(Base):
     volume: Mapped[str] = mapped_column(String)
     documents: Mapped[str | None] = mapped_column(String, nullable=True)
     message: Mapped[str | None] = mapped_column(String, nullable=True)
+    # куда выгружать данные: коды систем из docflow.targets; у старых заявок []
+    targets: Mapped[list[str]] = mapped_column(JsonType, default=list, server_default=text("'[]'"))
     ip: Mapped[str | None] = mapped_column(String, nullable=True)
     # ушло ли уведомление в Telegram
     notified: Mapped[bool] = mapped_column(Boolean, default=False)

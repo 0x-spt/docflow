@@ -6,6 +6,7 @@ import httpx
 
 from docflow.config import Settings
 from docflow.db.models import Lead
+from docflow.targets import targets_text
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,8 @@ def lead_text(lead: Lead) -> str:
         value = getattr(lead, attr)
         if value:
             lines.append(f"{label}: {_clip(str(value), FIELD_MAX)}")
+    if lead.targets:
+        lines.append(f"Куда выгружать: {targets_text(lead.targets)}")
     return _clip("\n".join(lines), TG_TEXT_MAX)
 
 

@@ -32,6 +32,8 @@ class RuleSpec(BaseModel):
 class ColumnSpec(BaseModel):
     name: str
     type: ColumnType
+    # подпись для людей (цифровой PDF); без неё показывается name
+    title: str | None = None
     description: str = ""
     values: list[str] | None = None
 

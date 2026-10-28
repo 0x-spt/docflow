@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     # общий секрет сайта и API: только с ним API верит заголовку X-Client-IP (иначе адрес берётся из соединения)
     internal_token: str = ""
 
+    # шрифт цифрового PDF (кириллица); жирный ищется рядом: DejaVuSans-Bold.ttf, arialbd.ttf
+    pdf_font_path: str = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+
     # уведомления о заявках с сайта в Telegram; пусто = не отправлять
     leads_tg_token: str = ""
     leads_tg_chat: str = ""

@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 import uuid
 from datetime import UTC, datetime
 from typing import Annotated, Literal
@@ -26,6 +27,7 @@ from docflow.api.deps import (
 from docflow.api.limits import request_limit_bytes
 from docflow.db.models import Document
 from docflow.imaging.load import UnsupportedFile, count_pages, detect_kind
+from docflow.pdf.digital import render_digital_pdf
 from docflow.pipeline import SchemaNotFound, process_job_id
 from docflow.queue import PROCESS_DOCUMENT
 from docflow.review import ReviewConflict, review_document
@@ -337,6 +339,54 @@ async def get_document_pdf(document_id: str, tenant_id: TenantDep, session: Sess
         content=pdf,
         media_type="application/pdf",
         headers={"Content-Disposition": f'inline; filename="{document.id}.pdf"'},
+    )
+
+
+DIGITAL_CONFLICT = "цифровая версия доступна для документов в статусах ok и needs_review"
+
+
+def _digital_filename(document: Document) -> str:
+    """slug + номер документа латиницей (остальное вырезается) или первые 8 знаков id."""
+    number = document.data.get("number") if isinstance(document.data, dict) else None
+    clean = re.sub(r"[^A-Za-z0-9_-]", "", str(number or ""))[:40].strip("-_")
+    return f"{document.schema_slug}-{clean or str(document.id)[:8]}.pdf"
+
+
+@router.get(
+    "/{document_id}/digital.pdf",
+    summary="Цифровая версия документа в PDF",
+    description=(
+        "PDF, сформированный заново по извлечённым данным (не скан): заголовок, поля, таблицы и служебная строка "
+        "со статусом. Только для документов в статусах `ok` и `needs_review` — иначе 409; "
+        "чужой или несуществующий документ — 404."
+    ),
+    response_class=Response,
+    responses={200: {"content": {"application/pdf": {}}, "description": "Цифровая версия документа"}},
+)
+async def get_document_digital_pdf(
+    document_id: str, tenant_id: TenantDep, session: SessionDep, settings: SettingsDep, schemas: ResolverDep
+) -> Response:
+    document = await _get_own(session, tenant_id, document_id)
+    if document.status not in ("ok", "needs_review"):
+        raise HTTPException(status.HTTP_409_CONFLICT, DIGITAL_CONFLICT)
+    try:
+        schema = await schemas.resolve(session, document.tenant_id, document.schema_slug, document.schema_version)
+    except SchemaNotFound as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from None
+    pdf = await asyncio.to_thread(
+        lambda: render_digital_pdf(
+            schema,
+            document.data or {},
+            status=document.status,
+            created_at=document.created_at,
+            reviewed=document.reviewed_at is not None,
+            font_path=settings.pdf_font_path,
+        )
+    )
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{_digital_filename(document)}"'},
     )
 
 

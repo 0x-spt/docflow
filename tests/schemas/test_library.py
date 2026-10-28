@@ -30,3 +30,12 @@ def test_invoice_checks_payable_total():
     assert ("total", "sum_mismatch") not in codes
     codes = {(i.field, i.code) for i in evaluate(invoice, data | {"total": 42000})}
     assert ("total", "sum_mismatch") in codes
+
+
+def test_builtin_schemas_have_titles():
+    """Для цифрового PDF у всех полей и колонок встроенных схем есть русская подпись."""
+    for slug, s in builtin_schemas().items():
+        for f in s.fields:
+            assert f.title, f"{slug}.{f.name}: нет title"
+            for c in f.columns or []:
+                assert c.title, f"{slug}.{f.name}.{c.name}: нет title"

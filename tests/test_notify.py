@@ -31,3 +31,13 @@ def test_max_lengths_fit_telegram():
     assert "я" * 100 in text and "c" * 200 in text
     assert "Документы: " in text and "Сообщение: " in text
     assert text.count("…") >= 1
+
+
+def test_lead_text_targets_in_russian():
+    text = lead_text(_lead(targets=["1c", "google_sheets", "unknown"]))
+    assert "Куда выгружать: 1С, Google Таблицы, Пока не знаю" in text
+
+
+def test_lead_text_without_targets():
+    assert "Куда выгружать" not in lead_text(_lead(targets=[]))
+    assert "Куда выгружать" not in lead_text(_lead())

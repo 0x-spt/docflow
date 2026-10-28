@@ -31,11 +31,15 @@ def _opt(max_length: int):
     ]
 
 
+Target = Literal["1c", "bitrix24", "amocrm", "google_sheets", "excel", "own_system", "unknown"]
+
+
 class LeadIn(BaseModel):
     name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
     company: _opt(200) = None
     contact: Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=200)]
     niche: _opt(100) = None
+    targets: Annotated[list[Target], Field(max_length=7)] = Field(default_factory=list)
     volume: Literal["lt100", "100-1000", "1000-10000", "gt10000", "unknown"]
     documents: _opt(2000) = None
     message: _opt(2000) = None
@@ -43,6 +47,13 @@ class LeadIn(BaseModel):
     consent: bool = Field(default=False, validate_default=True)
     # приманка для ботов: настоящая форма держит поле пустым и невидимым
     website: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("targets")
+    @classmethod
+    def _targets_unique(cls, v: list[str]) -> list[str]:
+        if len(set(v)) != len(v):
+            raise ValueError("системы в targets не должны повторяться")
+        return v
 
     @field_validator("consent", mode="before")
     @classmethod
