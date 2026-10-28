@@ -301,7 +301,8 @@ class Export(Base):
         CheckConstraint("status IN ('pending', 'done', 'failed')", name="status"),
         UniqueConstraint("document_id", "destination_id", "purpose", name="document_destination_purpose"),
         Index("ix_exports_status_next_attempt_at", "status", "next_attempt_at"),
-        Index("ix_exports_tenant_id", "tenant_id"),
+        # журнал тенанта «новые сверху»; покрывает и выборки по одному tenant_id
+        Index("ix_exports_tenant_id_created_at", "tenant_id", "created_at"),
     )
 
     id: Mapped[uuid.UUID] = _id()

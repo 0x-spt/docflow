@@ -33,6 +33,10 @@ def sign(secret: str, body: bytes) -> str:
     return "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
 
+class UnresolvableHost(ValueError):
+    """Хост не резолвится — сбой может быть временным (в отличие от частного адреса или не той схемы)."""
+
+
 def check_webhook_url(url: str, *, allow_private: bool = False) -> None:
     """Защита от SSRF: только http(s) и только публичные адреса. ValueError при нарушении."""
     parts = urlsplit(url)
@@ -46,7 +50,7 @@ def check_webhook_url(url: str, *, allow_private: bool = False) -> None:
     try:
         infos = socket.getaddrinfo(host, parts.port or (443 if parts.scheme == "https" else 80))
     except OSError as exc:
-        raise ValueError(f"хост не резолвится: {exc}") from exc
+        raise UnresolvableHost(f"хост не резолвится: {exc}") from exc
     for info in infos:
         ip = ipaddress.ip_address(info[4][0].split("%")[0])
         # is_global отсекает всё, что IANA не считает глобально маршрутизируемым: CGNAT 100.64/10,

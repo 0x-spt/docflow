@@ -14,6 +14,7 @@ from docflow.db.models import Destination, Document, Export, Tenant
 from docflow.exports import (
     DESTINATION_OFF,
     RETRY_DELAYS,
+    STALE_NOTIFICATION,
     deliver_export,
     enqueue_exports,
     enqueue_routed,
@@ -75,11 +76,12 @@ async def exports_of(session, document_id):
     return (await session.execute(q)).scalars().all()
 
 
-async def run(session, export_id, settings, blobs, enqueuer=None):
+async def run(session, export_id, settings, blobs, enqueuer=None, expected_attempt=None):
     enqueuer = enqueuer or ListEnqueuer()
     async with httpx.AsyncClient() as http:
         await deliver_export(
-            session, export_id, http=http, enqueuer=enqueuer, blobs=blobs, schemas=SchemaResolver(), settings=settings
+            session, export_id, http=http, enqueuer=enqueuer, blobs=blobs, schemas=SchemaResolver(),
+            settings=settings, expected_attempt=expected_attempt,
         )
     return await session.get(Export, export_id, populate_existing=True), enqueuer
 
@@ -104,7 +106,7 @@ async def test_enqueue_filters_and_is_idempotent(session, fake_connector, fake_n
     rows = await exports_of(session, doc.id)
     assert [(r.destination_id, r.purpose, r.status, r.attempt) for r in rows] == [(good.id, "export", "pending", 0)]
     assert rows[0].tenant_id == t.id
-    assert enq.calls == [(DELIVER_EXPORT, (str(rows[0].id),), None, export_job_id(rows[0].id, 0))]
+    assert enq.calls == [(DELIVER_EXPORT, (str(rows[0].id), 0), None, export_job_id(rows[0].id, 0))]
 
     # уведомлять умеют оба
     assert await enqueue_exports(session, doc, "notify_review", ids, enq) == 2
@@ -215,7 +217,7 @@ async def test_retryable_error_backoff_then_failed(session, fake_connector, sett
         assert row.status == "pending" and row.attempt == n
         assert row.last_error == "сервер занят (HTTP 503)"
         assert row.next_attempt_at >= before + timedelta(seconds=delay - 1)
-        assert enq.calls == [(DELIVER_EXPORT, (str(row.id),), delay, export_job_id(row.id, n))]
+        assert enq.calls == [(DELIVER_EXPORT, (str(row.id), n), delay, export_job_id(row.id, n))]
 
     row, enq = await run(session, row.id, settings, blobs)  # шестая попытка — последняя
     assert row.status == "failed" and row.attempt == len(RETRY_DELAYS) + 1
@@ -307,8 +309,9 @@ async def test_ssrf_rechecked_at_delivery(session, fake_connector, settings, blo
     dest = await add_dest(session, t.id, config=config, secrets=secrets)
     await enqueue_exports(session, doc, "export", {dest.id}, ListEnqueuer())
     (row,) = await exports_of(session, doc.id)
-    row, _ = await run(session, row.id, settings, blobs)
-    assert row.status in ("pending", "failed") and "не публичный" in row.last_error
+    row, enq = await run(session, row.id, settings, blobs)
+    # частный адрес — ошибка настройки, а не сбой сети: сразу failed, без повторов
+    assert row.status == "failed" and "не публичный" in row.last_error and enq.calls == []
     assert fake_connector.calls == []
     # в dev частные адреса разрешены
     row.status, row.attempt = "pending", 0
@@ -406,3 +409,106 @@ async def test_in_flight_delivery_is_not_requeued(session, settings, blobs):
     finally:
         base.REGISTRY.pop("probe", None)
     assert row.status == "done" and seen["requeued"] == 0
+
+
+# --- доработки по ревью ---------------------------------------------------
+
+
+async def test_attempt_cap_reached_without_result_fails(session, fake_connector, settings, blobs):
+    """Попытка умерла вне try (таймаут arq, kill воркера): крон не должен слать во внешнюю систему вечно."""
+    t, doc = await setup(session)
+    dest = await add_dest(session, t.id)
+    session.add(
+        Export(tenant_id=t.id, document_id=doc.id, destination_id=dest.id, attempt=len(RETRY_DELAYS) + 1,
+               last_error="нет связи")
+    )
+    await session.commit()
+    (row,) = await exports_of(session, doc.id)
+    row, enq = await run(session, row.id, settings, blobs)
+    assert row.status == "failed" and enq.calls == [] and fake_connector.calls == []
+    assert "превышено число попыток" in row.last_error and "нет связи" in row.last_error
+
+
+async def test_connector_timeout_is_retried(session, fake_connector, settings, blobs, monkeypatch):
+    import docflow.exports as exports_module
+
+    monkeypatch.setattr(exports_module, "CONNECTOR_DEADLINE", 0.05)
+    t, doc = await setup(session)
+    dest = await add_dest(session, t.id)
+    await enqueue_exports(session, doc, "export", {dest.id}, ListEnqueuer())
+    (row,) = await exports_of(session, doc.id)
+    fake_connector.export_delay = 2
+    row, enq = await run(session, row.id, settings, blobs)
+    assert row.status == "pending" and row.attempt == 1
+    assert row.last_error == "внешняя система не ответила вовремя"
+    assert enq.calls == [(DELIVER_EXPORT, (str(row.id), 1), RETRY_DELAYS[0], export_job_id(row.id, 1))]
+
+
+async def test_crash_after_claim_goes_through_retry(session, fake_connector, settings, blobs, monkeypatch):
+    import docflow.exports as exports_module
+
+    def boom(*a, **k):
+        raise RuntimeError("секрет SUPER-SECRET в тексте")
+
+    monkeypatch.setattr(exports_module, "build_export_doc", boom)
+    t, doc = await setup(session)
+    dest = await add_dest(session, t.id)
+    await enqueue_exports(session, doc, "export", {dest.id}, ListEnqueuer())
+    (row,) = await exports_of(session, doc.id)
+    row, enq = await run(session, row.id, settings, blobs)
+    assert row.status == "pending" and row.attempt == 1 and len(enq.calls) == 1
+    assert "RuntimeError" in row.last_error and "SUPER-SECRET" not in row.last_error
+
+
+@pytest.mark.parametrize(
+    ("purpose", "status"), [("notify_review", "ok"), ("notify_new", "needs_review"), ("notify_review", "failed")]
+)
+async def test_stale_notification_not_sent(session, fake_connector, settings, blobs, purpose, status):
+    t, doc = await setup(session, status=status)
+    dest = await add_dest(session, t.id)
+    session.add(Export(tenant_id=t.id, document_id=doc.id, destination_id=dest.id, purpose=purpose))
+    await session.commit()
+    (row,) = await exports_of(session, doc.id)
+    row, enq = await run(session, row.id, settings, blobs)
+    assert row.status == "failed" and row.last_error == STALE_NOTIFICATION and enq.calls == []
+    assert fake_connector.calls == []
+
+
+async def test_stray_duplicate_job_is_ignored(session, fake_connector, settings, blobs):
+    """Задача для попытки 1, а выгрузка уже на попытке 2 и под арендой/отложена: это дубль, не трогаем."""
+    t, doc = await setup(session)
+    dest = await add_dest(session, t.id)
+    lease = datetime.now(UTC) + timedelta(minutes=10)
+    session.add(Export(tenant_id=t.id, document_id=doc.id, destination_id=dest.id, attempt=2, next_attempt_at=lease))
+    await session.commit()
+    (row,) = await exports_of(session, doc.id)
+    row, enq = await run(session, row.id, settings, blobs, expected_attempt=1)
+    assert row.status == "pending" and row.attempt == 2 and enq.calls == [] and fake_connector.calls == []
+    # своя задача (ожидает попытку 2) — работает
+    row, _ = await run(session, row.id, settings, blobs, expected_attempt=2)
+    assert row.status == "done" and row.attempt == 3
+
+
+async def test_dns_failure_is_retried(session, fake_connector, settings, blobs, monkeypatch):
+    import socket
+
+    def no_dns(*a, **k):
+        raise OSError("Name or service not known")
+
+    monkeypatch.setattr(socket, "getaddrinfo", no_dns)
+    t, doc = await setup(session)
+    dest = await add_dest(session, t.id, config={"endpoint": "https://portal.example/api"})
+    await enqueue_exports(session, doc, "export", {dest.id}, ListEnqueuer())
+    (row,) = await exports_of(session, doc.id)
+    row, enq = await run(session, row.id, settings, blobs)
+    assert row.status == "pending" and "не резолвится" in row.last_error and len(enq.calls) == 1
+    assert fake_connector.calls == []
+
+
+async def test_bad_scheme_fails_at_once(session, fake_connector, settings, blobs):
+    t, doc = await setup(session)
+    dest = await add_dest(session, t.id, config={"endpoint": "ftp://93.184.216.34/x"})
+    await enqueue_exports(session, doc, "export", {dest.id}, ListEnqueuer())
+    (row,) = await exports_of(session, doc.id)
+    row, enq = await run(session, row.id, settings, blobs)
+    assert row.status == "failed" and "схема" in row.last_error and enq.calls == []

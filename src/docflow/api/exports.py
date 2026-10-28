@@ -108,7 +108,7 @@ async def retry_export(
     if res.rowcount != 1:
         raise HTTPException(status.HTTP_409_CONFLICT, RETRY_CONFLICT)
     try:
-        await enqueuer.enqueue(DELIVER_EXPORT, str(eid), job_id=export_job_id(eid, 0))
+        await enqueuer.enqueue(DELIVER_EXPORT, str(eid), 0, job_id=export_job_id(eid, 0))
     except Exception:
         # строка уже pending: её поднимет requeue_stale_exports
         logger.exception("не удалось поставить выгрузку %s в очередь", eid)

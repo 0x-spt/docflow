@@ -118,7 +118,7 @@ async def deliver_webhook_task(ctx: dict, delivery_id: str) -> None:
         )
 
 
-async def deliver_export_task(ctx: dict, export_id: str) -> None:
+async def deliver_export_task(ctx: dict, export_id: str, attempt: int | None = None) -> None:
     http = ctx.get("connector_http")
     if http is None or http.is_closed:
         # без редиректов (httpx по умолчанию): адрес клиента проверен на SSRF, переход на другой — нет
@@ -134,6 +134,7 @@ async def deliver_export_task(ctx: dict, export_id: str) -> None:
             blobs=deps.blobs,
             schemas=deps.schemas,
             settings=settings,
+            expected_attempt=attempt,
         )
 
 

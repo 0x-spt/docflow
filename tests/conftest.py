@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -94,6 +96,7 @@ class FakeConnector(connectors_base.BaseConnector):
         self.export_errors: list[Exception] = []
         self.notify_errors: list[Exception] = []
         self.external_id: str | None = "ext-1"
+        self.export_delay: float = 0
         self.docs = []
 
     async def test(self, ctx):
@@ -105,6 +108,8 @@ class FakeConnector(connectors_base.BaseConnector):
     async def export(self, ctx, doc):
         self.calls.append(("export", doc.id, dict(ctx.secrets)))
         self.docs.append(doc)
+        if self.export_delay:
+            await asyncio.sleep(self.export_delay)
         if self.export_errors:
             raise self.export_errors.pop(0)
         return self.external_id

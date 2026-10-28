@@ -23,6 +23,7 @@ SCHEMA = DocSchema.model_validate(
             {"name": "qty", "type": "integer"},
             {"name": "paid", "type": "boolean"},
             {"name": "note", "type": "string"},
+            {"name": "inn", "type": "string"},
             {
                 "name": "items",
                 "type": "table",
@@ -40,6 +41,7 @@ DATA = {
     "qty": 3,
     "paid": False,
     "note": None,
+    "inn": "7701234567",
     "items": [{"name": "Цемент М500", "amount": 150000.0}],
 }
 
@@ -170,3 +172,21 @@ def test_parse_rules_tolerates_garbage():
 def test_rule_dictionary_names():
     rules = [rule(("supplier", "in_dictionary", "Ключевые"), ("total", "gt", 1)), rule(("x", "in_dictionary", "Б"))]
     assert rule_dictionary_names(rules) == {"Ключевые", "Б"}
+
+
+def test_integer_value_stays_integer_and_matches_string_field():
+    """JSON 7701234567 не должен стать 7701234567.0: иначе eq по ИНН/номеру не срабатывает никогда."""
+    r = rule(("inn", "eq", 7701234567))
+    assert r.conditions[0].value == 7701234567 and isinstance(r.conditions[0].value, int)
+    assert matches(("inn", "eq", 7701234567)) is True
+    assert matches(("inn", "ne", 7701234567)) is False
+    assert matches(("inn", "ne", 7701234568)) is True
+    # уже сохранённое старым кодом число с плавающей точкой тоже совпадает
+    assert matches(("inn", "eq", 7701234567.0)) is True
+    assert matches(("number", "eq", 15)) is True
+
+
+def test_bool_field_with_numbers():
+    assert matches(("paid", "eq", 0)) is True
+    assert matches(("paid", "eq", 1)) is False
+    assert matches(("paid", "ne", 1.0)) is True

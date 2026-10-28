@@ -169,3 +169,25 @@ async def test_broken_rules_do_not_break_pipeline(sm, tmp_path, fake_connector):
     await process_document(deps, doc_id)
     assert (await load(deps, doc_id)).status == "ok"
     assert await exports(deps, doc_id) == []
+
+
+async def test_routing_skipped_if_status_changed_before_routing(sm, tmp_path, fake_connector, monkeypatch):
+    """Оператор одобрил документ между записью результата и постановкой выгрузок: «на проверку» уже не шлём,
+    а выгрузки ставит путь одобрения сам."""
+    from docflow import pipeline
+
+    deps = make_deps(sm, tmp_path, responses={"invoice_ru": {**INVOICE, "subtotal": 300}})
+    doc_id = await make_doc(deps)
+    await configure(deps, doc_id, [{"export_to": ["EXP"], "notify": ["NTF"]}])
+    original = pipeline._enqueue_webhooks
+
+    async def approve_meanwhile(session, document_id, enqueuer):
+        await original(session, document_id, enqueuer)
+        async with deps.sessionmaker() as s:
+            (await s.get(Document, document_id)).status = "ok"
+            await s.commit()
+
+    monkeypatch.setattr(pipeline, "_enqueue_webhooks", approve_meanwhile)
+    await process_document(deps, doc_id)
+    assert (await load(deps, doc_id)).status == "ok"
+    assert await exports(deps, doc_id) == [] and export_calls(deps) == []

@@ -148,8 +148,8 @@ def approval_issues(decision: RoutingDecision) -> list[Issue]:
     return [Issue(None, APPROVAL_REQUIRED, f"нужно согласование: {name}") for name in decision.approval]
 
 
-async def _run(deps: Deps, session: AsyncSession, document_id: UUID) -> tuple[bool, RoutingDecision]:
-    """(записан ли результат — документ ещё был в processing; решение маршрутизации по данным)."""
+async def _run(deps: Deps, session: AsyncSession, document_id: UUID) -> tuple[bool, RoutingDecision, str]:
+    """(записан ли результат — документ ещё был в processing; решение маршрутизации; записанный статус)."""
     document = await session.get(Document, document_id)
     tenant = await session.get(Tenant, document.tenant_id)
     kind = tenant.extractor if tenant else None
@@ -178,10 +178,11 @@ async def _run(deps: Deps, session: AsyncSession, document_id: UUID) -> tuple[bo
         # согласование — до записи статуса: и вебхук, и кабинет увидят needs_review, выгрузки не будет
         issues += approval_issues(decision)
 
+    status = decide_status(issues)
     res = await session.execute(
         _finish(
             document_id,
-            status=decide_status(issues),
+            status=status,
             data=data,
             issues=[asdict(i) for i in issues],
             error=None,
@@ -192,7 +193,7 @@ async def _run(deps: Deps, session: AsyncSession, document_id: UUID) -> tuple[bo
         )
     )
     await session.commit()
-    return res.rowcount == 1, decision
+    return res.rowcount == 1, decision, status
 
 
 async def _mark_failed(session: AsyncSession, document_id: UUID, error: str) -> bool:
@@ -212,10 +213,17 @@ async def _enqueue_webhooks(session: AsyncSession, document_id: UUID, enqueuer: 
 
 
 async def _enqueue_routed(
-    session: AsyncSession, document_id: UUID, decision: RoutingDecision, enqueuer: Enqueuer
+    session: AsyncSession, document_id: UUID, decision: RoutingDecision, written: str, enqueuer: Enqueuer
 ) -> None:
+    """Выгрузки по решению конвейера — только если документ всё ещё в записанном статусе.
+
+    Если оператор успел проверить документ, решение устарело: одобрение ставит выгрузки само.
+    """
     try:
         document = await session.get(Document, document_id, populate_existing=True)
+        if document is None or document.status != written:
+            logger.info("документ %s уже в другом статусе, выгрузки конвейера не ставятся", document_id)
+            return
         await enqueue_routed(session, document, decision, enqueuer)
     except Exception:
         # документ уже в финальном статусе; закоммиченные выгрузки поднимет requeue_stale_exports
@@ -229,8 +237,9 @@ async def process_document(deps: Deps, document_id: UUID) -> None:
         error: str | None = None
         finished = False
         decision: RoutingDecision | None = None
+        written = ""
         try:
-            finished, decision = await _run(deps, session, document_id)
+            finished, decision, written = await _run(deps, session, document_id)
         except (UnsupportedFile, _Failure, SchemaNotFound) as exc:
             error = str(exc)
         except BlobNotFound as exc:
@@ -252,7 +261,7 @@ async def process_document(deps: Deps, document_id: UUID) -> None:
         if finished:
             await _enqueue_webhooks(session, document_id, deps.enqueuer)
             if decision is not None:
-                await _enqueue_routed(session, document_id, decision, deps.enqueuer)
+                await _enqueue_routed(session, document_id, decision, written, deps.enqueuer)
 
 
 async def reap_stale_processing(

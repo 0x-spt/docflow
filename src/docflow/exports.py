@@ -26,7 +26,7 @@ from docflow.routing import RoutingDecision
 from docflow.schemas.model import DocSchema
 from docflow.secrets import SecretsKeyMissing, decrypt_secrets
 from docflow.storage.blobs import BlobNotFound, BlobStore, scan_key
-from docflow.webhooks import check_webhook_url
+from docflow.webhooks import UnresolvableHost, check_webhook_url
 
 logger = logging.getLogger(__name__)
 
@@ -36,10 +36,17 @@ RETRY_DELAYS = (10, 60, 300, 1800, 7200)
 # (дубль во внешней системе). Больше job_timeout воркера (300 с) с запасом.
 LEASE = timedelta(minutes=10)
 MAX_ERROR = 500
+# дедлайн работы коннектора за попытку: меньше job_timeout воркера (300 с), чтобы успеть записать итог
+CONNECTOR_DEADLINE = 240.0
+# задача с номером попытки меньше текущего — дубль, если попытка занята/отложена дальше этого запаса
+LEASE_SLACK = timedelta(seconds=5)
 
 DESTINATION_OFF = "получатель отключён"
 DOCUMENT_GONE = "документ удалён"
 NOT_APPROVED = "документ не подтверждён (статус {status}): в учётную систему не выгружается"
+STALE_NOTIFICATION = "документ уже в другом статусе — уведомление не актуально"
+ATTEMPTS_EXHAUSTED = "превышено число попыток"
+TIMED_OUT = "внешняя система не ответила вовремя"
 
 PURPOSES = ("export", "notify_review", "notify_new")
 
@@ -90,7 +97,7 @@ async def enqueue_exports(
         created.append(export.id)
     await session.commit()
     for export_id in created:  # после commit, чтобы воркер увидел строку; потерянное поднимет requeue_stale
-        await enqueuer.enqueue(DELIVER_EXPORT, str(export_id), job_id=export_job_id(export_id, 0))
+        await enqueuer.enqueue(DELIVER_EXPORT, str(export_id), 0, job_id=export_job_id(export_id, 0))
     return len(created)
 
 
@@ -123,7 +130,9 @@ async def requeue_stale_exports(
     requeued = 0
     for export_id, attempt in rows:
         try:
-            await enqueuer.enqueue(DELIVER_EXPORT, str(export_id), job_id=export_job_id(export_id, attempt))
+            await enqueuer.enqueue(
+                DELIVER_EXPORT, str(export_id), attempt, job_id=export_job_id(export_id, attempt)
+            )
         except Exception:
             logger.exception("не удалось перепоставить выгрузку %s", export_id)
             continue
@@ -223,6 +232,63 @@ async def _check_urls(connector: Connector, config: dict, secrets: dict, *, allo
             await asyncio.to_thread(check_webhook_url, value, allow_private=allow_private)
 
 
+class _Permanent(Exception):
+    """Сбой, который повтор не исправит: нет ключа шифрования, нет схемы, запрещённый адрес."""
+
+
+async def _attempt(
+    export: Export,
+    dest: Destination,
+    document: Document,
+    connector: Connector,
+    *,
+    session: AsyncSession,
+    http: httpx.AsyncClient,
+    blobs: BlobStore,
+    schemas,
+    settings: Settings,
+) -> str | None:
+    """Сама попытка: секреты → схема → SSRF → коннектор под общим дедлайном. Возвращает external_id."""
+    try:
+        secrets = decrypt_secrets(dest.secrets_enc, settings.secrets_key) if dest.secrets_enc else {}
+    except SecretsKeyMissing as exc:
+        raise _Permanent(str(exc)) from None  # без ключа повтор не поможет
+    try:
+        schema = await schemas.resolve(session, document.tenant_id, document.schema_slug, document.schema_version)
+    except LookupError as exc:
+        raise _Permanent(str(exc)) from None
+    try:
+        await _check_urls(connector, dest.config or {}, secrets, allow_private=settings.webhook_allow_private)
+    except UnresolvableHost as exc:
+        raise ConnectorError(f"адрес отклонён: {exc}", retryable=True) from None  # DNS может ожить
+    except ValueError as exc:
+        # частная сеть или не та схема — ошибка настройки, повтор не поможет
+        raise _Permanent(f"адрес отклонён: {exc}") from None
+    ctx = DestCtx(config=dest.config or {}, secrets=secrets, mapping=dest.mapping or {}, http=http)
+    doc = build_export_doc(document, schema, settings, blobs)
+    try:
+        # свой дедлайн раньше job_timeout arq: иначе задачу отменят вне try и ошибка не попадёт в журнал
+        async with asyncio.timeout(CONNECTOR_DEADLINE):
+            if export.purpose == "export":
+                return await connector.export(ctx, doc)
+            await connector.notify(ctx, doc, export.purpose)
+            return None
+    except TimeoutError:
+        raise ConnectorError(TIMED_OUT, retryable=True) from None
+
+
+def _stale(export: Export, document: Document) -> str | None:
+    """Почему доставка уже не нужна: документ ушёл из статуса, для которого она ставилась."""
+    if export.purpose == "export" and document.status != "ok":
+        # анти-цель: неподтверждённый документ не уходит в учётную систему клиента
+        return NOT_APPROVED.format(status=document.status)
+    if export.purpose == "notify_new" and document.status != "ok":
+        return STALE_NOTIFICATION
+    if export.purpose == "notify_review" and document.status != "needs_review":
+        return STALE_NOTIFICATION
+    return None
+
+
 async def deliver_export(
     session: AsyncSession,
     export_id: UUID,
@@ -232,10 +298,20 @@ async def deliver_export(
     blobs: BlobStore,
     schemas,
     settings: Settings,
+    expected_attempt: int | None = None,
 ) -> None:
-    """Одна попытка доставки. schemas — SchemaResolver (резолвит схему документа)."""
+    """Одна попытка доставки. schemas — SchemaResolver; expected_attempt — номер попытки, под который ставилась
+    задача (None — задачи без номера)."""
     export = await session.get(Export, export_id)
     if export is None or export.status != "pending":
+        return
+    if (
+        expected_attempt is not None
+        and export.attempt > expected_attempt
+        and export.next_attempt_at is not None
+        and export.next_attempt_at > datetime.now(UTC) + LEASE_SLACK
+    ):
+        # заблудившийся дубль: попытку уже заняла (или отложила) другая задача — второй отправки не будет
         return
     dest = await session.get(Destination, export.destination_id) if export.destination_id else None
     document = await session.get(Document, export.document_id)
@@ -243,47 +319,38 @@ async def deliver_export(
         return await _fail(session, export, DESTINATION_OFF)
     if document is None:
         return await _fail(session, export, DOCUMENT_GONE)
-    if export.purpose == "export" and document.status != "ok":
-        # анти-цель: неподтверждённый документ не уходит в учётную систему клиента
-        return await _fail(session, export, NOT_APPROVED.format(status=document.status))
+    if reason := _stale(export, document):
+        return await _fail(session, export, reason)
     connector = REGISTRY.get(dest.kind)
     if connector is None:
         return await _fail(session, export, f"тип получателя «{dest.kind}» больше не поддерживается")
+    if export.attempt > len(RETRY_DELAYS):
+        # попытки кончились, а результата нет (задачу убил таймаут arq или остановка воркера): больше не шлём
+        last = f": {export.last_error}" if export.last_error else ""
+        return await _fail(session, export, ATTEMPTS_EXHAUSTED + last)
 
     if not await _claim(session, export.id, export.attempt):
         return  # попытку занял другой воркер
     await session.refresh(export)
 
-    try:
-        secrets = decrypt_secrets(dest.secrets_enc, settings.secrets_key) if dest.secrets_enc else {}
-    except SecretsKeyMissing as exc:
-        return await _fail(session, export, str(exc))  # без ключа повтор не поможет
-    try:
-        schema = await schemas.resolve(session, document.tenant_id, document.schema_slug, document.schema_version)
-    except LookupError as exc:
-        return await _fail(session, export, str(exc))
-
     error: str | None = None
     retryable = True
     external_id: str | None = None
     try:
-        await _check_urls(connector, dest.config or {}, secrets, allow_private=settings.webhook_allow_private)
-    except ValueError as exc:
-        error = f"адрес отклонён: {exc}"
-    if error is None:
-        ctx = DestCtx(config=dest.config or {}, secrets=secrets, mapping=dest.mapping or {}, http=http)
-        doc = build_export_doc(document, schema, settings, blobs)
-        try:
-            if export.purpose == "export":
-                external_id = await connector.export(ctx, doc)
-            else:
-                await connector.notify(ctx, doc, export.purpose)
-        except ConnectorError as exc:
-            error, retryable = exc.message, exc.retryable
-        except Exception as exc:
-            # текст исключения может содержать адрес с ключом или токен: ни в журнал, ни в лог — только тип
-            logger.warning("выгрузка %s: сбой коннектора %s (%s)", export.id, dest.kind, type(exc).__name__)
-            error = f"сбой при обращении к системе ({type(exc).__name__})"
+        external_id = await _attempt(
+            export, dest, document, connector,
+            session=session, http=http, blobs=blobs, schemas=schemas, settings=settings,
+        )
+    except _Permanent as exc:
+        error, retryable = str(exc), False
+    except ConnectorError as exc:
+        error, retryable = exc.message, exc.retryable
+    except Exception as exc:
+        # текст исключения может содержать адрес с ключом или токен: ни в журнал, ни в лог — только тип
+        logger.warning("выгрузка %s: сбой %s (%s)", export.id, dest.kind, type(exc).__name__)
+        error = f"сбой при обращении к системе ({type(exc).__name__})"
+        await session.rollback()  # транзакция могла сломаться (сбой БД); попытка уже закоммичена claim'ом
+        await session.refresh(export)
 
     if error is None:
         export.status = "done"
@@ -300,4 +367,6 @@ async def deliver_export(
     delay = RETRY_DELAYS[attempt - 1]
     export.next_attempt_at = datetime.now(UTC) + timedelta(seconds=delay)
     await session.commit()  # до постановки в очередь
-    await enqueuer.enqueue(DELIVER_EXPORT, str(export.id), defer_by=delay, job_id=export_job_id(export.id, attempt))
+    await enqueuer.enqueue(
+        DELIVER_EXPORT, str(export.id), attempt, defer_by=delay, job_id=export_job_id(export.id, attempt)
+    )

@@ -18,7 +18,8 @@ class Condition(BaseModel):
     field: str = Field(min_length=1, max_length=100)
     op: Op
     # для empty/not_empty не нужно; для in_dictionary — имя справочника
-    value: str | float | None = None
+    # int отдельно от float: 7701234567 (ИНН, номер) не должен превратиться в 7701234567.0
+    value: str | int | float | None = None
 
 
 class Rule(BaseModel):

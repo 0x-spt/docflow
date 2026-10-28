@@ -188,7 +188,7 @@ async def test_retry_failed_export(api, auth, fake_connector):
     async with api.sessionmaker() as s:
         row = await s.get(Export, e)
         assert row.status == "pending" and row.attempt == 0 and row.next_attempt_at is not None
-    assert export_calls(api) == [(DELIVER_EXPORT, (str(e),), None, export_job_id(e, 0))]
+    assert export_calls(api) == [(DELIVER_EXPORT, (str(e), 0), None, export_job_id(e, 0))]
 
     # уже pending — 409, вторая задача не ставится
     r = await api.client.post(f"/v1/exports/{e}/retry", headers=auth)

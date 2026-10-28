@@ -116,10 +116,17 @@ def _date(v: Any) -> date:
     raise _Bad
 
 
+def _plain(v: Any) -> str:
+    """Число без хвоста «.0»: 7701234567.0 → «7701234567» (так его и пишут в строковых полях)."""
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v)
+
+
 def _bool(v: Any) -> bool:
     if isinstance(v, bool):
         return v
-    s = str(v).strip().lower()
+    s = _plain(v).strip().lower()
     if s in _TRUE:
         return True
     if s in _FALSE:
@@ -130,7 +137,7 @@ def _bool(v: Any) -> bool:
 def _text(v: Any) -> str:
     if isinstance(v, list | dict):
         raise _Bad
-    return str(v).strip().casefold()
+    return _plain(v).strip().casefold()
 
 
 def _kind(schema: DocSchema, name: str, value: Any) -> str:
