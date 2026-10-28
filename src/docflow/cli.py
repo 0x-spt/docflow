@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import sys
+import uuid
 from pathlib import Path
 
 from sqlalchemy import select
@@ -66,29 +67,67 @@ def cmd_eval(args: argparse.Namespace) -> int:
     return 0
 
 
-async def _create_tenant(name: str, extractor: str) -> str:
+async def _create_tenant(name: str, extractor: str, auto_ok: bool) -> tuple[uuid.UUID, str]:
     engine = make_engine(get_settings().database_url)
     try:
         plain, prefix, key_hash = generate_api_key()
         async with make_sessionmaker(engine)() as session:
-            tenant = Tenant(name=name, extractor=extractor)
+            tenant = Tenant(name=name, extractor=extractor, auto_ok=auto_ok)
             session.add(tenant)
             await session.flush()
             session.add(ApiKey(tenant_id=tenant.id, prefix=prefix, key_hash=key_hash))
             await session.commit()
-        return plain
+        return tenant.id, plain
     finally:
         await engine.dispose()
+
+
+def _auto_ok_line(auto_ok: bool) -> str:
+    if auto_ok:
+        return "Статус ok ставится автоматически, если все проверки пройдены."
+    return (
+        "Результаты — черновик: всё уходит в needs_review, пока эталонный прогон не подтвердит точность модели "
+        "(потом: docflow set-auto-ok <id> yes)."
+    )
 
 
 def cmd_create_tenant(args: argparse.Namespace) -> int:
     name = args.name.strip()
     if not name:
         raise UserError("имя клиента не может быть пустым")
-    key = asyncio.run(_create_tenant(name, args.extractor))
-    print(f"Клиент «{name}» создан.")
+    # локальная модель уверенно ошибается в фамилиях и названиях, пока её точность не измерена
+    auto_ok = args.extractor == "claude" if args.auto_ok is None else args.auto_ok == "yes"
+    tenant_id, key = asyncio.run(_create_tenant(name, args.extractor, auto_ok))
+    print(f"Клиент «{name}» создан, id {tenant_id}.")
+    print(_auto_ok_line(auto_ok))
     print(f"API-ключ: {key}")
     print("ВНИМАНИЕ: ключ больше не будет показан. Сохраните его сейчас.")
+    return 0
+
+
+async def _set_auto_ok(tenant_id: uuid.UUID, auto_ok: bool) -> bool:
+    engine = make_engine(get_settings().database_url)
+    try:
+        async with make_sessionmaker(engine)() as session:
+            tenant = await session.get(Tenant, tenant_id)
+            if tenant is None:
+                return False
+            tenant.auto_ok = auto_ok
+            await session.commit()
+            return True
+    finally:
+        await engine.dispose()
+
+
+def cmd_set_auto_ok(args: argparse.Namespace) -> int:
+    try:
+        tenant_id = uuid.UUID(args.tenant_id)
+    except ValueError:
+        raise UserError(f"«{args.tenant_id}» — не id клиента") from None
+    auto_ok = args.value == "yes"
+    if not asyncio.run(_set_auto_ok(tenant_id, auto_ok)):
+        raise UserError(f"клиент {tenant_id} не найден")
+    print(_auto_ok_line(auto_ok))
     return 0
 
 
@@ -132,7 +171,17 @@ def build_parser() -> argparse.ArgumentParser:
     ct = sub.add_parser("create-tenant", help="создать клиента и выдать API-ключ")
     ct.add_argument("name", help="название клиента")
     ct.add_argument("--extractor", choices=["claude", "ollama"], default="claude", help="чем извлекать для клиента")
+    ct.add_argument(
+        "--auto-ok",
+        choices=["yes", "no"],
+        help="ставить ok без человека (по умолчанию: да для claude, нет для ollama)",
+    )
     ct.set_defaults(func=cmd_create_tenant)
+
+    sa = sub.add_parser("set-auto-ok", help="разрешить или запретить клиенту автоматический ok")
+    sa.add_argument("tenant_id", help="id клиента (печатается при create-tenant)")
+    sa.add_argument("value", choices=["yes", "no"])
+    sa.set_defaults(func=cmd_set_auto_ok)
 
     ss = sub.add_parser("seed-schemas", help="загрузить встроенные схемы в БД (повторный запуск безопасен)")
     ss.set_defaults(func=cmd_seed_schemas)

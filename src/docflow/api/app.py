@@ -13,7 +13,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from docflow.api import documents, schemas, webhooks
+from docflow.api import dictionaries, documents, schemas, webhooks
 from docflow.api.limits import RequestSizeLimit
 from docflow.config import Settings, get_settings
 from docflow.db.session import make_engine, make_sessionmaker
@@ -79,4 +79,5 @@ def create_app(
     app.include_router(documents.router)
     app.include_router(schemas.router)
     app.include_router(webhooks.router)
+    app.include_router(dictionaries.router)
     return app

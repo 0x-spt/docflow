@@ -132,3 +132,42 @@ def test_eval_bad_expected_and_missing_fake_slug_exit_1(tmp_path, capsys):
     fake.write_text("{}", encoding="utf-8")
     assert main(["eval", str(root), "--extractor", "fake", "--fake-responses", str(fake)]) == 1
     assert "invoice_ru" in capsys.readouterr().err
+
+
+def _tenant(url):
+    async def one(s):
+        return (await s.execute(select(Tenant))).scalar_one()
+
+    return _query(url, one)
+
+
+@pytest.mark.parametrize(
+    "args, expected",
+    [
+        ([], True),  # облачной модели по умолчанию доверяем
+        (["--extractor", "ollama"], False),  # локальной — нет, пока эталонный прогон не подтвердит точность
+        (["--extractor", "ollama", "--auto-ok", "yes"], True),
+        (["--auto-ok", "no"], False),
+    ],
+)
+def test_create_tenant_auto_ok_default(db_url, capsys, args, expected):
+    assert main(["create-tenant", "Ромашка", *args]) == 0
+    t = _tenant(db_url)
+    assert t.auto_ok is expected
+    out = capsys.readouterr().out
+    assert str(t.id) in out
+    assert ("ok ставится автоматически" if expected else "черновик") in out
+
+
+def test_set_auto_ok(db_url, capsys):
+    main(["create-tenant", "Лаборатория", "--extractor", "ollama"])
+    t = _tenant(db_url)
+    assert main(["set-auto-ok", str(t.id), "yes"]) == 0
+    assert _tenant(db_url).auto_ok is True
+    assert main(["set-auto-ok", str(t.id), "no"]) == 0
+    assert _tenant(db_url).auto_ok is False
+
+
+def test_set_auto_ok_unknown_tenant_exit_1(db_url, capsys):
+    assert main(["set-auto-ok", "00000000-0000-0000-0000-000000000000", "yes"]) == 1
+    assert main(["set-auto-ok", "not-a-uuid", "yes"]) == 1

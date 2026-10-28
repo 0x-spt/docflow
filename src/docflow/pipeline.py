@@ -13,7 +13,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from docflow.config import get_settings
-from docflow.db.models import Document, SchemaRecord, Tenant
+from docflow.db.models import Dictionary, Document, SchemaRecord, Tenant
 from docflow.extraction.base import ExtractionError, Extractor
 from docflow.extraction.normalize import normalize
 from docflow.imaging.load import UnsupportedFile
@@ -24,12 +24,18 @@ from docflow.schemas.library import builtin_schemas
 from docflow.schemas.llm import UNCERTAIN
 from docflow.schemas.model import DocSchema
 from docflow.storage.blobs import BlobNotFound, BlobStore, scan_key
-from docflow.validation.engine import decide_status, evaluate
+from docflow.validation.dictionaries import DictEntry, resolve_dictionaries
+from docflow.validation.engine import Issue, decide_status, evaluate
 from docflow.webhooks import enqueue_webhooks
 
 logger = logging.getLogger(__name__)
 
 INTERNAL_ERROR = "внутренняя ошибка обработки"
+REVIEW_REQUIRED = Issue(
+    None,
+    "review_required",
+    "модель этого клиента не подтверждена эталонным прогоном: результат — черновик, нужна проверка человеком",
+)
 TIMEOUT_ERROR = "обработка прервана: превышено время или воркер остановлен"
 REAPED_ERROR = "обработка прервана (воркер остановился)"
 
@@ -126,6 +132,19 @@ async def _render(deps: Deps, document_id: UUID, keys: list[str], mode: str) -> 
     return [p.model_jpeg for p in pages], len(pages)
 
 
+async def _load_dictionaries(session: AsyncSession, tenant_id: UUID, schema: DocSchema) -> dict[str, list[DictEntry]]:
+    """Справочники, на которые ссылается схема. Незаведённого в ответе нет — resolve_dictionaries это отметит."""
+    names = {r.params["name"] for f in schema.fields for r in f.rules if r.kind == "dictionary"}
+    if not names:
+        return {}
+    rows = await session.execute(
+        select(Dictionary.name, Dictionary.entries).where(Dictionary.tenant_id == tenant_id, Dictionary.name.in_(names))
+    )
+    return {
+        name: [DictEntry(e["value"], tuple(e.get("aliases") or ())) for e in entries] for name, entries in rows.all()
+    }
+
+
 async def _run(deps: Deps, session: AsyncSession, document_id: UUID) -> bool:
     """True, если результат записан (документ ещё был в processing)."""
     document = await session.get(Document, document_id)
@@ -135,6 +154,8 @@ async def _run(deps: Deps, session: AsyncSession, document_id: UUID) -> bool:
     if extractor is None:
         raise _Failure(f"Экстрактор «{kind}» не настроен")
     schema = await deps.schemas.resolve(session, document.tenant_id, document.schema_slug, document.schema_version)
+    dictionaries = await _load_dictionaries(session, document.tenant_id, schema)
+    auto_ok = tenant.auto_ok
     keys, mode = list(document.files), document.mode
     # Закрываем читающую транзакцию: OCR и модель идут минутами, idle in transaction на Postgres не нужен
     await session.commit()
@@ -143,8 +164,11 @@ async def _run(deps: Deps, session: AsyncSession, document_id: UUID) -> bool:
     extraction = await asyncio.to_thread(extractor.extract, schema, images)
     del images
     data, issues = normalize(schema, extraction.raw)
+    issues += resolve_dictionaries(schema, data, dictionaries)  # до проверок: они видят исправленные значения
     issues += evaluate(schema, data)
     data.pop(UNCERTAIN, None)  # неуверенность уже стала issues с кодом uncertain
+    if not auto_ok and decide_status(issues) == "ok":
+        issues.append(REVIEW_REQUIRED)
 
     res = await session.execute(
         _finish(

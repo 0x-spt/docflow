@@ -8,13 +8,16 @@ FieldType = Literal["string", "integer", "number", "date", "boolean", "enum", "t
 ColumnType = Literal["string", "integer", "number", "date", "boolean", "enum"]
 
 # Правила одного поля (применяются к его значению) и правила документа (ссылаются на поля по имени).
-FIELD_RULES = frozenset({"inn", "kpp", "ogrn", "snils", "bik", "regex", "date_not_future"})
+FIELD_RULES = frozenset(
+    {"inn", "kpp", "ogrn", "snils", "bik", "regex", "date_not_future", "date_not_older", "dictionary"}
+)
 DOC_RULES = frozenset(
     {
         "table_sum_equals",
         "table_row_product",
         "table_product_sum",
         "date_order",
+        "date_within",
         "account_matches_bik",
         "total_consistent",
     }
@@ -66,6 +69,8 @@ _DOC_RULE_PARAMS: dict[str, dict[str, tuple[str, ...]]] = {
     # итог без графы «сумма»: Σ количество × цена по строкам
     "table_product_sum": {"table": ("table",), "qty": ("column",), "price": ("column",), "total": ("field",)},
     "date_order": {"earlier": ("field",), "later": ("field",)},
+    # later не дальше max_days дней после earlier: ловит «2400 год» и «2016» вместо 2026
+    "date_within": {"earlier": ("field",), "later": ("field",), "max_days": ("int",)},
     "account_matches_bik": {"account": ("field",), "bik": ("field",)},
     # итог к оплате сверяется с подытогом (или суммой строк таблицы) и НДС
     "total_consistent": {
@@ -82,7 +87,19 @@ _DOC_RULE_OPTIONAL: dict[str, frozenset[str]] = {
 }
 
 
+def _positive_int(v: Any) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool) and v > 0
+
+
 def _check_field_rule(field: "FieldSpec", rule: RuleSpec) -> None:
+    if rule.kind == "dictionary":
+        name = rule.params.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"«{field.name}»: правилу dictionary нужен параметр name — имя справочника")
+        if not isinstance(rule.params.get("fuzzy", True), bool):
+            raise ValueError(f"«{field.name}»: fuzzy — true или false")
+    if rule.kind == "date_not_older" and not _positive_int(rule.params.get("days")):
+        raise ValueError(f"«{field.name}»: правилу date_not_older нужен days — целое > 0")
     if rule.kind == "regex":
         pattern = rule.params.get("pattern")
         if not isinstance(pattern, str):
@@ -113,6 +130,8 @@ def _check_doc_rule(rule: RuleSpec, fields: dict[str, "FieldSpec"]) -> None:
         if kind == "table":
             continue
         value = rule.params.get(param)
+        if kind == "int" and not _positive_int(value):
+            raise ValueError(f"{rule.kind}: {param} — целое > 0")
         if kind == "field" and value not in fields:
             raise ValueError(f"{rule.kind}: {param}=«{value}» — нет такого поля")
         if kind == "column" and value not in {c.name for c in (table.columns or [])}:

@@ -70,6 +70,22 @@ def _date_not_future_rule(name: str, value: Any, params: dict[str, Any], today: 
     return []
 
 
+def _date_not_older_rule(name: str, value: Any, params: dict[str, Any], today: date) -> list[Issue]:
+    d = _parse_date(value)
+    if d is None:
+        return [Issue(name, "pattern", f"«{value}» не похоже на дату")]
+    if (today - d).days > params["days"]:
+        message = f"дата {d.isoformat()} старше {params['days']} дн. — похоже на ошибку чтения"
+        return [Issue(name, "date_too_old", message)]
+    return []
+
+
+def _applied_elsewhere(name: str, value: Any, params: dict[str, Any], today: date) -> list[Issue]:
+    """dictionary сверяется в validation.dictionaries.resolve_dictionaries: нужны справочники тенанта
+    и право исправить значение, а evaluate чистая и данные не меняет."""
+    return []
+
+
 FIELD_REGISTRY: dict[str, FieldRule] = {
     "inn": _checksum_rule("ИНН", checksums.valid_inn),
     "kpp": _checksum_rule("КПП", checksums.valid_kpp),
@@ -78,6 +94,8 @@ FIELD_REGISTRY: dict[str, FieldRule] = {
     "bik": _checksum_rule("БИК", checksums.valid_bik),
     "regex": _regex_rule,
     "date_not_future": _date_not_future_rule,
+    "date_not_older": _date_not_older_rule,
+    "dictionary": _applied_elsewhere,
 }
 
 
@@ -157,6 +175,22 @@ def _date_order(data: dict[str, Any], p: dict[str, Any]) -> list[Issue]:
     return []
 
 
+def _date_within(data: dict[str, Any], p: dict[str, Any]) -> list[Issue]:
+    d_earlier, d_later = _parse_date(data.get(p["earlier"])), _parse_date(data.get(p["later"]))
+    if d_earlier is None or d_later is None or d_later < d_earlier:
+        return []  # пусто, не дата или обратный порядок — это ловят другие правила
+    if (d_later - d_earlier).days > p["max_days"]:
+        return [
+            Issue(
+                p["later"],
+                "date_range",
+                f"{p['later']} {d_later.isoformat()} позже {p['earlier']} {d_earlier.isoformat()} "
+                f"больше чем на {p['max_days']} дн. — похоже на ошибку чтения",
+            )
+        ]
+    return []
+
+
 def _account_matches_bik(data: dict[str, Any], p: dict[str, Any]) -> list[Issue]:
     account, bik = data.get(p["account"]), data.get(p["bik"])
     if account is None or bik is None:
@@ -216,6 +250,7 @@ DOC_REGISTRY: dict[str, DocRule] = {
     "table_row_product": _table_row_product,
     "table_product_sum": _table_product_sum,
     "date_order": _date_order,
+    "date_within": _date_within,
     "account_matches_bik": _account_matches_bik,
 }
 
@@ -258,5 +293,9 @@ def _dedupe(issues: list[Issue]) -> list[Issue]:
     return out
 
 
+# Информационные коды: клиент видит их в issues, но проверки человеком они не требуют
+INFO_CODES = frozenset({"corrected"})
+
+
 def decide_status(issues: list[Issue]) -> Status:
-    return "needs_review" if issues else "ok"
+    return "needs_review" if any(i.code not in INFO_CODES for i in issues) else "ok"

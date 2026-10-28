@@ -10,7 +10,7 @@ import pytest
 from PIL import Image, ImageDraw
 from sqlalchemy import event
 
-from docflow.db.models import Base, Document, SchemaRecord, Tenant, WebhookEndpoint
+from docflow.db.models import Base, Dictionary, Document, SchemaRecord, Tenant, WebhookEndpoint
 from docflow.db.session import make_engine, make_sessionmaker
 from docflow.extraction.base import ExtractionError
 from docflow.extraction.fake import FakeExtractor
@@ -108,12 +108,28 @@ def make_deps(sm, tmp_path, *, extractor=None, ocr=None, responses=None):
     )
 
 
-async def make_doc(deps, files=None, *, slug="invoice_ru", version=1, extractor="claude", status="queued"):
+async def make_doc(
+    deps,
+    files=None,
+    *,
+    slug="invoice_ru",
+    version=1,
+    extractor="claude",
+    status="queued",
+    auto_ok=True,
+    schema_body=None,
+    dictionaries=None,
+):
     files = files if files is not None else [(page_jpeg(), "scan.jpg")]
     async with deps.sessionmaker() as s:
-        t = Tenant(name="t", extractor=extractor)
+        t = Tenant(name="t", extractor=extractor, auto_ok=auto_ok)
         s.add(t)
         await s.flush()
+        if schema_body is not None:
+            s.add(SchemaRecord(tenant_id=t.id, slug=schema_body["slug"], version=version, body=schema_body))
+        for name, values in (dictionaries or {}).items():
+            entries = [{"value": v, "aliases": []} for v in values]
+            s.add(Dictionary(tenant_id=t.id, name=name, title=name, entries=entries))
         doc_id = uuid.uuid4()
         keys = []
         for n, (data, name) in enumerate(files):
@@ -627,3 +643,67 @@ async def test_worker_refuses_fake_without_allow(tmp_path, monkeypatch, allow):
         await worker.shutdown(ctx)
     finally:
         get_settings.cache_clear()
+
+
+ORDER_SCHEMA = {
+    "slug": "naryad_t",
+    "title": "Наряд",
+    "description": "d",
+    "fields": [
+        {"name": "number", "type": "string", "required": True},
+        {"name": "clinic", "type": "string", "rules": [{"kind": "dictionary", "params": {"name": "clinics"}}]},
+    ],
+}
+
+
+def order_deps(sm, tmp_path, clinic):
+    return make_deps(sm, tmp_path, responses={"naryad_t": {"number": "101", "clinic": clinic, "_uncertain": []}})
+
+
+async def test_dictionary_corrects_close_value(sm, tmp_path):
+    deps = order_deps(sm, tmp_path, "Дента-Локс")
+    doc_id = await make_doc(
+        deps, slug="naryad_t", schema_body=ORDER_SCHEMA, dictionaries={"clinics": ["Дента-Люкс", "Улыбка+"]}
+    )
+    await process_document(deps, doc_id)
+    doc = await load(deps, doc_id)
+    assert doc.status == "ok", doc.issues
+    assert doc.data["clinic"] == "Дента-Люкс"
+    assert [i["code"] for i in doc.issues] == ["corrected"]
+
+
+async def test_dictionary_unknown_value_needs_review(sm, tmp_path):
+    deps = order_deps(sm, tmp_path, "Drama - Love")
+    doc_id = await make_doc(deps, slug="naryad_t", schema_body=ORDER_SCHEMA, dictionaries={"clinics": ["Дента-Люкс"]})
+    await process_document(deps, doc_id)
+    doc = await load(deps, doc_id)
+    assert doc.status == "needs_review"
+    assert doc.data["clinic"] == "Drama - Love"
+    assert [i["code"] for i in doc.issues] == ["not_in_dictionary"]
+
+
+async def test_dictionary_missing_needs_review(sm, tmp_path):
+    deps = order_deps(sm, tmp_path, "Дента-Люкс")
+    doc_id = await make_doc(deps, slug="naryad_t", schema_body=ORDER_SCHEMA)
+    await process_document(deps, doc_id)
+    doc = await load(deps, doc_id)
+    assert doc.status == "needs_review"
+    assert [i["code"] for i in doc.issues] == ["dictionary_missing"]
+
+
+async def test_untrusted_model_never_auto_ok(sm, tmp_path):
+    deps = make_deps(sm, tmp_path)
+    doc_id = await make_doc(deps, auto_ok=False)
+    await process_document(deps, doc_id)
+    doc = await load(deps, doc_id)
+    assert doc.status == "needs_review"
+    assert [(i["field"], i["code"]) for i in doc.issues] == [(None, "review_required")]
+
+
+async def test_untrusted_model_adds_nothing_when_already_needs_review(sm, tmp_path):
+    deps = make_deps(sm, tmp_path, responses={"invoice_ru": {**INVOICE, "subtotal": 300}})
+    doc_id = await make_doc(deps, auto_ok=False)
+    await process_document(deps, doc_id)
+    doc = await load(deps, doc_id)
+    assert doc.status == "needs_review"
+    assert "review_required" not in [i["code"] for i in doc.issues]

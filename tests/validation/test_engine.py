@@ -307,3 +307,39 @@ def test_product_sum_skipped_when_incomplete():
     assert evaluate(ORDER, {"works": [{"qty": None, "price": 1500}], "total": 4500}, today=TODAY) == []
     assert evaluate(ORDER, {"works": [], "total": 4500}, today=TODAY) == []
     assert evaluate(ORDER, {"works": [{"qty": 1, "price": 1500}], "total": None}, today=TODAY) == []
+
+
+DATES = schema(
+    [
+        {"name": "issued", "type": "date", "rules": [{"kind": "date_not_older", "params": {"days": 120}}]},
+        {"name": "delivery", "type": "date"},
+    ],
+    [{"kind": "date_within", "params": {"earlier": "issued", "later": "delivery", "max_days": 60}}],
+)
+
+
+def test_date_not_older():
+    assert evaluate(DATES, {"issued": "2026-07-01"}, today=TODAY) == []
+    issues = evaluate(DATES, {"issued": "2016-10-22"}, today=TODAY)
+    assert codes(issues) == [("issued", "date_too_old")]
+    assert "2016-10-22" in issues[0].message
+
+
+def test_date_within():
+    assert evaluate(DATES, {"issued": "2026-10-22", "delivery": "2026-11-03"}, today=TODAY) == []
+    issues = evaluate(DATES, {"issued": "2026-10-22", "delivery": "2400-10-24"}, today=TODAY)
+    assert codes(issues) == [("delivery", "date_range")]
+    # обратный порядок — забота date_order, а не date_within
+    assert evaluate(DATES, {"issued": "2026-10-22", "delivery": "2026-10-01"}, today=TODAY) == []
+    assert evaluate(DATES, {"issued": "2026-10-22", "delivery": None}, today=TODAY) == []
+
+
+def test_dictionary_rule_is_applied_outside_evaluate():
+    # сверка со справочником идёт в resolve_dictionaries (нужны данные тенанта), evaluate её пропускает
+    s = schema([{"name": "clinic", "type": "string", "rules": [{"kind": "dictionary", "params": {"name": "c"}}]}])
+    assert evaluate(s, {"clinic": "что угодно"}, today=TODAY) == []
+
+
+def test_corrected_is_informational():
+    assert decide_status([Issue("clinic", "corrected", "…")]) == "ok"
+    assert decide_status([Issue("clinic", "corrected", "…"), Issue("x", "uncertain", "…")]) == "needs_review"

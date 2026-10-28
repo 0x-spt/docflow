@@ -88,6 +88,9 @@ class Tenant(Base):
     id: Mapped[uuid.UUID] = _id()
     name: Mapped[str] = mapped_column(String)
     extractor: Mapped[str] = mapped_column(String, default="claude")
+    # Можно ли ставить ok без человека. Модель без подтверждённой эталонным прогоном точности
+    # уверенно ошибается в фамилиях и названиях — тогда всё уходит в needs_review как черновик
+    auto_ok: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = _created()
 
 
@@ -123,6 +126,21 @@ class SchemaRecord(Base):
     version: Mapped[int] = mapped_column(Integer)
     body: Mapped[dict] = mapped_column(JsonType)
     created_at: Mapped[datetime] = _created()
+
+
+class Dictionary(Base):
+    """Справочник тенанта (клиники, врачи, контрагенты): записи {value, aliases}, правит клиент."""
+
+    __tablename__ = "dictionaries"
+    __table_args__ = (UniqueConstraint("tenant_id", "name", name="tenant_name"),)
+
+    id: Mapped[uuid.UUID] = _id()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"))
+    name: Mapped[str] = mapped_column(String)
+    title: Mapped[str] = mapped_column(String)
+    entries: Mapped[list] = mapped_column(JsonType)
+    created_at: Mapped[datetime] = _created()
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_now, onupdate=_now)
 
 
 class Document(Base):

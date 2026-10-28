@@ -19,7 +19,7 @@ x-app-env: &app-env
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
   # локальный режим (152-ФЗ): Ollama на хосте; в проде — адрес GPU-сервера внутри периметра клиента
   DOCFLOW_OLLAMA_URL: ${DOCFLOW_OLLAMA_URL:-http://host.docker.internal:11434}
-  DOCFLOW_OLLAMA_MODEL: ${DOCFLOW_OLLAMA_MODEL:-qwen2.5vl:7b}
+  DOCFLOW_OLLAMA_MODEL: ${DOCFLOW_OLLAMA_MODEL:-qwen3-vl:30b-a3b-instruct}
 
 services:
   postgres:

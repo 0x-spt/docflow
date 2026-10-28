@@ -102,3 +102,26 @@ def test_total_consistent_params_cross_checked():
     ):
         with pytest.raises(ValidationError):
             _schema(_tbl(), total, sub, vat, rules=[{"kind": "total_consistent", "params": bad}])
+
+
+def test_dictionary_rule_needs_name():
+    base = {"slug": "t_doc", "title": "T", "description": "d"}
+    ok = {"name": "clinic", "type": "string", "rules": [{"kind": "dictionary", "params": {"name": "clinics"}}]}
+    DocSchema.model_validate({**base, "fields": [ok]})
+    for params in ({}, {"name": ""}, {"name": 5}, {"name": "c", "fuzzy": "yes"}):
+        bad = {**ok, "rules": [{"kind": "dictionary", "params": params}]}
+        with pytest.raises(ValueError):
+            DocSchema.model_validate({**base, "fields": [bad]})
+
+
+def test_date_rules_need_positive_days():
+    base = {"slug": "t_doc", "title": "T", "description": "d"}
+    for params in ({}, {"days": 0}, {"days": "30"}):
+        f = {"name": "d", "type": "date", "rules": [{"kind": "date_not_older", "params": params}]}
+        with pytest.raises(ValueError):
+            DocSchema.model_validate({**base, "fields": [f]})
+    fields = [{"name": "a", "type": "date"}, {"name": "b", "type": "date"}]
+    for max_days in (None, 0, 1.5):
+        rule = {"kind": "date_within", "params": {"earlier": "a", "later": "b", "max_days": max_days}}
+        with pytest.raises(ValueError):
+            DocSchema.model_validate({**base, "fields": fields, "rules": [rule]})

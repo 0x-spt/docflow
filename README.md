@@ -32,6 +32,37 @@ curl -s -o scan.pdf http://localhost:8000/v1/documents/<id>/pdf -H "Authorizatio
 
 Повтор `POST` с тем же `Idempotency-Key` вернёт уже принятый документ. Документация API — http://localhost:8000/docs.
 
+## Справочники
+
+Клиники, врачи, контрагенты, склады — всё, что у клиента из фиксированного списка. Поле схемы с правилом
+`{kind: dictionary, params: {name: clinics}}` сверяется со справочником `clinics` этого клиента:
+
+- совпадение без учёта регистра, пробелов, пунктуации и ё/е → значение приводится к записи справочника;
+- одна-две буквы не те («Дента-Локс») и кандидат единственный → исправляется, в `issues` — `corrected`
+  (на статус не влияет);
+- нет в справочнике или кандидатов несколько → `not_in_dictionary`, документ уходит на проверку. Выдуманное
+  моделью название хуже пустого поля. `fuzzy: false` в правиле отключает автоисправление.
+
+```
+curl -s -X PUT http://localhost:8000/v1/dictionaries/clinics -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"title": "Клиники", "entries": [{"value": "Дента-Люкс"}, {"value": "Улыбка+", "aliases": ["Улыбка плюс"]}]}'
+```
+
+`PUT` заменяет справочник целиком (до 5000 записей), `GET /v1/dictionaries[/{name}]`, `DELETE /v1/dictionaries/{name}`.
+
+## Доверие к модели (`auto_ok`)
+
+Проверки ловят арифметику, контрольные суммы и даты, но не неверно прочитанную фамилию: сильная модель сама отмечает
+сомнения (`_uncertain`), слабая ошибается уверенно. Поэтому у клиента есть флаг `auto_ok`: без него статус `ok` не
+ставится, всё уходит в `needs_review` как черновик (`review_required`). По умолчанию — да для `claude`, нет для
+`ollama`. Включать после эталонного прогона на документах клиента:
+
+```
+docker compose exec api docflow create-tenant "Лаборатория" --extractor ollama   # печатает id, auto_ok: нет
+docker compose exec api docflow set-auto-ok <id> yes
+```
+
 ## Вебхуки
 
 ```
