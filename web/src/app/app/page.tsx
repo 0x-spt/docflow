@@ -1,7 +1,8 @@
 import Link from "next/link";
 import { unstable_rethrow } from "next/navigation";
 
-import { Button, Field, Stat, StatusBadge } from "@/components/ui";
+import { ExcelRegistryForm } from "@/components/app/ExcelRegistryForm";
+import { Button, Stat, StatusBadge } from "@/components/ui";
 import { formatDateTime, summaryValue } from "@/lib/format";
 import { apiFetchAuthed } from "@/lib/session";
 import type { DocStatus, DocumentList, SchemaListItem, Stats } from "@/lib/types";
@@ -102,24 +103,7 @@ export default async function QueuePage({
             Реестр в Excel
           </h2>
           <p className="mt-1 text-muted">Документы одного типа за период — таблицей для бухгалтерии. Период считается по дате загрузки.</p>
-          {/* обычная GET-форма: ответ — файл, страница не уходит */}
-          <form method="get" action="/app/files/excel" className="mt-4 grid items-end gap-4 sm:grid-cols-2 lg:grid-cols-[2fr_1fr_1fr_1fr_auto]">
-            <Field as="select" label="Тип документа" name="schema" required defaultValue={schemas[0].slug}>
-              {schemas.map((s) => (
-                <option key={s.slug} value={s.slug}>
-                  {s.title}
-                </option>
-              ))}
-            </Field>
-            <Field label="С" name="from" type="date" required defaultValue={monthStart} />
-            <Field label="По" name="to" type="date" required defaultValue={todayIso} />
-            <Field as="select" label="Статус документов" name="status" defaultValue="ok">
-              <option value="ok">Готовые</option>
-              <option value="needs_review">На проверке</option>
-              <option value="all">Все</option>
-            </Field>
-            <Button type="submit">Скачать реестр</Button>
-          </form>
+          <ExcelRegistryForm schemas={schemas} monthStart={monthStart} today={todayIso} />
         </section>
       ) : null}
 

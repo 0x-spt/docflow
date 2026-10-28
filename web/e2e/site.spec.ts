@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { createServer, type Server } from "node:net";
 import path from "node:path";
 
 import { expect, test, type Page } from "@playwright/test";
@@ -161,7 +162,7 @@ async function apiJson<T>(pathname: string, init: RequestInit = {}): Promise<T> 
   return (await res.json()) as T;
 }
 
-/** Телеграм-подключение с чужим токеном: создание в Телеграм не ходит, а доставка уведомления упадёт с отказом. */
+/** Телеграм-подключение с чужим токеном: создание в Телеграм не ходит (в этом тесте подключение только лежит в списке). */
 async function createTelegram(name: string): Promise<string> {
   const d = await apiJson<{ id: string }>("/v1/destinations", {
     method: "POST",
@@ -213,11 +214,41 @@ test("rules: save and reload", async ({ page }) => {
   }
 });
 
-type ExportRow = { id: string; status: string; error: string | null };
+type ExportRow = { id: string; status: string; purpose: string; updated_at: string };
+
+/** «Почтовый сервер» на хосте: здоровается кодом 554 — доставка падает сразу и без повторов, интернет не нужен. */
+function refusingSmtp(): Promise<{ server: Server; port: number }> {
+  return new Promise((resolve) => {
+    const server = createServer((sock) => sock.on("error", () => {}).end("554 go away\r\n"));
+    server.listen(0, "0.0.0.0", () => resolve({ server, port: (server.address() as { port: number }).port }));
+  });
+}
+
+async function createRefusingMail(port: number): Promise<string> {
+  const d = await apiJson<{ id: string }>("/v1/destinations", {
+    method: "POST",
+    body: JSON.stringify({
+      kind: "email",
+      name: `Почта ${Date.now()}`,
+      config: {
+        host: "host.docker.internal",
+        port,
+        security: "none",
+        from_addr: "docflow@example.com",
+        to_addrs: "boss@example.com",
+      },
+    }),
+  });
+  return d.id;
+}
+
+const listExports = async (docId: string) =>
+  (await apiJson<{ items: ExportRow[] }>(`/v1/exports?document_id=${docId}`)).items;
 
 test("exports block shows failed delivery with retry; excel registry downloads", async ({ page }) => {
   test.setTimeout(120_000);
-  const dest = await createTelegram(`Выгрузка ${Date.now()}`);
+  const { server, port } = await refusingSmtp();
+  const dest = await createRefusingMail(port);
   try {
     await apiJson("/v1/routing-rules", {
       method: "PUT",
@@ -239,28 +270,31 @@ test("exports block shows failed delivery with retry; excel registry downloads",
     await expect
       .poll(async () => (await apiJson<{ status: string }>(`/v1/documents/${docId}`)).status, { timeout: 60_000 })
       .toBe("needs_review");
-    // выгрузка уходит только для готового документа: подтверждаем
+    // «на проверку» ушло при needs_review; «новый документ» уйдёт после подтверждения
     await apiJson(`/v1/documents/${docId}/review`, { method: "POST", body: JSON.stringify({ decision: "approve" }) });
     await expect
-      .poll(
-        async () =>
-          (await apiJson<{ items: ExportRow[] }>(`/v1/exports?document_id=${docId}`)).items[0]?.status ?? "none",
-        { timeout: 60_000 },
-      )
-      .toBe("failed");
+      .poll(async () => (await listExports(docId)).filter((e) => e.status === "failed").length, { timeout: 60_000 })
+      .toBe(2);
 
     await login(page);
     await expect(page).toHaveURL(/\/app$/);
     await page.goto(`/app/documents/${docId}`);
     const block = page.getByRole("region", { name: /Выгрузки/ });
     await expect(block).toBeVisible();
-    await expect(block.getByText("Ошибка", { exact: true }).first()).toBeVisible();
-    await expect(block.getByText("токен бота не принят").first()).toBeVisible();
-    // «Новый документ» уходит после подтверждения; «на проверку» — раньше, оба упали
-    const retry = block.getByRole("button", { name: /Повторить выгрузку/ });
-    await expect(retry).toHaveCount(2);
-    await retry.first().click();
-    await expect(block.getByRole("button", { name: /Повторить выгрузку/ }).first()).toBeVisible();
+    const row = block.getByRole("row", { name: /Уведомление о новом/ });
+    await expect(row.getByText("Ошибка", { exact: true })).toBeVisible();
+    const retry = row.getByRole("button", { name: /Повторить выгрузку/ });
+    await expect(retry).toBeVisible();
+
+    // «Повторить» реально ставит выгрузку заново: у строки меняется updated_at
+    const before = (await listExports(docId)).find((e) => e.purpose === "notify_new");
+    expect(before).toBeTruthy();
+    await retry.click();
+    await expect
+      .poll(async () => (await listExports(docId)).find((e) => e.purpose === "notify_new")?.updated_at, {
+        timeout: 30_000,
+      })
+      .not.toBe(before?.updated_at);
 
     // реестр в Excel: через форму на очереди
     await page.goto("/app");
@@ -279,9 +313,18 @@ test("exports block shows failed delivery with retry; excel registry downloads",
     expect(res.headers()["content-disposition"]).toContain(".xlsx");
     expect((await res.body()).subarray(0, 2).toString()).toBe("PK");
 
-    const bad = await page.request.get("/app/files/excel?schema=../x&from=2026-01-01&to=2026-01-02");
-    expect(bad.status()).toBe(400);
+    // отказ показывается под формой, страница не уходит
+    await page.getByLabel("С", { exact: true }).fill(today);
+    await page.getByLabel("По", { exact: true }).fill("2020-01-01");
+    await page.getByRole("button", { name: "Скачать реестр" }).click();
+    await expect(page.getByRole("alert").filter({ hasText: "Конец периода раньше начала" })).toBeVisible();
+    await expect(page).toHaveURL(/\/app$/);
+
+    for (const q of ["schema=../x&from=2026-01-01&to=2026-01-02", `schema=e2e_order&from=2026-02-31&to=${today}`, `schema=e2e_order&from=${today}&to=2020-01-01`]) {
+      expect((await page.request.get(`/app/files/excel?${q}`)).status(), q).toBe(400);
+    }
   } finally {
+    server.close();
     await apiJson("/v1/routing-rules", { method: "PUT", body: JSON.stringify({ rules: [] }) });
   }
 });

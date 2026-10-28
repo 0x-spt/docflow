@@ -4,6 +4,12 @@ const SLUG_RE = /^[A-Za-z0-9_-]{1,100}$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const STATUSES = new Set(["ok", "needs_review", "all"]);
 
+/** Настоящая ли дата: «2026-02-31» разбирается Date, но сдвигается на март. */
+function realDate(v: string): boolean {
+  const t = Date.parse(v);
+  return DATE_RE.test(v) && !Number.isNaN(t) && new Date(t).toISOString().slice(0, 10) === v;
+}
+
 function bad(text: string): Response {
   return new Response(text, {
     status: 400,
@@ -19,8 +25,9 @@ export async function GET(request: Request) {
   const to = sp.get("to") ?? "";
   const status = sp.get("status") || "ok";
   if (!SLUG_RE.test(schema)) return bad("Выберите тип документа.");
-  if (!DATE_RE.test(from) || Number.isNaN(Date.parse(from))) return bad("Укажите начало периода.");
-  if (!DATE_RE.test(to) || Number.isNaN(Date.parse(to))) return bad("Укажите конец периода.");
+  if (!realDate(from)) return bad("Укажите начало периода.");
+  if (!realDate(to)) return bad("Укажите конец периода.");
+  if (to < from) return bad("Конец периода раньше начала.");
   if (!STATUSES.has(status)) return bad("Неизвестный статус документов.");
   const q = new URLSearchParams({ schema, from, to, status });
   return proxyFile(`/v1/exports/excel?${q}`);

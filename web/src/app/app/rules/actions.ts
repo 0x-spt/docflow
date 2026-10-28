@@ -14,13 +14,14 @@ const OPS = new Set(["eq", "ne", "gt", "ge", "lt", "le", "contains", "in_diction
 /** Заменяет весь список правил. Тело проверяет API; здесь только форма данных. */
 export async function saveRules(rules: RoutingRule[]): Promise<RulesState> {
   if (!Array.isArray(rules)) return { error: "Не удалось прочитать правила." };
+  const badOp = rules.findIndex((r) => (r.conditions ?? []).some((c) => !OPS.has(c.op)));
+  if (badOp >= 0) return { error: `Правило ${badOp + 1}: неизвестное условие. Обновите страницу и попробуйте ещё раз.` };
   const clean: RoutingRule[] = [];
   for (const r of rules) {
     clean.push({
       name: String(r.name ?? "").trim(),
       schema: r.schema ? String(r.schema) : null,
       conditions: (r.conditions ?? [])
-        .filter((c) => OPS.has(c.op))
         .map((c) => ({
           field: String(c.field ?? "").trim(),
           op: c.op,

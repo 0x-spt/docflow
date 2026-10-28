@@ -211,6 +211,8 @@ export function RulesEditor({
                       return (
                         <div
                           key={ci}
+                          role="group"
+                          aria-label={`Условие ${ci + 1} правила ${i + 1}`}
                           className="grid items-end gap-2 border-t border-ink/30 pt-2 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto]"
                         >
                           <div className="flex flex-col gap-1.5">
