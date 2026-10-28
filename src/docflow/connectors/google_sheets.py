@@ -10,16 +10,28 @@ import json
 import re
 import time
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 import jwt
 
 from docflow.connectors.base import REGISTRY, BaseConnector, ConnectorError, DestCtx, ExportDoc, FieldDef
-from docflow.tabular import DOCS_SHEET, ITEMS_SHEET, Cell, doc_row, docs_header, item_rows, items_header
+from docflow.tabular import (
+    DOCS_SHEET,
+    ITEMS_SHEET,
+    Cell,
+    doc_date_columns,
+    doc_row,
+    docs_header,
+    item_date_columns,
+    item_rows,
+    items_header,
+)
 
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 API = "https://sheets.googleapis.com/v4/spreadsheets"
+DATE_FORMAT = "dd.mm.yyyy"
 TOKEN_MARGIN = 60  # обновляем токен за минуту до истечения
 JWT_LIFETIME = 3600
 
@@ -60,6 +72,11 @@ def quote_sheet(title: str) -> str:
     return "'" + title.replace("'", "''") + "'"
 
 
+def range_path(sheet: str, cells: str) -> str:
+    """Диапазон для пути URL: имя листа может содержать ? # / % — кодируем всё, кроме ' и !."""
+    return quote(f"{quote_sheet(sheet)}!{cells}", safe="!'")
+
+
 def _row_of(updated_range: str) -> int:
     found = re.search(r"!\$?[A-Z]+(\d+)", updated_range)
     if not found:
@@ -77,6 +94,8 @@ class _Session:
         self.base = f"{API}/{extract_spreadsheet_id(ctx.config.get('spreadsheet_id'))}"
         self.docs_sheet = str(ctx.config.get("documents_sheet") or "").strip() or DOCS_SHEET
         self.items_sheet = str(ctx.config.get("items_sheet") or "").strip() or ITEMS_SHEET
+        if self.docs_sheet.casefold() == self.items_sheet.casefold():
+            raise ConnectorError("лист документов и лист позиций должны называться по-разному")
 
     async def token(self) -> str:
         key = (self.email, hashlib.sha256(self.account["private_key"].encode()).hexdigest())
@@ -103,9 +122,16 @@ class _Session:
             raise _transient(f"Google временно недоступен (код {resp.status_code})")
         if resp.status_code != 200:
             raise ConnectorError("Google отклонил ключ сервисного аккаунта — создайте и вставьте ключ заново")
-        body = resp.json()
-        TOKENS[key] = (body["access_token"], time.monotonic() + float(body.get("expires_in", 3600)))
-        return body["access_token"]
+        try:
+            body = resp.json()
+            access = body["access_token"]
+            if not isinstance(access, str) or not access:
+                raise ValueError
+            lifetime = float(body.get("expires_in", 3600))
+        except (ValueError, KeyError, TypeError):
+            raise _transient("Google вернул непонятный ответ при выдаче доступа") from None
+        TOKENS[key] = (access, time.monotonic() + lifetime)
+        return access
 
     async def call(self, method: str, url: str, **kwargs: Any) -> dict[str, Any]:
         headers = {"Authorization": f"Bearer {await self.token()}"}
@@ -117,7 +143,10 @@ class _Session:
         if code < 300:
             return resp.json() if resp.content else {}
         if code in (403, 404):
-            raise ConnectorError(f"нет доступа к таблице — откройте доступ на редактирование для {self.email}")
+            raise ConnectorError(
+                "нет доступа к таблице или выключен Google Sheets API — откройте доступ на редактирование "
+                f"для {self.email} и проверьте, что API включён"
+            )
         if code == 401:
             TOKENS.clear()  # токен мог быть отозван: следующая попытка выпустит новый
             raise _transient("Google отклонил токен, повторим")
@@ -125,12 +154,18 @@ class _Session:
             raise _transient(f"Google Таблицы временно недоступны (код {code})")
         raise ConnectorError(f"Google Таблицы отклонили запрос (код {code}): {_api_message(resp)}")
 
-    async def titles(self) -> tuple[str, list[str]]:
-        data = await self.call("GET", self.base, params={"fields": "properties.title,sheets.properties.title"})
-        sheets = [s.get("properties", {}).get("title", "") for s in data.get("sheets", [])]
+    async def titles(self) -> tuple[str, dict[str, int]]:
+        """Название таблицы и листы: название -> sheetId."""
+        data = await self.call(
+            "GET", self.base, params={"fields": "properties.title,sheets.properties(title,sheetId)"}
+        )
+        sheets = {
+            p.get("title", ""): p.get("sheetId", 0)
+            for p in (s.get("properties", {}) for s in data.get("sheets", []))
+        }
         return data.get("properties", {}).get("title", ""), sheets
 
-    async def ensure_sheets(self, *wanted: str) -> None:
+    async def ensure_sheets(self, *wanted: str) -> dict[str, int]:
         _, existing = await self.titles()
         missing = [w for w in dict.fromkeys(wanted) if w not in existing]
         if missing:
@@ -139,26 +174,49 @@ class _Session:
                 f"{self.base}:batchUpdate",
                 json={"requests": [{"addSheet": {"properties": {"title": t}}} for t in missing]},
             )
+            _, existing = await self.titles()
+        return existing
 
     async def column_a(self, sheet: str) -> list[str]:
-        data = await self.call("GET", f"{self.base}/values/{quote_sheet(sheet)}!A:A")
+        data = await self.call("GET", f"{self.base}/values/{range_path(sheet, 'A:A')}")
         return [(row[0] if row else "") for row in data.get("values", [])]
 
-    async def ensure_header(self, sheet: str, column: list[str], header: list[str]) -> None:
+    async def ensure_header(
+        self, sheet: str, sheet_id: int, column: list[str], header: list[str], date_columns: list[int]
+    ) -> None:
+        """Шапка в пустой лист + формат ДД.ММ.ГГГГ колонкам с датами (даты уходят серийными числами)."""
         if column and column[0] != "":
             return  # шапка есть (наша или клиента) — не трогаем
         await self.call(
             "PUT",
-            f"{self.base}/values/{quote_sheet(sheet)}!A1",
+            f"{self.base}/values/{range_path(sheet, 'A1')}",
             params={"valueInputOption": "RAW"},
             json={"values": [header]},
         )
+        if date_columns:
+            fmt = {"numberFormat": {"type": "DATE", "pattern": DATE_FORMAT}}
+            requests = [
+                {
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": 1,
+                            "startColumnIndex": col,
+                            "endColumnIndex": col + 1,
+                        },
+                        "cell": {"userEnteredFormat": fmt},
+                        "fields": "userEnteredFormat.numberFormat",
+                    }
+                }
+                for col in date_columns
+            ]
+            await self.call("POST", f"{self.base}:batchUpdate", json={"requests": requests})
 
     async def append(self, sheet: str, rows: list[list[Cell]]) -> int:
         """Дописывает строки, возвращает номер первой записанной."""
         data = await self.call(
             "POST",
-            f"{self.base}/values/{quote_sheet(sheet)}:append",
+            f"{self.base}/values/{quote(quote_sheet(sheet), safe=chr(39))}:append",
             params={"valueInputOption": "USER_ENTERED", "insertDataOption": "INSERT_ROWS"},
             json={"values": [["" if v is None else v for v in row] for row in rows]},
         )
@@ -204,20 +262,32 @@ class GoogleSheets(BaseConnector):
     async def export(self, ctx: DestCtx, doc: ExportDoc) -> str | None:
         s = _Session(ctx)
         doc_id = str(doc.id)
-        items = list(item_rows(doc))
-        await s.ensure_sheets(s.docs_sheet, *([s.items_sheet] if items else []))
+        items = list(item_rows(doc, target="sheets"))
+        ids = await s.ensure_sheets(s.docs_sheet, *([s.items_sheet] if items else []))
 
         column = await s.column_a(s.docs_sheet)
         if doc_id in column:
             row = column.index(doc_id) + 1
         else:
-            await s.ensure_header(s.docs_sheet, column, docs_header(doc.schema, ctx.mapping))
-            row = await s.append(s.docs_sheet, [doc_row(doc, ctx.mapping)])
+            await s.ensure_header(
+                s.docs_sheet,
+                ids[s.docs_sheet],
+                column,
+                docs_header(doc.schema, ctx.mapping),
+                doc_date_columns(doc.schema, ctx.mapping),
+            )
+            row = await s.append(s.docs_sheet, [doc_row(doc, ctx.mapping, target="sheets")])
 
         if items:
             items_col = await s.column_a(s.items_sheet)
             if doc_id not in items_col:  # повтор после сбоя дописывает только недостающее
-                await s.ensure_header(s.items_sheet, items_col, items_header(doc.schema))
+                await s.ensure_header(
+                    s.items_sheet,
+                    ids[s.items_sheet],
+                    items_col,
+                    items_header(doc.schema),
+                    item_date_columns(doc.schema),
+                )
                 await s.append(s.items_sheet, items)
         return f"{s.docs_sheet}!A{row}"
 

@@ -1,11 +1,16 @@
 """Документ как таблица: колонки и строки для Google Таблиц и Excel-реестра (одни и те же)."""
 
+import re
 from collections.abc import Iterator
 from datetime import date
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
 
-from docflow.connectors.base import ExportDoc
 from docflow.schemas.model import ColumnSpec, DocSchema, FieldSpec
+
+if TYPE_CHECKING:  # connectors.base подключает коннекторы, а те — этот модуль: циклический импорт только для типов
+    from docflow.connectors.base import ExportDoc
+
+Target = Literal["sheets", "xlsx"]
 
 DOCS_SHEET = "Документы"
 ITEMS_SHEET = "Позиции"
@@ -13,6 +18,30 @@ ID_HEADER = "ID документа"
 STATUS_LABELS = {"ok": "Проверен", "needs_review": "Нужна проверка"}
 
 Cell = str | int | float | date | None
+
+SHEETS_EPOCH = date(1899, 12, 30)
+_CONTROL = re.compile("[" + "".join(map(chr, [*range(10), *range(11, 32), 127])) + "]")  # всё, кроме \n
+_FORMULA_START = ("=", "+", "-", "@")
+# строка, которую Таблицы разберут сами как число/дату/время/булево: «00123», «40702810…», «05.10.2026», «TRUE»
+_PARSED = re.compile(r"^[\d\s.,:/+\-eE%$]+$")
+
+
+def clean_text(value: str) -> str:
+    return _CONTROL.sub("", value)
+
+
+def text(value: str, target: Target) -> str:
+    """Строка из документа (недоверенный текст OCR) как текст, а не формула/число.
+
+    Для Таблиц (USER_ENTERED) ставим `'` перед тем, что иначе стало бы формулой или было бы разобрано
+    как число/дата; xlsx хранит строки с типом «s» (см. export_xlsx), там префикс не нужен.
+    """
+    value = clean_text(value)
+    if target == "sheets" and value and (
+        value.startswith(_FORMULA_START) or _PARSED.match(value) or value.upper() in ("TRUE", "FALSE")
+    ):
+        return "'" + value
+    return value
 
 
 def label(spec: ColumnSpec) -> str:
@@ -43,8 +72,12 @@ def items_header(schema: DocSchema) -> list[str]:
     return [ID_HEADER, "Номер", *(label(c) for c in (table.columns or []) if table)]
 
 
-def cell(spec: ColumnSpec, value: Any, *, dates_as_date: bool) -> Cell:
-    """Числа остаются числами, даты — датами (или строкой ДД.ММ.ГГГГ), пустое — None."""
+def cell(spec: ColumnSpec, value: Any, *, target: Target) -> Cell:
+    """Значение ячейки по типу поля: number/integer — числом, date — датой, прочее — всегда текстом.
+
+    Дата для Таблиц — серийный номер (локаль не влияет; формат колонки ставится при создании шапки),
+    для xlsx — настоящая дата. Пустое — None.
+    """
     if value is None or (isinstance(value, (str, list, dict)) and not value):
         return None
     if isinstance(value, str) and not value.strip():
@@ -57,31 +90,42 @@ def cell(spec: ColumnSpec, value: Any, *, dates_as_date: bool) -> Cell:
         try:
             d = date.fromisoformat(value)
         except ValueError:
-            return value
-        return d if dates_as_date else d.strftime("%d.%m.%Y")
-    if isinstance(value, (str, int, float)) and not isinstance(value, bool):
-        return value
-    return str(value)
+            return text(value, target)
+        return d if target == "xlsx" else (d - SHEETS_EPOCH).days
+    return text(value if isinstance(value, str) else str(value), target)
 
 
-def doc_row(doc: ExportDoc, mapping: dict[str, str] | None = None, *, dates_as_date: bool = False) -> list[Cell]:
-    issued: Cell = doc.issued if dates_as_date else (doc.issued.strftime("%d.%m.%Y") if doc.issued else None)
-    fields = [
-        cell(spec, doc.data.get(spec.name), dates_as_date=dates_as_date) for spec, _ in doc_fields(doc.schema, mapping)
-    ]
+def date_cell(value: date | None, target: Target) -> Cell:
+    if value is None:
+        return None
+    return value if target == "xlsx" else (value - SHEETS_EPOCH).days
+
+
+def doc_date_columns(schema: DocSchema, mapping: dict[str, str] | None = None) -> list[int]:
+    """Индексы колонок листа документов с датами (для формата ДД.ММ.ГГГГ)."""
+    return [3] + [4 + i for i, (spec, _) in enumerate(doc_fields(schema, mapping)) if spec.type == "date"]
+
+
+def item_date_columns(schema: DocSchema) -> list[int]:
+    table = table_field(schema)
+    return [2 + i for i, c in enumerate(table.columns or []) if c.type == "date"] if table else []
+
+
+def doc_row(doc: "ExportDoc", mapping: dict[str, str] | None = None, *, target: Target = "sheets") -> list[Cell]:
+    fields = [cell(spec, doc.data.get(spec.name), target=target) for spec, _ in doc_fields(doc.schema, mapping)]
     return [
-        str(doc.id),
-        doc.title,
-        doc.number,
-        issued,
+        text(str(doc.id), target),
+        text(doc.title, target),
+        text(doc.number, target) if doc.number else None,
+        date_cell(doc.issued, target),
         *fields,
         STATUS_LABELS.get(doc.status, doc.status),
-        doc.digital_pdf_url,
-        doc.cabinet_url,
+        text(doc.digital_pdf_url, target) if doc.digital_pdf_url else None,
+        text(doc.cabinet_url, target) if doc.cabinet_url else None,
     ]
 
 
-def item_rows(doc: ExportDoc, *, dates_as_date: bool = False) -> Iterator[list[Cell]]:
+def item_rows(doc: "ExportDoc", *, target: Target = "sheets") -> Iterator[list[Cell]]:
     table = table_field(doc.schema)
     if table is None:
         return
@@ -92,7 +136,7 @@ def item_rows(doc: ExportDoc, *, dates_as_date: bool = False) -> Iterator[list[C
         if not isinstance(row, dict):
             continue
         yield [
-            str(doc.id),
-            doc.number,
-            *(cell(c, row.get(c.name), dates_as_date=dates_as_date) for c in table.columns or []),
+            text(str(doc.id), target),
+            text(doc.number, target) if doc.number else None,
+            *(cell(c, row.get(c.name), target=target) for c in table.columns or []),
         ]
