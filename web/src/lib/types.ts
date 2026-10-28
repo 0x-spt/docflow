@@ -167,6 +167,7 @@ export type FieldType = ColumnType | "table";
 
 export interface SchemaColumn {
   name: string;
+  title?: string | null;
   type: ColumnType;
   description?: string;
   values?: string[] | null;
@@ -185,4 +186,47 @@ export interface DocSchema {
   title: string;
   description: string;
   fields: SchemaField[];
+}
+
+/** Поле формы подключения (GET /v1/connectors) */
+export interface FieldDef {
+  name: string;
+  label: string;
+  required: boolean;
+  help: string;
+  type: "text" | "url" | "number" | "textarea" | "select";
+  options?: string[] | null;
+}
+
+export interface ConnectorInfo {
+  kind: string;
+  label: string;
+  config_fields: FieldDef[];
+  secret_fields: FieldDef[];
+  target_fields: FieldDef[];
+}
+
+/** GET /v1/destinations: секреты не возвращаются, только признак has_secrets */
+export interface Destination {
+  id: string;
+  kind: string;
+  name: string;
+  config: Record<string, unknown>;
+  mapping: Record<string, string>;
+  has_secrets: boolean;
+  active: boolean;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface TestResult {
+  ok: boolean;
+  message: string;
+}
+
+/** Схема для сопоставления полей: строки «поле документа» (ключ маппинга) */
+export interface MappingSchema {
+  slug: string;
+  title: string;
+  rows: { key: string; label: string; group?: string }[];
 }
