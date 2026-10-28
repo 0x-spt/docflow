@@ -1,0 +1,303 @@
+"""Выгрузки и уведомления получателям: идемпотентная постановка, доставка через коннектор, ретраи с backoff.
+
+Одна строка exports на (документ, получатель, назначение): повторная постановка (повтор конвейера, двойное
+одобрение) дубля не создаёт, `done` автоматически не переотправляется — только ручное «Повторить» для `failed`.
+Выгрузка в учётную систему (purpose=export) уходит только для документа в `ok`: needs_review/failed туда не
+попадают, даже если задача как-то оказалась в очереди.
+"""
+
+import asyncio
+import logging
+from datetime import UTC, date, datetime, timedelta
+from typing import Any
+from uuid import UUID
+
+import httpx
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from docflow.config import Settings
+from docflow.connectors.base import REGISTRY, Connector, ConnectorError, DestCtx, ExportDoc, supports
+from docflow.db.models import Destination, Document, Export
+from docflow.pdf.digital import render_digital_pdf
+from docflow.queue import DELIVER_EXPORT, Enqueuer
+from docflow.routing import RoutingDecision
+from docflow.schemas.model import DocSchema
+from docflow.secrets import SecretsKeyMissing, decrypt_secrets
+from docflow.storage.blobs import BlobNotFound, BlobStore, scan_key
+from docflow.webhooks import check_webhook_url
+
+logger = logging.getLogger(__name__)
+
+# как у вебхуков: 1 попытка + 5 повторов (10 с, 1 мин, 5 мин, 30 мин, 2 ч)
+RETRY_DELAYS = (10, 60, 300, 1800, 7200)
+# пока попытка идёт, next_attempt_at сдвинут на LEASE вперёд: крон не поставит вторую копию работающей задачи
+# (дубль во внешней системе). Больше job_timeout воркера (300 с) с запасом.
+LEASE = timedelta(minutes=10)
+MAX_ERROR = 500
+
+DESTINATION_OFF = "получатель отключён"
+DOCUMENT_GONE = "документ удалён"
+NOT_APPROVED = "документ не подтверждён (статус {status}): в учётную систему не выгружается"
+
+PURPOSES = ("export", "notify_review", "notify_new")
+
+
+def export_job_id(export_id: UUID | str, attempt: int) -> str:
+    return f"export:{export_id}:{attempt}"
+
+
+async def enqueue_exports(
+    session: AsyncSession, document: Document, purpose: str, destination_ids, enqueuer: Enqueuer
+) -> int:
+    """Создаёт выгрузки документа активным получателям тенанта, чей коннектор умеет это назначение.
+
+    Уже существующие (в любом статусе) пропускает; мёртвые/чужие id молча отбрасывает. Возвращает число новых.
+    """
+    ids = set(destination_ids)
+    if not ids:
+        return 0
+    document_id, tenant_id = document.id, document.tenant_id
+    destinations = (
+        await session.execute(
+            select(Destination)
+            .where(Destination.tenant_id == tenant_id, Destination.id.in_(ids), Destination.active.is_(True))
+            .order_by(Destination.created_at, Destination.id)
+        )
+    ).scalars().all()
+
+    created: list[UUID] = []
+    for dest in destinations:
+        connector = REGISTRY.get(dest.kind)
+        if connector is None or not supports(connector, purpose):
+            continue
+        exists = (
+            await session.execute(
+                select(Export.id).where(
+                    Export.document_id == document_id, Export.destination_id == dest.id, Export.purpose == purpose
+                )
+            )
+        ).first()
+        if exists:
+            continue
+        export = Export(tenant_id=tenant_id, document_id=document_id, destination_id=dest.id, purpose=purpose)
+        try:
+            async with session.begin_nested():
+                session.add(export)
+        except IntegrityError:  # гонка с параллельной постановкой
+            continue
+        created.append(export.id)
+    await session.commit()
+    for export_id in created:  # после commit, чтобы воркер увидел строку; потерянное поднимет requeue_stale
+        await enqueuer.enqueue(DELIVER_EXPORT, str(export_id), job_id=export_job_id(export_id, 0))
+    return len(created)
+
+
+async def enqueue_routed(
+    session: AsyncSession, document: Document, decision: RoutingDecision, enqueuer: Enqueuer
+) -> int:
+    """По итоговому статусу: ok → выгрузки и «новый документ»; needs_review → «на проверку»; прочее — ничего."""
+    status = document.status
+    if status == "ok":
+        n = await enqueue_exports(session, document, "export", decision.export_to, enqueuer)
+        return n + await enqueue_exports(session, document, "notify_new", decision.notify, enqueuer)
+    if status == "needs_review":
+        return await enqueue_exports(session, document, "notify_review", decision.notify, enqueuer)
+    return 0
+
+
+async def requeue_stale_exports(
+    session: AsyncSession, enqueuer: Enqueuer, now: datetime, grace: timedelta = timedelta(minutes=5)
+) -> int:
+    """Возвращает в очередь pending-выгрузки, потерянные при падении между commit и enqueue или воркера."""
+    cutoff = now - grace
+    rows = (
+        await session.execute(
+            select(Export.id, Export.attempt).where(
+                Export.status == "pending",
+                (Export.next_attempt_at < cutoff) | (Export.next_attempt_at.is_(None) & (Export.created_at < cutoff)),
+            )
+        )
+    ).all()
+    requeued = 0
+    for export_id, attempt in rows:
+        try:
+            await enqueuer.enqueue(DELIVER_EXPORT, str(export_id), job_id=export_job_id(export_id, attempt))
+        except Exception:
+            logger.exception("не удалось перепоставить выгрузку %s", export_id)
+            continue
+        requeued += 1
+    return requeued
+
+
+async def _claim(session: AsyncSession, export_id: UUID, seen: int) -> bool:
+    """Атомарно занимает попытку: для данного seen rowcount 1 получит только один воркер."""
+    res = await session.execute(
+        update(Export)
+        .where(Export.id == export_id, Export.status == "pending", Export.attempt == seen)
+        .values(attempt=seen + 1, next_attempt_at=datetime.now(UTC) + LEASE)
+        .execution_options(synchronize_session=False)
+    )
+    await session.commit()
+    return res.rowcount == 1
+
+
+async def _fail(session: AsyncSession, export: Export, reason: str) -> None:
+    export.status = "failed"
+    export.last_error = reason[:MAX_ERROR]
+    export.next_attempt_at = None
+    await session.commit()
+
+
+def _issued(value: Any) -> date | None:
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _number(value: Any) -> str | None:
+    if value is None or isinstance(value, bool | list | dict):
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def build_export_doc(document: Document, schema: DocSchema, settings: Settings, blobs: BlobStore) -> ExportDoc:
+    """Документ для коннектора. PDF читаются лениво: коннектор, которому они не нужны, их не грузит."""
+    doc_id = document.id
+    data = dict(document.data or {})
+    status, created_at, reviewed = document.status, document.created_at, document.reviewed_at is not None
+    ready = status in ("ok", "needs_review")
+    api = settings.public_base_url.rstrip("/")
+
+    async def load_scan() -> bytes | None:
+        try:
+            return await blobs.get(scan_key(str(doc_id)))
+        except BlobNotFound:
+            return None
+
+    async def load_digital() -> bytes | None:
+        try:
+            return await asyncio.to_thread(
+                lambda: render_digital_pdf(
+                    schema, data, status=status, created_at=created_at, reviewed=reviewed,
+                    font_path=settings.pdf_font_path,
+                )
+            )
+        except Exception:
+            logger.warning("цифровая версия документа %s для выгрузки не сформирована", doc_id, exc_info=True)
+            return None
+
+    return ExportDoc(
+        id=doc_id,
+        tenant_id=document.tenant_id,
+        schema=schema,
+        data=data,
+        status=status,
+        created_at=created_at,
+        title=schema.title,
+        number=_number(data.get("number")),
+        issued=_issued(data.get("issued")),
+        cabinet_url=f"{settings.public_site_url.rstrip('/')}/app/documents/{doc_id}",
+        digital_pdf_url=f"{api}/v1/documents/{doc_id}/digital.pdf" if ready else None,
+        scan_pdf_url=f"{api}/v1/documents/{doc_id}/pdf" if ready else None,
+        issues=[dict(i) for i in document.issues or []],
+        digital_loader=load_digital,
+        scan_loader=load_scan,
+    )
+
+
+async def _check_urls(connector: Connector, config: dict, secrets: dict, *, allow_private: bool) -> None:
+    """SSRF прямо перед отправкой (DNS rebinding): url-поля и настроек, и секретов. ValueError при нарушении."""
+    for fields, values in ((connector.config_fields, config), (connector.secret_fields, secrets)):
+        for f in fields:
+            value = values.get(f.name)
+            if f.type != "url" or value in (None, ""):
+                continue
+            if not isinstance(value, str):
+                raise ValueError(f"«{f.label}»: адрес должен быть строкой")
+            await asyncio.to_thread(check_webhook_url, value, allow_private=allow_private)
+
+
+async def deliver_export(
+    session: AsyncSession,
+    export_id: UUID,
+    *,
+    http: httpx.AsyncClient,
+    enqueuer: Enqueuer,
+    blobs: BlobStore,
+    schemas,
+    settings: Settings,
+) -> None:
+    """Одна попытка доставки. schemas — SchemaResolver (резолвит схему документа)."""
+    export = await session.get(Export, export_id)
+    if export is None or export.status != "pending":
+        return
+    dest = await session.get(Destination, export.destination_id) if export.destination_id else None
+    document = await session.get(Document, export.document_id)
+    if dest is None or not dest.active or dest.tenant_id != export.tenant_id:
+        return await _fail(session, export, DESTINATION_OFF)
+    if document is None:
+        return await _fail(session, export, DOCUMENT_GONE)
+    if export.purpose == "export" and document.status != "ok":
+        # анти-цель: неподтверждённый документ не уходит в учётную систему клиента
+        return await _fail(session, export, NOT_APPROVED.format(status=document.status))
+    connector = REGISTRY.get(dest.kind)
+    if connector is None:
+        return await _fail(session, export, f"тип получателя «{dest.kind}» больше не поддерживается")
+
+    if not await _claim(session, export.id, export.attempt):
+        return  # попытку занял другой воркер
+    await session.refresh(export)
+
+    try:
+        secrets = decrypt_secrets(dest.secrets_enc, settings.secrets_key) if dest.secrets_enc else {}
+    except SecretsKeyMissing as exc:
+        return await _fail(session, export, str(exc))  # без ключа повтор не поможет
+    try:
+        schema = await schemas.resolve(session, document.tenant_id, document.schema_slug, document.schema_version)
+    except LookupError as exc:
+        return await _fail(session, export, str(exc))
+
+    error: str | None = None
+    retryable = True
+    external_id: str | None = None
+    try:
+        await _check_urls(connector, dest.config or {}, secrets, allow_private=settings.webhook_allow_private)
+    except ValueError as exc:
+        error = f"адрес отклонён: {exc}"
+    if error is None:
+        ctx = DestCtx(config=dest.config or {}, secrets=secrets, mapping=dest.mapping or {}, http=http)
+        doc = build_export_doc(document, schema, settings, blobs)
+        try:
+            if export.purpose == "export":
+                external_id = await connector.export(ctx, doc)
+            else:
+                await connector.notify(ctx, doc, export.purpose)
+        except ConnectorError as exc:
+            error, retryable = exc.message, exc.retryable
+        except Exception as exc:
+            # текст исключения может содержать адрес с ключом или токен: ни в журнал, ни в лог — только тип
+            logger.warning("выгрузка %s: сбой коннектора %s (%s)", export.id, dest.kind, type(exc).__name__)
+            error = f"сбой при обращении к системе ({type(exc).__name__})"
+
+    if error is None:
+        export.status = "done"
+        export.external_id = None if external_id is None else str(external_id)[:MAX_ERROR]
+        export.last_error = None
+        export.next_attempt_at = None
+        await session.commit()
+        return
+
+    attempt = export.attempt  # уже увеличен claim'ом
+    if not retryable or attempt > len(RETRY_DELAYS):
+        return await _fail(session, export, error)
+    export.last_error = error[:MAX_ERROR]
+    delay = RETRY_DELAYS[attempt - 1]
+    export.next_attempt_at = datetime.now(UTC) + timedelta(seconds=delay)
+    await session.commit()  # до постановки в очередь
+    await enqueuer.enqueue(DELIVER_EXPORT, str(export.id), defer_by=delay, job_id=export_job_id(export.id, attempt))

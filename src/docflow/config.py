@@ -28,6 +28,8 @@ class Settings(BaseSettings):
 
     # внешний адрес API: попадает в pdf_url в ответах и вебхуках
     public_base_url: str = "http://localhost:8000"
+    # адрес кабинета (сайта): ссылка «открыть документ» в уведомлениях и выгрузках
+    public_site_url: str = "http://localhost:3000"
 
     # вебхуки на частные/loopback адреса: только для dev и e2e
     webhook_allow_private: bool = False

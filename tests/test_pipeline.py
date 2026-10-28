@@ -8,10 +8,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from PIL import Image, ImageDraw
-from sqlalchemy import event
 
-from docflow.db.models import Base, Dictionary, Document, SchemaRecord, Tenant, WebhookEndpoint
-from docflow.db.session import make_engine, make_sessionmaker
+from docflow.db.models import Dictionary, Document, SchemaRecord, Tenant, WebhookEndpoint
 from docflow.extraction.base import ExtractionError
 from docflow.extraction.fake import FakeExtractor
 from docflow.pdf.build import NoOcr
@@ -24,7 +22,7 @@ from docflow.pipeline import (
     reap_stale_processing,
     requeue_stale_queued,
 )
-from docflow.queue import DELIVER_WEBHOOK, PROCESS_DOCUMENT, ListEnqueuer
+from docflow.queue import DELIVER_EXPORT, DELIVER_WEBHOOK, PROCESS_DOCUMENT, ListEnqueuer
 from docflow.schemas.library import builtin_schemas
 from docflow.storage.blobs import LocalBlobStore, original_key, page_key, scan_key
 
@@ -58,20 +56,6 @@ def page_jpeg(bg=(255, 255, 255), size=(600, 800)) -> bytes:
     buf = io.BytesIO()
     img.save(buf, format="JPEG")
     return buf.getvalue()
-
-
-@pytest.fixture
-async def sm(tmp_path):
-    engine = make_engine(f"sqlite+aiosqlite:///{(tmp_path / 'db.sqlite').as_posix()}")
-
-    @event.listens_for(engine.sync_engine, "connect")
-    def _fk_on(dbapi_conn, _record):
-        dbapi_conn.execute("PRAGMA foreign_keys=ON")
-
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield make_sessionmaker(engine)
-    await engine.dispose()
 
 
 class Raising:
@@ -432,7 +416,7 @@ async def test_cron_task_reaps(sm, tmp_path):
     doc_id = await make_doc(deps, status="processing")
     await _set(deps, doc_id, claimed_at=datetime.now(UTC) - worker.STALE_PROCESSING - timedelta(seconds=1))
     result = await worker.requeue_stale_task({"deps": deps})
-    assert result == {"reaped_documents": 1, "requeued_documents": 0, "requeued_deliveries": 0}
+    assert result == {"reaped_documents": 1, "requeued_documents": 0, "requeued_deliveries": 0, "requeued_exports": 0}
     assert (await load(deps, doc_id)).status == "failed"
 
 
@@ -497,7 +481,7 @@ async def test_cron_task_requeues_queued(sm, tmp_path):
     doc_id = await make_doc(deps)
     await _set(deps, doc_id, created_at=datetime.now(UTC) - worker.STALE_QUEUED - timedelta(seconds=1))
     result = await worker.requeue_stale_task({"deps": deps})
-    assert result == {"reaped_documents": 0, "requeued_documents": 1, "requeued_deliveries": 0}
+    assert result == {"reaped_documents": 0, "requeued_documents": 1, "requeued_deliveries": 0, "requeued_exports": 0}
     assert process_calls(deps) == [(PROCESS_DOCUMENT, (str(doc_id),), None, f"process:{doc_id}")]
 
 
@@ -562,7 +546,8 @@ def test_worker_settings_registered():
 
     ws = worker.WorkerSettings
     names = {f.name for f in ws.functions}
-    assert names == {PROCESS_DOCUMENT, DELIVER_WEBHOOK}
+    assert names == {PROCESS_DOCUMENT, DELIVER_WEBHOOK, DELIVER_EXPORT}
+    assert next(f for f in ws.functions if f.name == DELIVER_EXPORT).keep_result_s == 0
     assert ws.max_jobs == 4 and ws.job_timeout == 300
     assert ws.on_startup is worker.startup and ws.on_shutdown is worker.shutdown
     assert len(ws.cron_jobs) == 1

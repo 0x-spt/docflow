@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from docflow.config import get_settings
 from docflow.db.models import Document, WebhookDelivery, WebhookEndpoint
 from docflow.queue import DELIVER_WEBHOOK, Enqueuer
-from docflow.serializers import document_payload
+from docflow.serializers import document_exports, document_payload
 
 RETRY_DELAYS = (10, 60, 300, 1800, 7200)
 TIMEOUT = 10.0
@@ -179,7 +179,9 @@ async def deliver(
 
     payload = {
         "event": delivery.event,
-        "document": document_payload(document, get_settings().public_base_url),
+        "document": document_payload(
+            document, get_settings().public_base_url, await document_exports(session, document.id)
+        ),
     }
     # подписываем и отправляем ровно эти байты
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()

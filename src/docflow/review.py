@@ -10,8 +10,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from docflow.api.deps import Principal
 from docflow.db.models import Document
+from docflow.exports import enqueue_routed
 from docflow.extraction.normalize import normalize
 from docflow.pipeline import SchemaResolver, load_dictionaries
+from docflow.queue import Enqueuer
+from docflow.routing import evaluate_rules, load_rules
 from docflow.schemas.llm import UNCERTAIN
 from docflow.validation.dictionaries import resolve_dictionaries
 from docflow.validation.engine import evaluate
@@ -68,3 +71,17 @@ async def review_document(
     if res.rowcount != 1:
         raise ReviewConflict
     return await session.get(Document, document_id, populate_existing=True)
+
+
+async def route_approved(session: AsyncSession, document: Document, schemas: SchemaResolver, enqueuer: Enqueuer) -> int:
+    """После одобрения: правила по подтверждённым данным → выгрузки и «новый документ».
+
+    Согласование считается полученным (его дал человек), поэтому require_approval здесь не учитывается.
+    Повторный вызов дублей не создаёт. Возвращает число новых выгрузок.
+    """
+    if document.status != "ok":
+        return 0
+    schema = await schemas.resolve(session, document.tenant_id, document.schema_slug, document.schema_version)
+    rules, dictionaries = await load_rules(session, document.tenant_id)
+    decision = evaluate_rules(rules, schema, document.data, dictionaries)
+    return await enqueue_routed(session, document, decision, enqueuer)

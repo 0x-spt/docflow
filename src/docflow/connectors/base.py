@@ -53,6 +53,8 @@ class ExportDoc:
     cabinet_url: str = ""
     digital_pdf_url: str | None = None
     scan_pdf_url: str | None = None
+    # замечания проверок {field, code, message}: причина «на проверку» для уведомлений
+    issues: list[dict[str, Any]] = field(default_factory=list)
     digital_loader: Loader | None = field(default=None, repr=False)
     scan_loader: Loader | None = field(default=None, repr=False)
 
@@ -105,6 +107,16 @@ class BaseConnector:
 
     async def notify(self, ctx: DestCtx, doc: ExportDoc, purpose: str) -> None:
         raise ConnectorError(f"«{self.label}» не умеет отправлять уведомления")
+
+
+def supports(connector: Connector, purpose: str) -> bool:
+    """Умеет ли коннектор это назначение: export — выгрузку, notify_* — уведомления.
+
+    Наследник BaseConnector «умеет», только если переопределил метод; прочие реализации протокола — всегда.
+    """
+    name = "export" if purpose == "export" else "notify"
+    impl = getattr(type(connector), name, None)
+    return impl is not None and impl is not getattr(BaseConnector, name)
 
 
 REGISTRY: dict[str, Connector] = {}

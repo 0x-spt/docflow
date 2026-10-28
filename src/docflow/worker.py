@@ -1,4 +1,4 @@
-"""Воркер arq: обработка документов, доставка вебхуков, подбор потерянных доставок.
+"""Воркер arq: обработка документов, доставка вебхуков и выгрузок, подбор потерянных доставок.
 
 Запуск: `arq docflow.worker.WorkerSettings`.
 """
@@ -15,6 +15,7 @@ from arq.worker import func
 
 from docflow.config import Settings, get_settings
 from docflow.db.session import make_engine, make_sessionmaker
+from docflow.exports import deliver_export, requeue_stale_exports
 from docflow.extraction.base import Extractor
 from docflow.extraction.claude import ClaudeExtractor
 from docflow.extraction.fake import FakeExtractor
@@ -27,7 +28,7 @@ from docflow.pipeline import (
     reap_stale_processing,
     requeue_stale_queued,
 )
-from docflow.queue import DELIVER_WEBHOOK, PROCESS_DOCUMENT, ArqEnqueuer
+from docflow.queue import DELIVER_EXPORT, DELIVER_WEBHOOK, PROCESS_DOCUMENT, ArqEnqueuer
 from docflow.storage.blobs import blob_store_from_settings
 from docflow.webhooks import deliver, requeue_stale
 
@@ -45,6 +46,8 @@ JOB_TIMEOUT = 300
 STALE_PROCESSING = timedelta(seconds=JOB_TIMEOUT) + timedelta(minutes=5)
 # queued дольше этого — задача, скорее всего, потеряна; перепостановка с тем же job_id безопасна и при живой задаче
 STALE_QUEUED = timedelta(minutes=5)
+# таймаут каждого запроса коннектора к системе клиента
+CONNECTOR_TIMEOUT = 20.0
 
 
 class FakeExtractorNotAllowed(RuntimeError):
@@ -90,9 +93,10 @@ async def startup(ctx: dict) -> None:
 
 
 async def shutdown(ctx: dict) -> None:
-    http = ctx.get("http")
-    if http is not None:
-        await http.aclose()
+    for name in ("http", "connector_http"):
+        http = ctx.get(name)
+        if http is not None:
+            await http.aclose()
     engine = ctx.get("engine")
     if engine is not None:
         await engine.dispose()
@@ -114,6 +118,25 @@ async def deliver_webhook_task(ctx: dict, delivery_id: str) -> None:
         )
 
 
+async def deliver_export_task(ctx: dict, export_id: str) -> None:
+    http = ctx.get("connector_http")
+    if http is None or http.is_closed:
+        # без редиректов (httpx по умолчанию): адрес клиента проверен на SSRF, переход на другой — нет
+        http = ctx["connector_http"] = httpx.AsyncClient(timeout=CONNECTOR_TIMEOUT)
+    deps: Deps = ctx["deps"]
+    settings = ctx.get("settings") or get_settings()
+    async with deps.sessionmaker() as session:
+        await deliver_export(
+            session,
+            UUID(str(export_id)),
+            http=http,
+            enqueuer=deps.enqueuer,
+            blobs=deps.blobs,
+            schemas=deps.schemas,
+            settings=settings,
+        )
+
+
 async def requeue_stale_task(ctx: dict) -> dict[str, int]:
     """Раз в 5 минут: закрыть документы убитых воркеров, вернуть в очередь потерянные документы и доставки."""
     deps: Deps = ctx["deps"]
@@ -124,16 +147,25 @@ async def requeue_stale_task(ctx: dict) -> dict[str, int]:
         queued = await requeue_stale_queued(session, deps.enqueuer, now, STALE_QUEUED)
     async with deps.sessionmaker() as session:
         requeued = await requeue_stale(session, deps.enqueuer, now)
-    return {"reaped_documents": reaped, "requeued_documents": queued, "requeued_deliveries": requeued}
+    async with deps.sessionmaker() as session:
+        exports = await requeue_stale_exports(session, deps.enqueuer, now)
+    return {
+        "reaped_documents": reaped,
+        "requeued_documents": queued,
+        "requeued_deliveries": requeued,
+        "requeued_exports": exports,
+    }
 
 
 class WorkerSettings:
-    # имена задач — те же, что ставит Enqueuer (PROCESS_DOCUMENT, DELIVER_WEBHOOK), а не имена функций
+    # имена задач — те же, что ставит Enqueuer (PROCESS_DOCUMENT, DELIVER_WEBHOOK, DELIVER_EXPORT), а не имена функций
     functions = [
         # результат не храним: статус документа живёт в БД, а ключ результата arq блокировал бы
         # перепостановку с тем же job_id (см. requeue_stale_queued)
         func(process_document_task, name=PROCESS_DOCUMENT, keep_result=0),
         func(deliver_webhook_task, name=DELIVER_WEBHOOK),
+        # без ключа результата: иначе «Повторить» (тот же job_id export:<id>:0) час молча не ставилось бы
+        func(deliver_export_task, name=DELIVER_EXPORT, keep_result=0),
     ]
     cron_jobs = [cron(requeue_stale_task, minute=set(range(0, 60, 5)))]
     on_startup = startup

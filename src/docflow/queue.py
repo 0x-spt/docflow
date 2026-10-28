@@ -5,6 +5,7 @@ from typing import Protocol
 
 PROCESS_DOCUMENT = "process_document"
 DELIVER_WEBHOOK = "deliver_webhook"
+DELIVER_EXPORT = "deliver_export"
 
 
 class Enqueuer(Protocol):
