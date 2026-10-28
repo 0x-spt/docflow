@@ -84,6 +84,9 @@ function Issues({ issues, schema }: { issues: Issue[]; schema: DocSchema | null 
   );
 }
 
+const BTN =
+  "inline-flex min-h-11 items-center justify-center border-2 border-ink bg-card px-5 py-2.5 font-semibold shadow-hard transition-transform active:translate-x-1.5 active:translate-y-1.5 active:shadow-none";
+
 export default async function DocumentPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   if (!isDocId(id)) notFound();
@@ -101,6 +104,7 @@ export default async function DocumentPage({ params }: { params: Promise<{ id: s
   // у failed PDF и превью бывают (упало извлечение, а не подготовка страниц), но `pages` тогда 0:
   // ссылку на PDF даём, а превью пробуем с первой страницы — нет файла → плашка
   const pdfHref = inWork ? null : `/app/files/${encodeURIComponent(doc.id)}/pdf`;
+  const digitalHref = doc.digital_pdf_url ? `/app/files/${encodeURIComponent(doc.id)}/digital` : null;
   const pages = Math.max(doc.pages ?? 0, 1);
   const notes = notesByField(doc.issues);
   const data = doc.data ?? {};
@@ -128,14 +132,17 @@ export default async function DocumentPage({ params }: { params: Promise<{ id: s
             </div>
           </div>
           {pdfHref ? (
-            // обычная ссылка, не next/link: route handler не страница, предзагрузка скачала бы PDF зря
-            <a
-              href={pdfHref}
-              download
-              className="inline-flex min-h-11 items-center justify-center border-2 border-ink bg-card px-5 py-2.5 font-semibold shadow-hard transition-transform active:translate-x-1.5 active:translate-y-1.5 active:shadow-none"
-            >
-              Скачать PDF
-            </a>
+            <div className="flex flex-wrap gap-3">
+              {/* обычные ссылки, не next/link: route handler не страница, предзагрузка скачала бы PDF зря */}
+              <a href={pdfHref} download className={BTN}>
+                Скачать PDF
+              </a>
+              {digitalHref ? (
+                <a href={digitalHref} download className={BTN}>
+                  Цифровая версия (PDF)
+                </a>
+              ) : null}
+            </div>
           ) : null}
         </div>
       </div>

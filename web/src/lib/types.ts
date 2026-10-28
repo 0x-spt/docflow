@@ -64,6 +64,7 @@ export interface DocumentPayload {
   finished_at: string | null;
   review: { at: string | null; note: string | null } | null;
   pdf_url: string | null;
+  digital_pdf_url: string | null;
 }
 
 /** POST /v1/documents/{id}/review; `data` — ПОЛНЫЙ объект, не дифф */

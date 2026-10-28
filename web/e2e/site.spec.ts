@@ -109,6 +109,12 @@ test("login → queue → review approve", async ({ page, context }) => {
 
   await page.goto(`/app/documents/${state.docId}`);
   await expect(page.getByText("Нужна проверка").first()).toBeVisible();
+  const digital = page.getByRole("link", { name: "Цифровая версия (PDF)" });
+  await expect(digital).toBeVisible();
+  const digitalRes = await page.request.get((await digital.getAttribute("href")) as string);
+  expect(digitalRes.status()).toBe(200);
+  expect(digitalRes.headers()["content-type"]).toContain("application/pdf");
+  expect((await digitalRes.body()).subarray(0, 4).toString()).toBe("%PDF");
   await page.getByRole("button", { name: "Подтвердить и отправить" }).click();
   // после подтверждения кабинет уводит со страницы документа (в очередь или к следующему)
   await expect(page).not.toHaveURL(new RegExp(`/app/documents/${state.docId}$`), { timeout: 15_000 });
