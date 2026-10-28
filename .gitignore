@@ -12,3 +12,6 @@ dist/
 evals/*/
 !evals/README.md
 evals/*.json
+
+web/node_modules
+web/.next

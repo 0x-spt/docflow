@@ -20,6 +20,8 @@ x-app-env: &app-env
   # локальный режим (152-ФЗ): Ollama на хосте; в проде — адрес GPU-сервера внутри периметра клиента
   DOCFLOW_OLLAMA_URL: ${DOCFLOW_OLLAMA_URL:-http://host.docker.internal:11434}
   DOCFLOW_OLLAMA_MODEL: ${DOCFLOW_OLLAMA_MODEL:-qwen3-vl:30b-a3b-instruct}
+  # общий секрет с сайтом: по нему API доверяет X-Client-IP (пусто = не доверять)
+  DOCFLOW_INTERNAL_TOKEN: ${DOCFLOW_INTERNAL_TOKEN:-docflow-internal-dev}
 
 services:
   postgres:
@@ -120,6 +122,19 @@ services:
       timeout: 10s
       start_period: 20s
       retries: 3
+    restart: unless-stopped
+
+  # сайт (Next.js): ходит в API по внутренней сети, браузеру токены не отдаёт
+  web:
+    build: {context: ./web}
+    image: docflow-web
+    environment:
+      DOCFLOW_API_URL: http://api:8000
+      DOCFLOW_INTERNAL_TOKEN: ${DOCFLOW_INTERNAL_TOKEN:-docflow-internal-dev}
+      COOKIE_SECURE: "false"  # dev по http; в проде за https убрать
+    ports: ["3000:3000"]
+    depends_on:
+      api: {condition: service_healthy}
     restart: unless-stopped
 
   # интеграционные тесты внутри сети стека (tesseract есть только в образе воркера):
