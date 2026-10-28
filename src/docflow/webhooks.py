@@ -26,6 +26,7 @@ MAX_ERROR = 500
 
 EVENT_COMPLETED = "document.completed"
 EVENT_FAILED = "document.failed"
+EVENT_REVIEWED = "document.reviewed"  # человек подтвердил документ из needs_review
 
 
 def sign(secret: str, body: bytes) -> str:
@@ -67,9 +68,13 @@ def _event_for(document: Document) -> str:
     raise ValueError(f"документ в статусе {document.status} не порождает события")
 
 
-async def enqueue_webhooks(session: AsyncSession, document: Document, enqueuer: Enqueuer) -> int:
+async def enqueue_webhooks(
+    session: AsyncSession, document: Document, enqueuer: Enqueuer, *, event: str | None = None
+) -> int:
     """Создаёт доставки для подходящих endpoint'ов; уже существующие пропускает. Возвращает число новых."""
-    event = _event_for(document)
+    event = event or _event_for(document)
+    # подписчик на completed получает и reviewed: для него это тоже «документ готов»
+    wanted = {event, EVENT_COMPLETED} if event == EVENT_REVIEWED else {event}
     endpoints = (
         await session.execute(
             select(WebhookEndpoint).where(
@@ -80,7 +85,7 @@ async def enqueue_webhooks(session: AsyncSession, document: Document, enqueuer: 
 
     created: list[UUID] = []
     for ep in endpoints:
-        if event not in (ep.events or []):
+        if not wanted & set(ep.events or []):
             continue
         exists = (
             await session.execute(

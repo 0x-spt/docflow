@@ -32,7 +32,7 @@ from docflow.review import ReviewConflict, review_document
 from docflow.serializers import document_payload
 from docflow.storage.blobs import BlobNotFound, original_key, page_key, scan_key
 from docflow.validation.engine import INFO_CODES
-from docflow.webhooks import enqueue_webhooks
+from docflow.webhooks import EVENT_REVIEWED, enqueue_webhooks
 
 logger = logging.getLogger(__name__)
 
@@ -370,9 +370,11 @@ class ReviewIn(BaseModel):
     "/{document_id}/review",
     summary="Ручная проверка документа",
     description=(
-        "Только для документа в `needs_review`. `approve` ставит `ok`; если переданы `data`, они проходят ту же "
+        "Только для документа в `needs_review`. `approve` ставит `ok`; если переданы `data` — это ПОЛНЫЙ объект данных "
+        "(пропущенные поля станут пустыми), он проходит ту же "
         "нормализацию, справочники и проверки, что ответ модели (оставшиеся замечания сохраняются, статус всё "
-        "равно `ok`). `reject` ставит `failed`. После успеха уходят вебхуки. 409 — документ уже проверен "
+        "равно `ok`). `reject` ставит `failed`. После успеха уходят вебхуки: `document.reviewed` для approve, "
+        "`document.failed` для reject. 409 — документ уже проверен "
         "другим оператором или ещё обрабатывается."
     ),
 )
@@ -402,7 +404,9 @@ async def review_document_endpoint(
     except SchemaNotFound as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from None
     try:
-        await enqueue_webhooks(session, document, enqueuer)
+        await enqueue_webhooks(
+            session, document, enqueuer, event=EVENT_REVIEWED if body.decision == "approve" else None
+        )
     except Exception:
         # проверка уже записана; закоммиченные доставки поднимет requeue_stale
         logger.exception("не удалось поставить вебхуки документа %s", document.id)

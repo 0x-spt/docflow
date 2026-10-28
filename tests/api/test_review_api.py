@@ -145,3 +145,43 @@ async def test_stats_reviewed_counts(api, auth):
     assert body["reviewed"] == 2
     # без человека — только ok без reviewed_at: 1 из 4 завершённых
     assert body["auto_share"] == 0.25
+
+
+async def _deliveries(api):
+    from docflow.db.models import WebhookDelivery
+
+    async with api.sessionmaker() as s:
+        return sorted(d.event for d in (await s.execute(select(WebhookDelivery))).scalars())
+
+
+async def test_review_approve_emits_reviewed_after_completed(api, auth):
+    from docflow.webhooks import enqueue_webhooks
+
+    await create_webhook(api, auth)  # только document.completed
+    doc_id = await add_review_doc(api, auth)
+    async with api.sessionmaker() as s:
+        await enqueue_webhooks(s, await s.get(Document, uuid.UUID(doc_id)), api.enqueuer)  # как в конвейере
+    assert await _deliveries(api) == ["document.completed"]
+    n = len(api.enqueuer.calls)
+    assert (await review(api, auth, doc_id)).status_code == 200
+    assert await _deliveries(api) == ["document.completed", "document.reviewed"]
+    assert len(api.enqueuer.calls) == n + 1
+
+
+async def test_review_reviewed_only_subscriber(api, auth):
+    await create_webhook(api, auth, events=["document.reviewed"])
+    doc_id = await add_review_doc(api, auth)
+    assert (await review(api, auth, doc_id)).status_code == 200
+    assert await _deliveries(api) == ["document.reviewed"]
+
+
+async def test_review_reject_still_failed_event(api, auth):
+    await create_webhook(api, auth, events=["document.completed", "document.reviewed", "document.failed"])
+    doc_id = await add_review_doc(api, auth)
+    assert (await review(api, auth, doc_id, decision="reject")).status_code == 200
+    assert await _deliveries(api) == ["document.failed"]
+
+
+async def test_webhook_accepts_reviewed_event(api, auth):
+    r = await create_webhook(api, auth, events=["document.reviewed"])
+    assert r.status_code == 201, r.text

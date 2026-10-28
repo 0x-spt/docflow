@@ -10,17 +10,17 @@ from sqlalchemy import select
 
 from docflow.api.deps import SessionDep, SettingsDep, TenantDep, parse_id
 from docflow.db.models import WebhookEndpoint
-from docflow.webhooks import EVENT_COMPLETED, EVENT_FAILED, check_webhook_url
+from docflow.webhooks import EVENT_COMPLETED, EVENT_FAILED, EVENT_REVIEWED, check_webhook_url
 
 router = APIRouter(prefix="/v1/webhooks", tags=["webhooks"])
 
-EVENTS = (EVENT_COMPLETED, EVENT_FAILED)
+EVENTS = (EVENT_COMPLETED, EVENT_FAILED, EVENT_REVIEWED)
 NOT_FOUND = "вебхук не найден"
 
 
 class WebhookIn(BaseModel):
     url: str = Field(max_length=2048, description="Куда слать POST, http(s) на публичный адрес")
-    events: list[str] = Field(description="Подмножество: document.completed, document.failed")
+    events: list[str] = Field(description="Подмножество: document.completed, document.failed, document.reviewed")
 
 
 def _public(ep: WebhookEndpoint) -> dict[str, Any]:
@@ -38,7 +38,9 @@ def _public(ep: WebhookEndpoint) -> dict[str, Any]:
     status_code=status.HTTP_201_CREATED,
     summary="Подписаться на события",
     description=(
-        "Регистрирует адрес для событий `document.completed` (статусы ok и needs_review) и `document.failed`. "
+        "Регистрирует адрес для событий `document.completed` (статусы ok и needs_review) и `document.failed`; "
+        "`document.reviewed` — документ подтверждён человеком после проверки (приходит и подписчикам "
+        "`document.completed`). "
         "В ответе — секрет для проверки подписи `X-DocFlow-Signature`; он показывается один раз. "
         "422 — пустой или неизвестный список событий, URL не http(s) или ведёт на частный адрес."
     ),
