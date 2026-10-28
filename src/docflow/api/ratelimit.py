@@ -29,10 +29,6 @@ class SlidingWindowLimiter:
             del self._hits[key]
         return hits
 
-    def blocked(self, key: str) -> bool:
-        """Лимит исчерпан? Попытку не учитывает."""
-        return len(self._fresh(key)) >= self.limit
-
     def hit(self, key: str) -> bool:
         """True — разрешено, попытка учтена; False — лимит исчерпан."""
         hits = self._fresh(key)

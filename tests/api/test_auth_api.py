@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -60,6 +61,18 @@ async def test_login_rate_limited(api, user):
     assert r.status_code == 429
     assert r.json() == {"detail": "слишком много попыток, попробуйте через 15 минут"}
     assert (await _login(api)).status_code == 429  # даже с верным паролем
+
+
+async def test_login_rate_limit_holds_under_concurrency(api, user):
+    results = await asyncio.gather(*[_login(api, password="wrong-password-1") for _ in range(10)])
+    codes = [r.status_code for r in results]
+    assert codes.count(401) == 5 and codes.count(429) == 5
+
+
+async def test_successful_login_possible_within_first_attempts(api, user):
+    for _ in range(4):
+        assert (await _login(api, password="wrong-password-1")).status_code == 401
+    assert (await _login(api)).status_code == 200
 
 
 async def test_logout_revokes(api, user):

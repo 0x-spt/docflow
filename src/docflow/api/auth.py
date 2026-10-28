@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from starlette.concurrency import run_in_threadpool
 
 from docflow.api.deps import PrincipalDep, SessionDep, SettingsDep
 from docflow.api.ratelimit import client_ip
@@ -37,16 +38,16 @@ async def login(body: LoginIn, request: Request, session: SessionDep, settings: 
     email = body.email.strip().lower()
     email_key, ip_key = f"email:{email}", f"ip:{client_ip(request, settings)}"
     email_limiter, ip_limiter = request.app.state.login_email_limiter, request.app.state.login_ip_limiter
-    # лимит проверяем до пароля: перебирающему не говорим, угадал ли он
-    if email_limiter.blocked(email_key) or ip_limiter.blocked(ip_key):
+    # слот занимаем сразу и без await между проверкой и записью: параллельные запросы не обходят лимит.
+    # Проверка идёт до пароля: перебирающему не говорим, угадал ли он
+    if not email_limiter.hit(email_key) or not ip_limiter.hit(ip_key):
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, TOO_MANY)
 
     user = (await session.execute(select(User).where(User.email == email))).scalar_one_or_none()
-    # для неизвестного email всё равно считаем хеш: по времени ответа не видно, есть ли такой пользователь
-    password_ok = verify_password(user.password_hash if user else dummy_hash(), body.password)
+    # для неизвестного email всё равно считаем хеш: по времени ответа не видно, есть ли такой пользователь;
+    # argon2 грузит процессор десятки миллисекунд — в пул потоков, чтобы не вешать цикл событий
+    password_ok = await run_in_threadpool(verify_password, user.password_hash if user else dummy_hash(), body.password)
     if user is None or not password_ok or user.disabled_at is not None:
-        email_limiter.hit(email_key)
-        ip_limiter.hit(ip_key)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, BAD_LOGIN)
 
     email_limiter.reset(email_key)
