@@ -319,7 +319,8 @@ async def test_get_document_payload(api, auth):
     assert r.status_code == 200
     body = r.json()
     assert set(body) == {
-        "id", "status", "schema", "data", "issues", "error", "pages", "model", "created_at", "finished_at", "pdf_url",
+        "id", "status", "schema", "data", "issues", "error", "pages", "model", "created_at", "finished_at",
+        "review", "pdf_url",
     }
     assert body["status"] == "queued"
     assert body["pdf_url"] is None

@@ -135,7 +135,7 @@ async def _render(deps: Deps, document_id: UUID, keys: list[str], mode: str) -> 
     return [p.model_jpeg for p in pages], len(pages)
 
 
-async def _load_dictionaries(session: AsyncSession, tenant_id: UUID, schema: DocSchema) -> dict[str, list[DictEntry]]:
+async def load_dictionaries(session: AsyncSession, tenant_id: UUID, schema: DocSchema) -> dict[str, list[DictEntry]]:
     """Справочники, на которые ссылается схема. Незаведённого в ответе нет — resolve_dictionaries это отметит."""
     names = {r.params["name"] for f in schema.fields for r in f.rules if r.kind == "dictionary"}
     if not names:
@@ -157,7 +157,7 @@ async def _run(deps: Deps, session: AsyncSession, document_id: UUID) -> bool:
     if extractor is None:
         raise _Failure(f"Экстрактор «{kind}» не настроен")
     schema = await deps.schemas.resolve(session, document.tenant_id, document.schema_slug, document.schema_version)
-    dictionaries = await _load_dictionaries(session, document.tenant_id, schema)
+    dictionaries = await load_dictionaries(session, document.tenant_id, schema)
     auto_ok = tenant.auto_ok
     keys, mode = list(document.files), document.mode
     # Закрываем читающую транзакцию: OCR и модель идут минутами, idle in transaction на Postgres не нужен

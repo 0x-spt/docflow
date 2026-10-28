@@ -202,6 +202,10 @@ class Document(Base):
     # когда воркер взял документ в processing: по нему жнец находит задачи убитых воркеров
     claimed_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    # ручная проверка в кабинете: кто (None — ключ API или удалённый пользователь), когда, с какой заметкой
+    reviewed_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    review_note: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class WebhookEndpoint(Base):

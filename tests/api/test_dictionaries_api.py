@@ -72,3 +72,68 @@ async def test_invalid_422(api, auth, name, body):
 
 async def test_requires_auth(api):
     assert (await api.client.get("/v1/dictionaries")).status_code == 401
+
+
+async def _doc_with_issues(api, headers, issues):
+    from test_documents import add_doc
+
+    return await add_doc(api, headers, status="needs_review", issues=issues)
+
+
+def _issue(code, message):
+    return {"field": "clinic", "code": code, "message": message}
+
+
+def _as_dicts(issues):
+    return [{"field": i.field, "code": i.code, "message": i.message} for i in issues]
+
+
+async def test_suggestions_from_recent_documents(api, auth):
+    from docflow.schemas.model import DocSchema
+    from docflow.validation.dictionaries import DictEntry, resolve_dictionaries
+
+    await put(api, auth)
+    # формат сообщений задаёт resolve_dictionaries: настоящие замечания из него и кладём в документы
+    rule = {"kind": "dictionary", "params": {"name": "clinics"}}
+    field = {"name": "clinic", "type": "string", "rules": [rule]}
+    schema = DocSchema.model_validate(
+        {"slug": "ss", "version": 1, "title": "s", "description": "s", "fields": [field]}
+    )
+    entries = [DictEntry("Дента-Люкс"), DictEntry("Стомат-Сервис")]
+
+    def run(value):
+        return resolve_dictionaries(schema, {"clinic": value}, {"clinics": entries})
+
+    new, unknown, other = run("Дента-Лакс"), run("Дента Экспресс"), run("Зубик")
+    assert [i.code for i in new] == ["corrected"]
+    assert [i.code for i in unknown] == ["not_in_dictionary"]
+
+    await _doc_with_issues(api, auth, _as_dicts(new))
+    await _doc_with_issues(api, auth, _as_dicts(new))
+    await _doc_with_issues(api, auth, _as_dicts(unknown))
+    await _doc_with_issues(api, auth, _as_dicts(other))
+    await _doc_with_issues(api, auth, [_issue("not_in_dictionary", "«Х» нет в справочнике «doctors»")])
+    await _doc_with_issues(api, auth, [_issue("missing_required", "нет поля")])
+
+    r = await api.client.get("/v1/dictionaries/clinics/suggestions", headers=auth)
+    assert r.status_code == 200, r.text
+    rows = r.json()
+    assert rows[0] == {"value": "Дента-Лакс", "code": "corrected", "count": 2, "nearest": "Дента-Люкс"}
+    by_value = {x["value"]: x for x in rows}
+    assert by_value["Дента Экспресс"]["code"] == "not_in_dictionary"
+    assert by_value["Дента Экспресс"]["nearest"] == "Дента-Люкс"
+    assert by_value["Зубик"]["nearest"] is None
+    assert "Х" not in by_value and len(rows) == 3  # чужой справочник и не-справочные замечания не попадают
+
+
+async def test_suggestions_missing_dictionary_404(api, auth):
+    r = await api.client.get("/v1/dictionaries/nope/suggestions", headers=auth)
+    assert r.status_code == 404
+
+
+async def test_suggestions_isolated(api, auth, make_tenant):
+    other = await make_tenant("Чужой")
+    await put(api, auth)
+    await put(api, other)
+    await _doc_with_issues(api, other, [_issue("not_in_dictionary", "«Левая» нет в справочнике «clinics»")])
+    assert (await api.client.get("/v1/dictionaries/clinics/suggestions", headers=auth)).json() == []

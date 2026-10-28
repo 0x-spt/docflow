@@ -8,19 +8,31 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, File, Form, Header, HTTPException, Query, Response, UploadFile, status
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from docflow.api.deps import BlobsDep, EnqueuerDep, ResolverDep, SessionDep, SettingsDep, TenantDep, parse_id
+from docflow.api.deps import (
+    BlobsDep,
+    EnqueuerDep,
+    PrincipalDep,
+    ResolverDep,
+    SessionDep,
+    SettingsDep,
+    TenantDep,
+    parse_id,
+)
 from docflow.api.limits import request_limit_bytes
 from docflow.db.models import Document
 from docflow.imaging.load import UnsupportedFile, count_pages, detect_kind
-from docflow.pipeline import process_job_id
+from docflow.pipeline import SchemaNotFound, process_job_id
 from docflow.queue import PROCESS_DOCUMENT
+from docflow.review import ReviewConflict, review_document
 from docflow.serializers import document_payload
 from docflow.storage.blobs import BlobNotFound, original_key, page_key, scan_key
 from docflow.validation.engine import INFO_CODES
+from docflow.webhooks import enqueue_webhooks
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +45,8 @@ CHUNK = 1024 * 1024
 NOT_FOUND = "документ не найден"
 ENQUEUE_ERROR = "не удалось поставить документ в очередь, загрузите его заново"
 IDEMPOTENCY_KEY_MAX = 255
+REVIEW_CONFLICT = "документ уже проверен или ещё обрабатывается"
+REVIEW_NOTE_MAX = 1000
 
 # сигнатура → MIME для хранилища; заголовку клиента не верим
 _IMAGE_TYPES = (
@@ -344,3 +358,52 @@ async def get_document_page(
     except BlobNotFound:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "страница не найдена") from None
     return Response(content=image, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
+
+
+class ReviewIn(BaseModel):
+    decision: Literal["approve", "reject"]
+    data: dict | None = Field(default=None, description="Исправленные данные; без них подтверждаются как есть")
+    note: str | None = Field(default=None, max_length=REVIEW_NOTE_MAX)
+
+
+@router.post(
+    "/{document_id}/review",
+    summary="Ручная проверка документа",
+    description=(
+        "Только для документа в `needs_review`. `approve` ставит `ok`; если переданы `data`, они проходят ту же "
+        "нормализацию, справочники и проверки, что ответ модели (оставшиеся замечания сохраняются, статус всё "
+        "равно `ok`). `reject` ставит `failed`. После успеха уходят вебхуки. 409 — документ уже проверен "
+        "другим оператором или ещё обрабатывается."
+    ),
+)
+async def review_document_endpoint(
+    document_id: str,
+    body: ReviewIn,
+    principal: PrincipalDep,
+    session: SessionDep,
+    settings: SettingsDep,
+    schemas: ResolverDep,
+    enqueuer: EnqueuerDep,
+) -> dict:
+    document = await _get_own(session, principal.tenant_id, document_id)
+    try:
+        document = await review_document(
+            session,
+            document_id=document.id,
+            tenant_id=principal.tenant_id,
+            principal=principal,
+            decision=body.decision,
+            data=body.data,
+            note=body.note,
+            schemas=schemas,
+        )
+    except ReviewConflict:
+        raise HTTPException(status.HTTP_409_CONFLICT, REVIEW_CONFLICT) from None
+    except SchemaNotFound as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from None
+    try:
+        await enqueue_webhooks(session, document, enqueuer)
+    except Exception:
+        # проверка уже записана; закоммиченные доставки поднимет requeue_stale
+        logger.exception("не удалось поставить вебхуки документа %s", document.id)
+    return document_payload(document, settings.public_base_url)

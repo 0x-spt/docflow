@@ -85,8 +85,19 @@ def match(raw: str, entries: Sequence[DictEntry], *, fuzzy: bool = True) -> Matc
     return None
 
 
+def _similar(raw: str, entries: Sequence[DictEntry]) -> list[str]:
+    """Записи со скелетной похожестью ≥ SUGGEST_MIN, лучшие первыми."""
+    return [v for s, v in _scored(raw, entries) if s >= SUGGEST_MIN]
+
+
+def nearest(raw: str, entries: Sequence[DictEntry]) -> str | None:
+    """Самая похожая запись справочника или None, если ни одна не дотягивает до SUGGEST_MIN."""
+    similar = _similar(raw, entries)
+    return similar[0] if similar else None
+
+
 def _suggestion(raw: str, entries: Sequence[DictEntry]) -> str:
-    scored = [v for s, v in _scored(raw, entries) if s >= SUGGEST_MIN][:3]
+    scored = _similar(raw, entries)[:3]
     return f"; похожие: {', '.join(f'«{v}»' for v in scored)}" if scored else ""
 
 

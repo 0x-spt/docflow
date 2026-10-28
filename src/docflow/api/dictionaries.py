@@ -1,5 +1,7 @@
 """Справочники тенанта (клиники, врачи, контрагенты): с ними сверяются поля с правилом `dictionary`."""
 
+import re
+from collections import Counter
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Path, Response, status
@@ -8,13 +10,15 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from docflow.api.deps import SessionDep, TenantDep
-from docflow.db.models import Dictionary
-from docflow.validation.dictionaries import dict_key
+from docflow.db.models import Dictionary, Document
+from docflow.validation.dictionaries import DictEntry, dict_key, nearest
 
 router = APIRouter(prefix="/v1/dictionaries", tags=["dictionaries"])
 
 NOT_FOUND = "справочник не найден"
 MAX_ENTRIES = 5000
+SUGGEST_DOCS = 200
+SUGGEST_LIMIT = 50
 NamePath = Path(pattern=r"^[a-z0-9_]{2,40}$", description="Имя, на которое ссылается правило схемы")
 
 
@@ -87,6 +91,52 @@ async def get_dictionary(tenant_id: TenantDep, session: SessionDep, name: str = 
     if d is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, NOT_FOUND)
     return _public(d)
+
+
+# Форматы сообщений resolve_dictionaries (их фиксирует test_suggestions_from_recent_documents)
+_NOT_IN = re.compile(r"^«(?P<value>.*?)» нет в справочнике «(?P<name>[^»]*)»")
+_CORRECTED = re.compile(r"^«(?P<value>.*?)» исправлено на «(?P<canonical>.*?)» по справочнику «(?P<name>[^»]*)»$")
+
+
+@router.get(
+    "/{name}/suggestions",
+    summary="Подсказки для справочника",
+    description=(
+        "Значения, которых не оказалось в справочнике (`not_in_dictionary`) или которые были исправлены "
+        "(`corrected`), по замечаниям последних 200 документов; чаще встречающиеся первыми, не больше 50. "
+        "`nearest` — ближайшая запись справочника (для `corrected` — та, на которую исправили) или null."
+    ),
+)
+async def suggestions(tenant_id: TenantDep, session: SessionDep, name: str = NamePath) -> list[dict[str, Any]]:
+    d = await _get(session, tenant_id, name)
+    if d is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, NOT_FOUND)
+    entries = [DictEntry(e["value"], tuple(e.get("aliases") or ())) for e in d.entries]
+    issue_lists = (
+        await session.execute(
+            select(Document.issues)
+            .where(Document.tenant_id == tenant_id)
+            .order_by(Document.created_at.desc())
+            .limit(SUGGEST_DOCS)
+        )
+    ).scalars()
+    counts: Counter[tuple[str, str, str | None]] = Counter()
+    for issues in issue_lists:
+        for i in issues or []:
+            code, message = i.get("code"), i.get("message") or ""
+            if code == "not_in_dictionary" and (m := _NOT_IN.match(message)) and m["name"] == name:
+                counts[(m["value"], code, None)] += 1
+            elif code == "corrected" and (m := _CORRECTED.match(message)) and m["name"] == name:
+                counts[(m["value"], code, m["canonical"])] += 1
+    return [
+        {
+            "value": value,
+            "code": code,
+            "count": n,
+            "nearest": canonical if canonical is not None else nearest(value, entries),
+        }
+        for (value, code, canonical), n in counts.most_common(SUGGEST_LIMIT)
+    ]
 
 
 @router.put(

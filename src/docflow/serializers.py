@@ -23,5 +23,6 @@ def document_payload(document: Document, base_url: str) -> dict:
         "model": document.model,
         "created_at": _iso(document.created_at),
         "finished_at": _iso(document.finished_at),
+        "review": {"at": _iso(document.reviewed_at), "note": document.review_note} if document.reviewed_at else None,
         "pdf_url": f"{base_url.rstrip('/')}/v1/documents/{document.id}/pdf" if ready else None,
     }

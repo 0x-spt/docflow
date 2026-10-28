@@ -19,8 +19,8 @@ STATUSES = ("queued", "processing", "ok", "needs_review", "failed")
     summary="Статистика за период",
     description=(
         "Документы, созданные за последние `days` дней (1–365, по умолчанию 30): всего и по статусам. "
-        "`auto_share` — доля `ok` среди завершённых (ok + needs_review + failed), null, если завершённых нет. "
-        "`reviewed` — сколько документов проверено человеком."
+        "`auto_share` — доля `ok` без участия человека среди завершённых (ok + needs_review + failed), "
+        "null, если завершённых нет. `reviewed` — сколько документов проверено человеком за период."
     ),
 )
 async def get_stats(
@@ -34,11 +34,28 @@ async def get_stats(
     )
     by_status = dict.fromkeys(STATUSES, 0)
     by_status.update(dict(rows.all()))
+    reviewed = (
+        await session.execute(
+            select(func.count()).where(
+                Document.tenant_id == tenant_id, Document.reviewed_at.is_not(None), Document.reviewed_at >= since
+            )
+        )
+    ).scalar_one()
+    unreviewed_ok = (
+        await session.execute(
+            select(func.count()).where(
+                Document.tenant_id == tenant_id,
+                Document.created_at >= since,
+                Document.status == "ok",
+                Document.reviewed_at.is_(None),
+            )
+        )
+    ).scalar_one()
     finished = by_status["ok"] + by_status["needs_review"] + by_status["failed"]
     return {
         "days": days,
         "total": sum(by_status.values()),
         "by_status": by_status,
-        "auto_share": by_status["ok"] / finished if finished else None,
-        "reviewed": 0,  # колонка reviewed_at появится вместе с проверкой (Task 4)
+        "auto_share": unreviewed_ok / finished if finished else None,
+        "reviewed": reviewed,
     }
