@@ -22,7 +22,7 @@ export default function AuditPage() {
           </p>
           <ol className="mt-8 space-y-3 border-l-2 border-ink pl-5 text-lg text-muted">
             <li>Созвонимся и посмотрим примеры документов.</li>
-            <li>Опишем схему и правила проверки.</li>
+            <li>Покажем схему выгрузки в ваши системы и правила проверки.</li>
             <li>Предложим пилот на ваших документах с замером точности.</li>
           </ol>
           <p className="mt-8 text-base text-muted">Ответим в течение [СРОК ОТВЕТА].</p>

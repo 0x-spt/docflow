@@ -12,7 +12,7 @@ export function SiteFooter() {
         <div className="md:col-span-5">
           <Logo className="[&_sup]:text-paper" />
           <p className="mt-3 max-w-sm text-paper/80">
-            Фото и сканы документов — в чистый PDF и проверенные данные в вашей системе.
+            Документы с бумаги — сразу в 1С, CRM и таблицы, с проверкой каждого поля.
           </p>
         </div>
         <div className="md:col-span-4">

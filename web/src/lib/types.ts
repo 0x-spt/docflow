@@ -146,6 +146,8 @@ export interface SchemaListItem {
 /** POST /v1/leads */
 export type LeadVolume = "lt100" | "100-1000" | "1000-10000" | "gt10000" | "unknown";
 
+export type LeadTarget = "1c" | "bitrix24" | "amocrm" | "google_sheets" | "excel" | "own_system" | "unknown";
+
 export interface LeadRequest {
   name: string;
   company?: string;
@@ -154,6 +156,7 @@ export interface LeadRequest {
   volume: LeadVolume;
   documents?: string;
   message?: string;
+  targets?: LeadTarget[];
   consent: boolean;
   website?: string;
 }

@@ -5,7 +5,7 @@ import { useActionState, useEffect, useRef } from "react";
 
 import { submitLead } from "@/app/audit/actions";
 import { Button, Field } from "@/components/ui";
-import { INITIAL_LEAD_STATE, NICHES, VOLUMES } from "@/lib/leads";
+import { INITIAL_LEAD_STATE, NICHES, TARGETS, VOLUMES } from "@/lib/leads";
 
 /** Форма заявки на аудит. Без JS — обычная отправка в server action, с JS — ошибки у полей и блокировка кнопки. */
 export function AuditForm() {
@@ -39,6 +39,7 @@ export function AuditForm() {
 
   const v = state.values ?? {};
   const e = state.errors ?? {};
+  const checkedTargets = new Set((v.targets ?? "").split(","));
 
   return (
     // key: после ответа сервера поля пересоздаются с введёнными значениями (React сбрасывает форму после action)
@@ -112,6 +113,25 @@ export function AuditForm() {
         </Field>
       </div>
 
+      <fieldset className="flex flex-col gap-3">
+        <legend className="mb-3 font-mono text-sm font-medium">Куда выгружать данные</legend>
+        <div className="grid grid-cols-1 gap-x-6 gap-y-1 min-[400px]:grid-cols-2 lg:grid-cols-3">
+          {TARGETS.map((t) => (
+            <label key={t.value} className="flex min-h-11 cursor-pointer items-center gap-3 text-base">
+              <input
+                type="checkbox"
+                name="targets"
+                value={t.value}
+                defaultChecked={checkedTargets.has(t.value)}
+                className="size-6 shrink-0 cursor-pointer appearance-none border-2 border-ink bg-card checked:bg-ink"
+              />
+              {t.label}
+            </label>
+          ))}
+        </div>
+        <p className="text-sm text-muted">Можно выбрать несколько.</p>
+      </fieldset>
+
       <Field
         as="textarea"
         rows={3}
@@ -127,7 +147,7 @@ export function AuditForm() {
         label="Что ещё важно"
         name="message"
         maxLength={2000}
-        hint="Куда передавать данные, где хранятся документы сейчас, сроки."
+        hint="Где хранятся документы сейчас, кто их вносит, сроки."
         defaultValue={v.message}
       />
 

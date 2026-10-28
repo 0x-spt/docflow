@@ -16,9 +16,21 @@ const jetbrainsMono = JetBrains_Mono({
   display: "swap",
 });
 
+const TITLE = "DocFlow — документы с бумаги сразу в 1С, CRM и таблицы";
+const DESCRIPTION =
+  "Сфотографировали счёт, накладную, УПД, акт или заказ-наряд — DocFlow читает его, проверяет реквизиты и суммы " +
+  "и выгружает данные в 1С, Битрикс24, amoCRM, Google Таблицы, Excel или вашу систему по API.";
+
 export const metadata: Metadata = {
-  title: "DocFlow",
-  description: "Распознавание документов с проверкой реквизитов",
+  title: TITLE,
+  description: DESCRIPTION,
+  openGraph: {
+    type: "website",
+    locale: "ru_RU",
+    siteName: "DocFlow",
+    title: TITLE,
+    description: DESCRIPTION,
+  },
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

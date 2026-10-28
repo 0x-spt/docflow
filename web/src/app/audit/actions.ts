@@ -1,8 +1,8 @@
 "use server";
 
 import { ApiError, apiFetch } from "@/lib/api";
-import { VOLUMES, type LeadState } from "@/lib/leads";
-import type { LeadRequest, LeadVolume } from "@/lib/types";
+import { TARGETS, VOLUMES, type LeadState } from "@/lib/leads";
+import type { LeadRequest, LeadTarget, LeadVolume } from "@/lib/types";
 
 const TOO_MANY = "Слишком много заявок с вашего адреса, попробуйте позже.";
 const FAILED = "Не получилось отправить заявку. Попробуйте ещё раз или напишите нам на [EMAIL].";
@@ -25,12 +25,20 @@ function humanize(detail: string): string {
   return FAILED;
 }
 
+// отмеченные системы: только известные коды, без повторов, в порядке списка
+function targets(form: FormData): LeadTarget[] {
+  const picked = new Set(form.getAll("targets").filter((v): v is string => typeof v === "string"));
+  return TARGETS.map((t) => t.value).filter((v) => picked.has(v));
+}
+
 /** Заявка на аудит: проверка полей, затем POST /v1/leads без сессии. */
 export async function submitLead(_prev: LeadState, form: FormData): Promise<LeadState> {
   const values: Record<string, string> = {};
   for (const key of TEXT_FIELDS) values[key] = str(form, key);
   const consent = form.get("consent") === "on";
   if (consent) values.consent = "on";
+  const picked = targets(form);
+  if (picked.length) values.targets = picked.join(",");
 
   const errors: Record<string, string> = {};
   if (!values.name) errors.name = "Как к вам обращаться?";
@@ -47,6 +55,7 @@ export async function submitLead(_prev: LeadState, form: FormData): Promise<Lead
     volume: values.volume as LeadVolume,
     documents: values.documents || undefined,
     message: values.message || undefined,
+    targets: picked.length ? picked : undefined,
     consent: true,
     website: str(form, "hp_field_x") || undefined,
   };

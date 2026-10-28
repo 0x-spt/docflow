@@ -1,9 +1,9 @@
 import { Section } from "@/components/ui";
 
-/** [04] Измерено: только факты прогона 28.10.2026 на 10 рукописных заказ-нарядах. Ничего сверх них. */
+/** [08] Измерено: только факты прогона 28.10.2026 на 10 рукописных заказ-нарядах. Ничего сверх них. */
 export function Measured() {
   return (
-    <Section num="04" id="measured" title="Измерено, а не обещано" meta="прогон 28.10.2026" size="display">
+    <Section num="08" id="measured" title="Измерено, а не обещано" meta="прогон 28.10.2026" size="display">
       <div className="border-2 border-ink bg-ink text-paper">
         <div className="grid gap-0.5 bg-paper/30 lg:grid-cols-12">
           <div className="flex flex-col justify-between gap-6 bg-ink p-6 sm:p-10 lg:col-span-7">
