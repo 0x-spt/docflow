@@ -1,5 +1,6 @@
 "use server";
 
+import { revalidatePath } from "next/cache";
 import { redirect, unstable_rethrow } from "next/navigation";
 
 import { ApiError } from "@/lib/api";
@@ -64,4 +65,26 @@ async function review(id: string, decision: ReviewRequest["decision"], form: For
     console.error("не удалось найти следующий документ на проверку", e); // проверка уже сохранена — в очередь
   }
   redirect(next);
+}
+
+export type RetryState = { error?: string; ok?: boolean };
+
+/** «Повторить» неудавшуюся выгрузку: 409 — она уже ушла или ещё в работе. */
+export async function retryExport(docId: string, exportId: string): Promise<RetryState> {
+  if (!isDocId(docId) || !isDocId(exportId)) return { error: "Выгрузка не найдена." };
+  try {
+    await apiFetchAuthed(`/v1/exports/${encodeURIComponent(exportId)}/retry`, { method: "POST" });
+  } catch (e) {
+    unstable_rethrow(e);
+    if (e instanceof ApiError && e.status === 409) {
+      revalidatePath(`/app/documents/${docId}`);
+      return { error: "Эту выгрузку уже нельзя повторить: она выполнена или ещё в работе." };
+    }
+    if (e instanceof ApiError && e.status === 403) return { error: "Повторять выгрузки может владелец аккаунта." };
+    if (e instanceof ApiError && e.status === 404) return { error: "Выгрузка не найдена." };
+    console.error("повтор выгрузки не поставлен", e);
+    return { error: "Не удалось повторить: сервис недоступен. Попробуйте ещё раз." };
+  }
+  revalidatePath(`/app/documents/${docId}`);
+  return { ok: true };
 }

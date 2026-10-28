@@ -11,6 +11,7 @@ const NAV = [
   { href: "/app/upload", label: "Загрузить" },
   { href: "/app/dictionaries", label: "Справочники" },
   { href: "/app/integrations", label: "Подключения" },
+  { href: "/app/rules", label: "Правила" },
   { href: "/app/settings", label: "API и вебхуки" },
 ];
 

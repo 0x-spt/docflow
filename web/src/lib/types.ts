@@ -65,6 +65,55 @@ export interface DocumentPayload {
   review: { at: string | null; note: string | null } | null;
   pdf_url: string | null;
   digital_pdf_url: string | null;
+  exports?: ExportItem[];
+}
+
+export type ExportStatus = "pending" | "done" | "failed";
+
+/** Выгрузка или уведомление по документу (поле `exports` в документе) */
+export interface ExportItem {
+  id: string;
+  destination_id: string | null;
+  destination_name: string | null;
+  kind: string | null;
+  purpose: "export" | "notify_review" | "notify_new";
+  status: ExportStatus;
+  external_id: string | null;
+  error: string | null;
+  updated_at: string | null;
+}
+
+export type RuleOp =
+  | "eq"
+  | "ne"
+  | "gt"
+  | "ge"
+  | "lt"
+  | "le"
+  | "contains"
+  | "in_dictionary"
+  | "empty"
+  | "not_empty";
+
+export interface RuleCondition {
+  field: string;
+  op: RuleOp;
+  value?: string | number | null;
+}
+
+/** GET/PUT /v1/routing-rules */
+export interface RoutingRule {
+  name: string;
+  schema: string | null;
+  conditions: RuleCondition[];
+  export_to: string[];
+  require_approval: boolean;
+  notify: string[];
+}
+
+export interface RoutingRules {
+  rules: RoutingRule[];
+  updated_at: string | null;
 }
 
 /** POST /v1/documents/{id}/review; `data` — ПОЛНЫЙ объект, не дифф */
@@ -201,6 +250,8 @@ export interface FieldDef {
 export interface ConnectorInfo {
   kind: string;
   label: string;
+  can_export: boolean;
+  can_notify: boolean;
   config_fields: FieldDef[];
   secret_fields: FieldDef[];
   target_fields: FieldDef[];

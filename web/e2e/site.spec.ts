@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { expect, test, type Page } from "@playwright/test";
 
-import type { E2EState } from "./global-setup";
+import { blankPng, type E2EState } from "./global-setup";
 
 const state: E2EState = JSON.parse(readFileSync(path.join(__dirname, ".state.json"), "utf8"));
 const API = process.env.E2E_API_URL ?? "http://localhost:8000";
@@ -149,4 +149,139 @@ test("revoked session redirects to login", async ({ page, context }) => {
   await expect(page).toHaveURL(/\/login\?expired=1/);
   await expect(page.getByText("Сессия истекла, войдите снова")).toBeVisible();
   expect((await context.cookies()).some((c) => c.name === "df_session")).toBe(false);
+});
+
+// --- правила, выгрузки, реестр Excel ---
+
+const AUTH = { Authorization: `Bearer ${state.key}`, "Content-Type": "application/json" };
+
+async function apiJson<T>(pathname: string, init: RequestInit = {}): Promise<T> {
+  const res = await fetch(`${API}${pathname}`, { ...init, headers: { ...AUTH, ...init.headers } });
+  if (res.status >= 300) throw new Error(`${init.method ?? "GET"} ${pathname}: ${res.status} ${await res.text()}`);
+  return (await res.json()) as T;
+}
+
+/** Телеграм-подключение с чужим токеном: создание в Телеграм не ходит, а доставка уведомления упадёт с отказом. */
+async function createTelegram(name: string): Promise<string> {
+  const d = await apiJson<{ id: string }>("/v1/destinations", {
+    method: "POST",
+    body: JSON.stringify({
+      kind: "telegram",
+      name,
+      config: { chat_id: "-100500" },
+      secrets: { bot_token: "123456:e2e-dummy-token" },
+    }),
+  });
+  return d.id;
+}
+
+test("rules: save and reload", async ({ page }) => {
+  const dest = `Телеграм ${Date.now()}`;
+  await createTelegram(dest);
+  await login(page);
+  await expect(page).toHaveURL(/\/app$/);
+  await page.getByRole("link", { name: "Правила", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Правила", level: 1 })).toBeVisible();
+
+  try {
+    await page.getByRole("button", { name: "Добавить правило" }).click();
+    await page.getByLabel("Название").fill("Крупные заказы");
+    await page.getByLabel("Тип документа").selectOption("e2e_order");
+    await page.getByRole("button", { name: "Добавить условие" }).click();
+    await page.getByLabel("Поле", { exact: true }).selectOption("total");
+    await page.getByLabel("Условие", { exact: true }).selectOption({ label: "больше" });
+    await page.getByLabel("Значение", { exact: true }).fill("1000");
+    await page.getByLabel(new RegExp(`^${dest}`)).check();
+    await page.getByLabel("Требовать согласования").check();
+    await page.getByRole("button", { name: "Сохранить правила" }).click();
+    await expect(page.getByText("Правила сохранены.")).toBeVisible();
+
+    await page.reload();
+    await expect(page.getByLabel("Название")).toHaveValue("Крупные заказы");
+    await expect(page.getByLabel("Тип документа")).toHaveValue("e2e_order");
+    await expect(page.getByLabel("Поле", { exact: true })).toHaveValue("total");
+    await expect(page.getByLabel("Значение", { exact: true })).toHaveValue("1000");
+    await expect(page.getByLabel(new RegExp(`^${dest}`))).toBeChecked();
+    await expect(page.getByLabel("Требовать согласования")).toBeChecked();
+
+    // ошибка API показывается как есть: пустое условие не уходит в запрос
+    await page.getByRole("button", { name: "Добавить условие" }).click();
+    await page.getByRole("button", { name: "Сохранить правила" }).click();
+    await expect(page.getByRole("alert").filter({ hasText: "выберите поле" })).toBeVisible();
+  } finally {
+    await apiJson("/v1/routing-rules", { method: "PUT", body: JSON.stringify({ rules: [] }) });
+  }
+});
+
+type ExportRow = { id: string; status: string; error: string | null };
+
+test("exports block shows failed delivery with retry; excel registry downloads", async ({ page }) => {
+  test.setTimeout(120_000);
+  const dest = await createTelegram(`Выгрузка ${Date.now()}`);
+  try {
+    await apiJson("/v1/routing-rules", {
+      method: "PUT",
+      body: JSON.stringify({
+        rules: [{ name: "Все заказы", schema: "e2e_order", conditions: [], export_to: [], notify: [dest] }],
+      }),
+    });
+    const form = new FormData();
+    form.set("schema", "e2e_order");
+    form.set("mode", "gray");
+    form.append("files", new Blob([new Uint8Array(blankPng())], { type: "image/png" }), "o.png");
+    const up = await fetch(`${API}/v1/documents`, {
+      method: "POST",
+      headers: { Authorization: AUTH.Authorization, "Idempotency-Key": `e2e-exp-${Date.now()}` },
+      body: form,
+    });
+    expect(up.status).toBeLessThan(300);
+    const docId = ((await up.json()) as { id: string }).id;
+    await expect
+      .poll(async () => (await apiJson<{ status: string }>(`/v1/documents/${docId}`)).status, { timeout: 60_000 })
+      .toBe("needs_review");
+    // выгрузка уходит только для готового документа: подтверждаем
+    await apiJson(`/v1/documents/${docId}/review`, { method: "POST", body: JSON.stringify({ decision: "approve" }) });
+    await expect
+      .poll(
+        async () =>
+          (await apiJson<{ items: ExportRow[] }>(`/v1/exports?document_id=${docId}`)).items[0]?.status ?? "none",
+        { timeout: 60_000 },
+      )
+      .toBe("failed");
+
+    await login(page);
+    await expect(page).toHaveURL(/\/app$/);
+    await page.goto(`/app/documents/${docId}`);
+    const block = page.getByRole("region", { name: /Выгрузки/ });
+    await expect(block).toBeVisible();
+    await expect(block.getByText("Ошибка", { exact: true }).first()).toBeVisible();
+    await expect(block.getByText("токен бота не принят").first()).toBeVisible();
+    // «Новый документ» уходит после подтверждения; «на проверку» — раньше, оба упали
+    const retry = block.getByRole("button", { name: /Повторить выгрузку/ });
+    await expect(retry).toHaveCount(2);
+    await retry.first().click();
+    await expect(block.getByRole("button", { name: /Повторить выгрузку/ }).first()).toBeVisible();
+
+    // реестр в Excel: через форму на очереди
+    await page.goto("/app");
+    await page.getByLabel("Тип документа").selectOption("e2e_order");
+    await page.getByLabel("Статус документов").selectOption("all");
+    const [download] = await Promise.all([
+      page.waitForEvent("download"),
+      page.getByRole("button", { name: "Скачать реестр" }).click(),
+    ]);
+    expect(download.suggestedFilename()).toMatch(/^docflow-e2e_order-.*\.xlsx$/);
+
+    const today = new Date().toISOString().slice(0, 10);
+    const res = await page.request.get(`/app/files/excel?schema=e2e_order&from=${today}&to=${today}&status=all`);
+    expect(res.status()).toBe(200);
+    expect(res.headers()["content-type"]).toContain("spreadsheetml.sheet");
+    expect(res.headers()["content-disposition"]).toContain(".xlsx");
+    expect((await res.body()).subarray(0, 2).toString()).toBe("PK");
+
+    const bad = await page.request.get("/app/files/excel?schema=../x&from=2026-01-01&to=2026-01-02");
+    expect(bad.status()).toBe(400);
+  } finally {
+    await apiJson("/v1/routing-rules", { method: "PUT", body: JSON.stringify({ rules: [] }) });
+  }
 });

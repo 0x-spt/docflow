@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 
 import { DocumentData } from "@/components/app/DocumentData";
+import { ExportsBlock } from "@/components/app/ExportsBlock";
 import { PagePreview } from "@/components/app/PagePreview";
 import { ReviewForm } from "@/components/app/ReviewForm";
 import { StatusBadge } from "@/components/ui";
@@ -9,8 +10,8 @@ import { ApiError } from "@/lib/api";
 import { fieldLabel, formatDateTime } from "@/lib/format";
 import { isDocId } from "@/lib/ids";
 import { INFO_CODES, notesByField } from "@/lib/review-form";
-import { apiFetchAuthed } from "@/lib/session";
-import type { DocSchema, DocumentPayload, Issue } from "@/lib/types";
+import { apiFetchAuthed, requireMe } from "@/lib/session";
+import type { ConnectorInfo, DocSchema, DocumentPayload, Issue } from "@/lib/types";
 
 export const metadata = { title: "Документ — DocFlow" };
 
@@ -98,6 +99,10 @@ export default async function DocumentPage({ params }: { params: Promise<{ id: s
     throw e;
   }
   const schema = await loadSchema(doc);
+  const exports = doc.exports ?? [];
+  const [me, catalog] = exports.length
+    ? await Promise.all([requireMe(), apiFetchAuthed<ConnectorInfo[]>("/v1/connectors")])
+    : [null, [] as ConnectorInfo[]];
 
   const inWork = doc.status === "queued" || doc.status === "processing";
   const reviewable = doc.status === "needs_review";
@@ -209,6 +214,7 @@ export default async function DocumentPage({ params }: { params: Promise<{ id: s
                 <p className="text-muted">Данных нет: документ не дошёл до извлечения.</p>
               )}
             </section>
+            <ExportsBlock docId={doc.id} exports={exports} catalog={catalog} canRetry={me?.user?.role === "owner"} />
           </div>
         </div>
       )}

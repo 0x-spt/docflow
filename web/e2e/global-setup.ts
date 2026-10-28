@@ -7,7 +7,7 @@ const ROOT = path.resolve(__dirname, "..", "..");
 const API = process.env.E2E_API_URL ?? "http://localhost:8000";
 export const STATE_FILE = path.join(__dirname, ".state.json");
 
-export type E2EState = { email: string; password: string; docId: string };
+export type E2EState = { email: string; password: string; docId: string; key: string };
 
 function cli(...args: string[]): string {
   return execFileSync("docker", ["compose", "exec", "-T", "api", "docflow", ...args], {
@@ -63,7 +63,7 @@ function chunk(type: string, data: Buffer): Buffer {
 }
 
 /** Белый лист 600x800 в оттенках серого: без персональных данных. */
-function blankPng(): Buffer {
+export function blankPng(): Buffer {
   const w = 600;
   const h = 800;
   const ihdr = Buffer.alloc(13);
@@ -120,5 +120,5 @@ export default async function globalSetup(): Promise<void> {
   }
 
   mkdirSync(path.dirname(STATE_FILE), { recursive: true });
-  writeFileSync(STATE_FILE, JSON.stringify({ email, password, docId } satisfies E2EState));
+  writeFileSync(STATE_FILE, JSON.stringify({ email, password, docId, key } satisfies E2EState));
 }

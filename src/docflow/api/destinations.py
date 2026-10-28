@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field, StrictStr
 from sqlalchemy import select
 
 from docflow.api.deps import Principal, SessionDep, SettingsDep, TenantDep, parse_id, require_owner_or_key
-from docflow.connectors.base import REGISTRY, Connector, ConnectorError, DestCtx, FieldDef
+from docflow.connectors.base import REGISTRY, Connector, ConnectorError, DestCtx, FieldDef, supports
 from docflow.db.models import Destination, RoutingRules
 from docflow.secrets import SecretsKeyMissing, decrypt_secrets, encrypt_secrets
 from docflow.webhooks import check_webhook_url
@@ -147,13 +147,18 @@ async def _owned(session, tenant_id, destination_id: str) -> Destination:
 @catalog_router.get(
     "",
     summary="Типы получателей",
-    description="Какие системы можно подключить и какие поля заполнить: настройки, секреты, целевые поля для маппинга.",
+    description=(
+        "Какие системы можно подключить и какие поля заполнить: настройки, секреты, целевые поля для маппинга. "
+        "`can_export` — умеет выгрузку документов, `can_notify` — уведомления."
+    ),
 )
 async def list_connectors(_: TenantDep) -> list[dict[str, Any]]:
     return [
         {
             "kind": c.kind,
             "label": c.label,
+            "can_export": supports(c, "export"),
+            "can_notify": supports(c, "notify_review"),
             "config_fields": [dataclasses.asdict(f) for f in c.config_fields],
             "secret_fields": [dataclasses.asdict(f) for f in c.secret_fields],
             "target_fields": [dataclasses.asdict(f) for f in c.target_fields],

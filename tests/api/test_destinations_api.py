@@ -175,6 +175,10 @@ async def test_connectors_catalog(api, auth, fake_connector):
     }
     assert item["secret_fields"][0]["name"] == "token"
     assert item["target_fields"][0]["name"] == "amount"
+    by_kind = {c["kind"]: c for c in r.json()}
+    # Телеграм умеет только уведомления, Google Таблицы — только выгрузку
+    assert (by_kind["telegram"]["can_export"], by_kind["telegram"]["can_notify"]) == (False, True)
+    assert (by_kind["google_sheets"]["can_export"], by_kind["google_sheets"]["can_notify"]) == (True, False)
     assert (await api.client.get("/v1/connectors")).status_code == 401
 
 
