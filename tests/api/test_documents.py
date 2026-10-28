@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 
 from docflow.db.models import ApiKey, Document
 from docflow.queue import PROCESS_DOCUMENT
-from docflow.storage.blobs import scan_key
+from docflow.storage.blobs import page_key, scan_key
 
 AUTH_DETAIL = "неверный или отозванный ключ API"
 
@@ -448,3 +448,123 @@ async def test_upload_pinned_builtin_version_with_tenant_override(api, auth):
     async with api.sessionmaker() as s:
         resolved = await SchemaResolver().resolve(s, p.tenant_id, "invoice_ru", builtin.version)
     assert resolved.title == builtin.title and len(resolved.fields) == len(builtin.fields)
+
+
+# --- список и превью страниц ----------------------------------------------
+
+
+async def add_doc(api, headers, *, created_at=None, **values):
+    """Документ тенанта, чей ключ в headers, прямо в БД."""
+    from docflow.db.models import ApiKey as Key
+    from docflow.db.models import hash_key
+
+    async with api.sessionmaker() as s:
+        tenant_id = (
+            await s.execute(select(Key.tenant_id).where(Key.key_hash == hash_key(headers["Authorization"][7:])))
+        ).scalar_one()
+        doc = Document(
+            tenant_id=tenant_id,
+            schema_slug=values.pop("schema_slug", "invoice_ru"),
+            schema_version=1,
+            status=values.pop("status", "ok"),
+            files=[],
+            mode="gray",
+            **values,
+        )
+        if created_at is not None:
+            doc.created_at = created_at
+        s.add(doc)
+        await s.commit()
+        return str(doc.id)
+
+
+async def test_list_newest_first_and_pagination(api, auth):
+    base = datetime(2026, 10, 1, 12, tzinfo=UTC)
+    ids = [await add_doc(api, auth, created_at=base.replace(minute=m)) for m in (1, 2, 3)]
+
+    r = await api.client.get("/v1/documents", headers=auth, params={"limit": 2})
+    assert r.status_code == 200
+    body = r.json()
+    assert [i["id"] for i in body["items"]] == [ids[2], ids[1]]
+    assert body["next_before"] is not None
+
+    r = await api.client.get("/v1/documents", headers=auth, params={"limit": 2, "before": body["next_before"]})
+    body = r.json()
+    assert [i["id"] for i in body["items"]] == [ids[0]]
+    assert body["next_before"] is None
+
+
+async def test_list_before_naive_is_utc_and_invalid_422(api, auth):
+    await add_doc(api, auth, created_at=datetime(2026, 10, 1, 12, tzinfo=UTC))
+    r = await api.client.get("/v1/documents", headers=auth, params={"before": "2026-10-01T12:00:01"})
+    assert len(r.json()["items"]) == 1
+    r = await api.client.get("/v1/documents", headers=auth, params={"before": "2026-10-01T11:59:59Z"})
+    assert r.json()["items"] == []
+    assert (await api.client.get("/v1/documents", headers=auth, params={"before": "вчера"})).status_code == 422
+
+
+async def test_list_filter_status(api, auth):
+    ok = await add_doc(api, auth, status="ok")
+    await add_doc(api, auth, status="failed")
+    r = await api.client.get("/v1/documents", headers=auth, params={"status": "ok"})
+    assert [i["id"] for i in r.json()["items"]] == [ok]
+
+
+async def test_list_isolated_between_tenants(api, auth, make_tenant):
+    other = await make_tenant("Чужой")
+    await add_doc(api, other)
+    mine = await add_doc(api, auth)
+    r = await api.client.get("/v1/documents", headers=auth)
+    assert [i["id"] for i in r.json()["items"]] == [mine]
+
+
+async def test_list_item_shape(api, auth):
+    data = {"number": "15", "supplier": "ООО", "total": 250, "empty": "", "none": None, "items": [1], "a": "x"}
+    issues = [
+        {"field": "total", "code": "corrected", "message": "исправлено"},
+        {"field": "total", "code": "sum_mismatch", "message": "итог не сходится"},
+    ]
+    doc_id = await add_doc(api, auth, status="needs_review", data=data, issues=issues)
+    bare = await add_doc(api, auth, status="queued")
+
+    items = {i["id"]: i for i in (await api.client.get("/v1/documents", headers=auth)).json()["items"]}
+    item = items[doc_id]
+    assert item["title"] == "15"
+    assert item["summary"] == [
+        {"field": "supplier", "value": "ООО"},
+        {"field": "total", "value": 250},
+        {"field": "a", "value": "x"},
+    ]
+    assert item["issue"] == "итог не сходится"
+    assert item["schema"] == {"slug": "invoice_ru", "version": 1}
+    assert item["status"] == "needs_review"
+    assert item["finished_at"] is None
+    assert items[bare]["title"] == bare[:8]
+    assert items[bare]["summary"] == [] and items[bare]["issue"] is None
+
+
+async def test_list_bad_status_422(api, auth):
+    assert (await api.client.get("/v1/documents", headers=auth, params={"status": "x"})).status_code == 422
+    assert (await api.client.get("/v1/documents", headers=auth, params={"limit": 0})).status_code == 422
+
+
+async def test_page_preview_served(api, auth):
+    doc_id = await add_doc(api, auth)
+    await api.blobs.put(page_key(doc_id, 1), b"\xff\xd8jpeg", "image/jpeg")
+    r = await api.client.get(f"/v1/documents/{doc_id}/pages/1", headers=auth)
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/jpeg"
+    assert r.content == b"\xff\xd8jpeg"
+
+
+async def test_page_preview_missing_404(api, auth):
+    doc_id = await add_doc(api, auth)
+    assert (await api.client.get(f"/v1/documents/{doc_id}/pages/1", headers=auth)).status_code == 404
+    assert (await api.client.get(f"/v1/documents/{doc_id}/pages/0", headers=auth)).status_code == 404
+
+
+async def test_page_preview_foreign_404(api, auth, make_tenant):
+    other = await make_tenant("Чужой")
+    doc_id = await add_doc(api, other)
+    await api.blobs.put(page_key(doc_id, 1), b"\xff\xd8jpeg", "image/jpeg")
+    assert (await api.client.get(f"/v1/documents/{doc_id}/pages/1", headers=auth)).status_code == 404

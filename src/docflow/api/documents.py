@@ -4,9 +4,9 @@ import asyncio
 import logging
 import uuid
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, File, Form, Header, HTTPException, Response, UploadFile, status
+from fastapi import APIRouter, File, Form, Header, HTTPException, Query, Response, UploadFile, status
 from fastapi.responses import JSONResponse
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
@@ -19,13 +19,16 @@ from docflow.imaging.load import UnsupportedFile, count_pages, detect_kind
 from docflow.pipeline import process_job_id
 from docflow.queue import PROCESS_DOCUMENT
 from docflow.serializers import document_payload
-from docflow.storage.blobs import BlobNotFound, original_key, scan_key
+from docflow.storage.blobs import BlobNotFound, original_key, page_key, scan_key
+from docflow.validation.engine import INFO_CODES
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/documents", tags=["documents"])
 
 MODES = ("color", "gray", "bw")
+DocStatus = Literal["queued", "processing", "ok", "needs_review", "failed"]
+SUMMARY_FIELDS = 3
 CHUNK = 1024 * 1024
 NOT_FOUND = "документ не найден"
 ENQUEUE_ERROR = "не удалось поставить документ в очередь, загрузите его заново"
@@ -223,6 +226,66 @@ async def upload_document(
     return _accepted(document)
 
 
+def _list_item(document: Document) -> dict:
+    data = document.data or {}
+    number = data.get("number")
+    has_number = isinstance(number, str | int | float) and not isinstance(number, bool) and str(number).strip()
+    title = str(number) if has_number else str(document.id)[:8]
+    summary = []
+    for field, value in data.items():
+        if field == "number" or isinstance(value, bool) or not isinstance(value, str | int | float):
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        summary.append({"field": field, "value": value})
+        if len(summary) == SUMMARY_FIELDS:
+            break
+    issue = next((i.get("message") for i in document.issues or [] if i.get("code") not in INFO_CODES), None)
+    return {
+        "id": str(document.id),
+        "status": document.status,
+        "schema": {"slug": document.schema_slug, "version": document.schema_version},
+        "title": title,
+        "summary": summary,
+        "issue": issue,
+        "created_at": document.created_at,
+        "finished_at": document.finished_at,
+    }
+
+
+@router.get(
+    "",
+    summary="Список документов",
+    description=(
+        "Документы тенанта, новые сверху. `status` — фильтр, `limit` 1–100 (по умолчанию 50), `before` — ISO-время: "
+        "только документы, созданные раньше (без часового пояса — UTC). `next_before` — значение `before` для "
+        "следующей страницы или null, если документов больше нет."
+    ),
+)
+async def list_documents(
+    tenant_id: TenantDep,
+    session: SessionDep,
+    status_filter: Annotated[DocStatus | None, Query(alias="status")] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    before: datetime | None = None,
+) -> dict:
+    query = select(Document).where(Document.tenant_id == tenant_id)
+    if status_filter is not None:
+        query = query.where(Document.status == status_filter)
+    if before is not None:
+        if before.tzinfo is None:
+            before = before.replace(tzinfo=UTC)
+        query = query.where(Document.created_at < before)
+    rows = (
+        (await session.execute(query.order_by(Document.created_at.desc(), Document.id.desc()).limit(limit + 1)))
+        .scalars()
+        .all()
+    )
+    page = rows[:limit]
+    next_before = page[-1].created_at if len(rows) > limit else None
+    return {"items": [_list_item(d) for d in page], "next_before": next_before}
+
+
 @router.get(
     "/{document_id}",
     summary="Статус и результат документа",
@@ -261,3 +324,23 @@ async def get_document_pdf(document_id: str, tenant_id: TenantDep, session: Sess
         media_type="application/pdf",
         headers={"Content-Disposition": f'inline; filename="{document.id}.pdf"'},
     )
+
+
+@router.get(
+    "/{document_id}/pages/{n}",
+    summary="Превью страницы",
+    description="JPEG страницы документа (n с 1). 404 — документа нет, он чужой или превью нет.",
+    response_class=Response,
+    responses={200: {"content": {"image/jpeg": {}}, "description": "JPEG страницы"}},
+)
+async def get_document_page(
+    document_id: str, n: int, tenant_id: TenantDep, session: SessionDep, blobs: BlobsDep
+) -> Response:
+    document = await _get_own(session, tenant_id, document_id)
+    if n < 1:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "страница не найдена")
+    try:
+        image = await blobs.get(page_key(str(document.id), n))
+    except BlobNotFound:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "страница не найдена") from None
+    return Response(content=image, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})

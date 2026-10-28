@@ -26,7 +26,7 @@ from docflow.pipeline import (
 )
 from docflow.queue import DELIVER_WEBHOOK, PROCESS_DOCUMENT, ListEnqueuer
 from docflow.schemas.library import builtin_schemas
-from docflow.storage.blobs import LocalBlobStore, original_key, scan_key
+from docflow.storage.blobs import LocalBlobStore, original_key, page_key, scan_key
 
 BIK = "044525225"
 ACCOUNT = "40702810200000000001"  # валидный р/с для этого БИК (как в tests/validation/test_engine.py)
@@ -707,3 +707,13 @@ async def test_untrusted_model_adds_nothing_when_already_needs_review(sm, tmp_pa
     doc = await load(deps, doc_id)
     assert doc.status == "needs_review"
     assert "review_required" not in [i["code"] for i in doc.issues]
+
+
+async def test_pipeline_stores_page_previews(sm, tmp_path):
+    deps = make_deps(sm, tmp_path)
+    doc_id = await make_doc(deps, [(page_jpeg(), "a.jpg"), (page_jpeg(), "b.jpg")])
+    await process_document(deps, doc_id)
+
+    for n in (1, 2):
+        assert (await deps.blobs.get(page_key(str(doc_id), n))).startswith(b"\xff\xd8")
+    assert not await deps.blobs.exists(page_key(str(doc_id), 3))

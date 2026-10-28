@@ -23,7 +23,7 @@ from docflow.queue import PROCESS_DOCUMENT, Enqueuer
 from docflow.schemas.library import builtin_schemas
 from docflow.schemas.llm import UNCERTAIN
 from docflow.schemas.model import DocSchema
-from docflow.storage.blobs import BlobNotFound, BlobStore, scan_key
+from docflow.storage.blobs import BlobNotFound, BlobStore, page_key, scan_key
 from docflow.validation.dictionaries import DictEntry, resolve_dictionaries
 from docflow.validation.engine import Issue, decide_status, evaluate
 from docflow.webhooks import enqueue_webhooks
@@ -129,6 +129,9 @@ async def _render(deps: Deps, document_id: UUID, keys: list[str], mode: str) -> 
     del files
     pdf = await _scan_pdf(deps, pages)
     await deps.blobs.put(scan_key(str(document_id)), pdf, "application/pdf")
+    # превью для кабинета: ровно те JPEG, что видит модель
+    for n, page in enumerate(pages, start=1):
+        await deps.blobs.put(page_key(str(document_id), n), page.model_jpeg, "image/jpeg")
     return [p.model_jpeg for p in pages], len(pages)
 
 

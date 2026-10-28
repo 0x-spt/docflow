@@ -58,6 +58,11 @@ def scan_key(document_id: str) -> str:
     return f"docs/{document_id}/scan.pdf"
 
 
+def page_key(document_id: str, n: int) -> str:
+    """Превью страницы (JPEG для модели); n с 1."""
+    return f"pages/{document_id}/{n}.jpg"
+
+
 # --- локальная ФС --------------------------------------------------------
 
 
