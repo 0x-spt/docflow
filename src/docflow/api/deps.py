@@ -102,6 +102,13 @@ def require_owner(principal: PrincipalDep) -> Principal:
     return principal
 
 
+def require_owner_or_key(principal: PrincipalDep) -> Principal:
+    """Сессия владельца или ключ API (машинные интеграции); оператору — 403."""
+    if principal.user_id is not None and principal.role != "owner":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "нужны права владельца")
+    return principal
+
+
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 TenantDep = Annotated[uuid.UUID, Depends(get_tenant_id)]
 SettingsDep = Annotated[Settings, Depends(get_app_settings)]

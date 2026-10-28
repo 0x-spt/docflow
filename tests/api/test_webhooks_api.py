@@ -1,6 +1,7 @@
 import uuid
 
 import pytest
+from api_helpers import session_for
 from sqlalchemy import select
 
 from docflow.db.models import WebhookEndpoint
@@ -75,3 +76,30 @@ async def test_delete_unknown_404(api, auth, bad):
 
 async def test_webhooks_require_auth(api):
     assert (await api.client.get("/v1/webhooks")).status_code == 401
+
+
+async def test_operator_cannot_manage_webhooks(api, auth):
+    ep_id = (await create(api, auth)).json()["id"]
+    operator, _ = await session_for(api, auth, role="operator")
+    r = await create(api, operator)
+    assert r.status_code == 403
+    assert r.json()["detail"] == "нужны права владельца"
+    r = await api.client.delete(f"/v1/webhooks/{ep_id}", headers=operator)
+    assert r.status_code == 403
+    assert r.json()["detail"] == "нужны права владельца"
+    # список виден любому участнику тенанта, вебхук не тронут
+    listed = (await api.client.get("/v1/webhooks", headers=operator)).json()
+    assert [h["id"] for h in listed] == [ep_id]
+
+
+async def test_owner_session_manages_webhooks(api, auth):
+    owner, _ = await session_for(api, auth, role="owner")
+    r = await create(api, owner)
+    assert r.status_code == 201, r.text
+    assert (await api.client.delete(f"/v1/webhooks/{r.json()['id']}", headers=owner)).status_code == 204
+
+
+async def test_api_key_manages_webhooks(api, auth):
+    r = await create(api, auth)
+    assert r.status_code == 201, r.text
+    assert (await api.client.delete(f"/v1/webhooks/{r.json()['id']}", headers=auth)).status_code == 204

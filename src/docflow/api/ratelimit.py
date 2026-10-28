@@ -1,6 +1,8 @@
 """Ограничение частоты попыток входа: скользящее окно в памяти процесса.
 
 Счётчики не переживают перезапуск и не общие между процессами — для одного API-контейнера этого хватает.
+Ключи (IP, email) выбирает клиент, поэтому раз в `sweep_every` попыток все истёкшие ключи вычищаются: иначе
+поток уникальных ключей растил бы словарь без предела.
 """
 
 import hmac
@@ -13,10 +15,19 @@ from docflow.config import Settings
 
 
 class SlidingWindowLimiter:
-    def __init__(self, limit: int, window_s: float) -> None:
+    def __init__(self, limit: int, window_s: float, sweep_every: int = 1000) -> None:
         self.limit = limit
         self.window_s = window_s
+        self.sweep_every = sweep_every
         self._hits: dict[str, deque[float]] = {}
+        self._since_sweep = 0
+
+    def _sweep(self) -> None:
+        """Удалить ключи, у которых все попытки старше окна (у живых очередь не трогаем)."""
+        cutoff = time.monotonic() - self.window_s
+        stale = [key for key, hits in self._hits.items() if not hits or hits[-1] <= cutoff]
+        for key in stale:
+            del self._hits[key]
 
     def _fresh(self, key: str) -> deque[float]:
         hits = self._hits.get(key)
@@ -31,6 +42,10 @@ class SlidingWindowLimiter:
 
     def hit(self, key: str) -> bool:
         """True — разрешено, попытка учтена; False — лимит исчерпан."""
+        self._since_sweep += 1
+        if self._since_sweep >= self.sweep_every:
+            self._since_sweep = 0
+            self._sweep()
         hits = self._fresh(key)
         if len(hits) >= self.limit:
             return False

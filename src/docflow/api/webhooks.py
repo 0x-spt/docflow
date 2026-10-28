@@ -1,14 +1,17 @@
-"""Адреса вебхуков тенанта. Секрет подписи показывается только при создании."""
+"""Адреса вебхуков тенанта. Секрет подписи показывается только при создании.
+
+Создавать и отключать может владелец (сессия) или ключ API; оператор видит только список.
+"""
 
 import asyncio
 import secrets
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from docflow.api.deps import SessionDep, SettingsDep, TenantDep, parse_id
+from docflow.api.deps import Principal, SessionDep, SettingsDep, TenantDep, parse_id, require_owner_or_key
 from docflow.db.models import WebhookEndpoint
 from docflow.webhooks import EVENT_COMPLETED, EVENT_FAILED, EVENT_REVIEWED, check_webhook_url
 
@@ -16,6 +19,8 @@ router = APIRouter(prefix="/v1/webhooks", tags=["webhooks"])
 
 EVENTS = (EVENT_COMPLETED, EVENT_FAILED, EVENT_REVIEWED)
 NOT_FOUND = "вебхук не найден"
+
+ManagerDep = Annotated[Principal, Depends(require_owner_or_key)]
 
 
 class WebhookIn(BaseModel):
@@ -42,12 +47,14 @@ def _public(ep: WebhookEndpoint) -> dict[str, Any]:
         "`document.reviewed` — документ подтверждён человеком после проверки (приходит и подписчикам "
         "`document.completed`). "
         "В ответе — секрет для проверки подписи `X-DocFlow-Signature`; он показывается один раз. "
-        "422 — пустой или неизвестный список событий, URL не http(s) или ведёт на частный адрес."
+        "422 — пустой или неизвестный список событий, URL не http(s) или ведёт на частный адрес. "
+        "403 — сессия оператора (нужен владелец или ключ API)."
     ),
 )
 async def create_webhook(
-    body: WebhookIn, tenant_id: TenantDep, session: SessionDep, settings: SettingsDep
+    body: WebhookIn, manager: ManagerDep, session: SessionDep, settings: SettingsDep
 ) -> dict[str, Any]:
+    tenant_id = manager.tenant_id
     events = sorted(set(body.events))
     if not events or any(e not in EVENTS for e in events):
         raise HTTPException(
@@ -87,9 +94,13 @@ async def list_webhooks(tenant_id: TenantDep, session: SessionDep) -> list[dict[
     "/{webhook_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Отключить вебхук",
-    description="Адрес перестаёт получать события; история доставок сохраняется. Чужой или несуществующий — 404.",
+    description=(
+        "Адрес перестаёт получать события; история доставок сохраняется. Чужой или несуществующий — 404, "
+        "сессия оператора — 403."
+    ),
 )
-async def delete_webhook(webhook_id: str, tenant_id: TenantDep, session: SessionDep) -> Response:
+async def delete_webhook(webhook_id: str, manager: ManagerDep, session: SessionDep) -> Response:
+    tenant_id = manager.tenant_id
     endpoint = await session.get(WebhookEndpoint, parse_id(webhook_id))
     if endpoint is None or endpoint.tenant_id != tenant_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, NOT_FOUND)

@@ -10,6 +10,10 @@ from docflow.db.models import Lead
 logger = logging.getLogger(__name__)
 
 TIMEOUT = 5.0
+# у Telegram потолок 4096 символов на сообщение; берём с запасом
+TG_TEXT_MAX = 4000
+# длинные свободные поля (документы, сообщение — до 2000 в API) режем до этой длины
+FIELD_MAX = 1500
 
 _LABELS = (
     ("name", "Имя"),
@@ -22,14 +26,18 @@ _LABELS = (
 )
 
 
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
 def lead_text(lead: Lead) -> str:
-    """Текст уведомления: все непустые поля заявки, без IP."""
+    """Текст уведомления: все непустые поля заявки, без IP; не длиннее TG_TEXT_MAX."""
     lines = ["Новая заявка на аудит"]
     for attr, label in _LABELS:
         value = getattr(lead, attr)
         if value:
-            lines.append(f"{label}: {value}")
-    return "\n".join(lines)
+            lines.append(f"{label}: {_clip(str(value), FIELD_MAX)}")
+    return _clip("\n".join(lines), TG_TEXT_MAX)
 
 
 async def notify_lead(lead: Lead, settings: Settings) -> bool:
