@@ -2,7 +2,7 @@
 
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Any
 
 from docflow.connectors.base import ConnectorError, DestCtx, ExportDoc
@@ -58,13 +58,13 @@ def party(doc: ExportDoc, side: str) -> Party:
     )
 
 
-def deal_title(doc: ExportDoc) -> str:
+def deal_title(doc: ExportDoc, max_len: int = 250) -> str:
     parts = [clean(doc.title) or "Документ"]
     if doc.number:
         parts.append(f"№ {clean(doc.number)}")
     if doc.issued:
         parts.append(f"от {doc.issued:%d.%m.%Y}")
-    return " ".join(parts)[:250]
+    return " ".join(parts)[:max_len]
 
 
 def total_of(doc: ExportDoc) -> float | None:
@@ -89,8 +89,10 @@ def marker(doc: ExportDoc) -> str:
     return f"docflow:{doc.id}"
 
 
-def mapped_values(ctx: DestCtx, doc: ExportDoc) -> list[tuple[str, Any]]:
-    """Поля по маппингу: (код поля CRM, значение). Таблицы и пустые значения пропускаем."""
+def mapped_values(ctx: DestCtx, doc: ExportDoc, *, native: bool = False) -> list[tuple[str, Any]]:
+    """Поля по маппингу: (код поля CRM, значение). Таблицы и пустые значения пропускаем.
+
+    native: типы CRM — дата Unix-временем (полночь UTC), булево как true/false (amoCRM); иначе даты ISO-строкой."""
     flat: dict[str, ColumnSpec] = {f.name: f for f in doc.schema.fields if f.type != "table"}
     out: list[tuple[str, Any]] = []
     for name, code in ctx.mapping.items():
@@ -98,13 +100,13 @@ def mapped_values(ctx: DestCtx, doc: ExportDoc) -> list[tuple[str, Any]]:
         code = str(code).strip()
         if spec is None or not code:
             continue
-        value = field_value(spec, doc.data.get(name))
+        value = field_value(spec, doc.data.get(name), native=native)
         if value is not None:
             out.append((code, value))
     return out
 
 
-def field_value(spec: ColumnSpec, value: Any) -> Any:
+def field_value(spec: ColumnSpec, value: Any, *, native: bool = False) -> Any:
     if value is None or (isinstance(value, (str, list, dict)) and not value):
         return None
     if isinstance(value, str):
@@ -113,12 +115,15 @@ def field_value(spec: ColumnSpec, value: Any) -> Any:
             return None
         if spec.type == "date":
             try:
-                return date.fromisoformat(text).isoformat()
+                d = date.fromisoformat(text)
+                if native:
+                    return int(datetime(d.year, d.month, d.day, tzinfo=UTC).timestamp())
+                return d.isoformat()
             except ValueError:
                 return text
         return text
     if isinstance(value, bool):
-        return "да" if value else "нет"
+        return value if native else ("да" if value else "нет")
     if isinstance(value, (int, float)):
         return int(value) if float(value).is_integer() else float(value)
     return clean(value)

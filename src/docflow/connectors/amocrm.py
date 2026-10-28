@@ -47,7 +47,11 @@ def api_base(raw: Any) -> str:
 
 
 def tag_of(doc: ExportDoc) -> str:
-    return f"[docflow:{doc.id.hex[:12]}]"
+    """Метка в конце названия сделки: простой буквенно-цифровой токен (поиск amoCRM разбивает по знакам препинания).
+
+    Остаточный риск: индекс поиска amoCRM обновляется асинхронно, поэтому повтор через секунды после потерянного
+    ответа /leads/complex может создать дубль; задержка повтора движка (от 10 с) это смягчает."""
+    return f"docflow{doc.id.hex[:12]}"
 
 
 class _Session:
@@ -71,8 +75,10 @@ class _Session:
             raise ConnectorError("аккаунт amoCRM не оплачен")
         if code == 403:
             raise ConnectorError("amoCRM отказала в доступе: у интеграции нет прав на сделки и компании")
-        if code == 429 or code >= 500:
+        if code == 429 or code == 408 or code >= 500:
             raise _transient(f"amoCRM временно недоступна (код {code})")
+        if 300 <= code < 400:
+            raise ConnectorError("неверный адрес аккаунта amoCRM (перенаправление)")
         if code in (204, 304) or (code < 300 and not resp.content):
             return None
         if code >= 400:
@@ -194,15 +200,18 @@ class AmoCrm(BaseConnector):
         responsible = int_setting(ctx.config, "responsible_user_id", "Ответственный (ID)")
         inn_field = int_setting(ctx.config, "inn_field_id", "Поле ИНН у компании (ID)")
         side = counterparty_side(ctx.config)
-        custom = [{"field_id": _field_id(code), "values": [{"value": v}]} for code, v in mapped_values(ctx, doc)]
+        custom = [
+            {"field_id": _field_id(code), "values": [{"value": v}]} for code, v in mapped_values(ctx, doc, native=True)
+        ]
 
         tag = tag_of(doc)
         for lead in await s.embedded("/leads", "leads", query=tag, limit=50):
-            if tag in clean(lead.get("name")):
+            # endswith: текст OCR внутри названия не подделает метку
+            if clean(lead.get("name")).endswith(tag):
                 await _ensure_note(s, int(lead["id"]), doc)
                 return str(lead["id"])
 
-        lead: dict[str, Any] = {"name": f"{deal_title(doc)} {tag}"}
+        lead: dict[str, Any] = {"name": f"{deal_title(doc, 255 - len(tag) - 1)} {tag}"}
         if (total := total_of(doc)) is not None:
             lead["price"] = int(total + 0.5)  # amoCRM хранит бюджет целым числом
         for key, value in (("pipeline_id", pipeline), ("status_id", status), ("responsible_user_id", responsible)):

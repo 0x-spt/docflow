@@ -67,6 +67,7 @@ class Bitrix:
         self.deals: dict[str, dict] = dict(deals or {})
         self.comments: list[dict] = []
         self.calls: list[tuple[str, dict]] = []
+        self.raw_filters: list[dict] = []
         self.next_id = 100
         self.fail: dict[str, httpx.Response] = {}
         router.post(url__startswith=HOOK).mock(side_effect=self.handle)
@@ -81,7 +82,8 @@ class Bitrix:
         self.calls.append((method, body))
         if method in self.fail:
             return self.fail[method]
-        flt = body.get("filter", {})
+        flt = {k.lstrip("="): v for k, v in body.get("filter", {}).items()}
+        self.raw_filters.append(body.get("filter", {}))
         result: object
         if method == "profile":
             result = {"NAME": "Иван", "LAST_NAME": "Петров"}
@@ -92,7 +94,12 @@ class Bitrix:
                 if d.get("ORIGINATOR_ID") == flt.get("ORIGINATOR_ID") and d.get("ORIGIN_ID") == flt.get("ORIGIN_ID")
             ]
         elif method == "crm.requisite.list":
-            result = [{"ENTITY_ID": r["ENTITY_ID"]} for r in self.requisites if r["RQ_INN"] == flt.get("RQ_INN")]
+            result = [
+                {"ENTITY_ID": r["ENTITY_ID"], "RQ_INN": r["RQ_INN"]}
+                for r in self.requisites
+                if ("RQ_INN" not in flt or r["RQ_INN"] == flt["RQ_INN"])
+                and ("ENTITY_ID" not in flt or str(r["ENTITY_ID"]) == str(flt["ENTITY_ID"]))
+            ]
         elif method == "crm.company.list":
             result = [{"ID": i} for i, t in self.companies.items() if t == flt.get("TITLE")]
         elif method == "crm.company.add":
@@ -182,6 +189,35 @@ async def test_company_found_by_name_when_no_inn(http):
     assert "crm.requisite.list" not in b.methods()
     assert "crm.company.add" not in b.methods()
     assert str(b.bodies("crm.deal.add")[0]["fields"]["COMPANY_ID"]) == "56"
+
+
+async def test_company_found_by_name_gets_missing_requisite(http):
+    with respx.mock() as router:
+        b = Bitrix(router, companies={"56": "ООО Ромашка"})
+        await REGISTRY["bitrix24"].export(make_ctx(http), make_doc())
+        assert [r["RQ_INN"] for r in b.requisites] == ["7707083893"]
+        b.calls.clear()
+        await REGISTRY["bitrix24"].export(make_ctx(http, assigned_by_id=1), make_doc(number="43"))
+    assert len(b.requisites) == 1  # реквизит уже есть — второй раз не добавляем
+
+
+async def test_explicit_equality_filters(http):
+    with respx.mock() as router:
+        b = Bitrix(router)
+        await REGISTRY["bitrix24"].export(make_ctx(http), make_doc())
+    keys = {k for f in b.raw_filters for k in f}
+    assert {"=TITLE", "=RQ_INN", "=ORIGIN_ID", "=ORIGINATOR_ID"} <= keys
+    assert not keys & {"TITLE", "RQ_INN", "ORIGIN_ID", "ORIGINATOR_ID"}
+
+
+async def test_method_not_found_message(http):
+    with respx.mock() as router:
+        Bitrix(router).fail["crm.deal.list"] = httpx.Response(
+            404, json={"error": "ERROR_METHOD_NOT_FOUND", "error_description": "Method not found!"}
+        )
+        with pytest.raises(ConnectorError) as err:
+            await REGISTRY["bitrix24"].export(make_ctx(http), make_doc())
+    assert not err.value.retryable and err.value.message == "метод не найден — проверьте права вебхука"
 
 
 async def test_company_without_inn_created_without_requisite(http):

@@ -60,6 +60,8 @@ class _Session:
             raise _transient(f"Битрикс24 временно недоступен или ограничил запросы (код {code})")
         if error.lower() in _AUTH_ERRORS or code in (401, 403):
             raise ConnectorError(f"вебхук Битрикс24 не принят: {description or error or f'код {code}'}")
+        if "METHOD_NOT_FOUND" in error.upper():
+            raise ConnectorError("метод не найден — проверьте права вебхука")
         if code == 404:
             raise ConnectorError("вебхук Битрикс24 не принят: адрес не найден, проверьте ссылку вебхука")
         if error or code >= 400 or not isinstance(body, dict) or "result" not in body:
@@ -77,27 +79,42 @@ class _Session:
 async def _company(s: _Session, p: Any) -> str | None:
     """Компания контрагента: по ИНН в реквизитах, затем по названию, иначе создаём (и реквизит с ИНН/КПП)."""
     if p.inn:
-        found = await s.first_id("crm.requisite.list", {"RQ_INN": p.inn, "ENTITY_TYPE_ID": COMPANY_TYPE}, "ENTITY_ID")
+        found = await s.first_id("crm.requisite.list", {"=RQ_INN": p.inn, "ENTITY_TYPE_ID": COMPANY_TYPE}, "ENTITY_ID")
         if found:
             return found
     if not p.name:
         return None  # без названия компанию не заводим: ИНН без имени в CRM бесполезен
-    found = await s.first_id("crm.company.list", {"TITLE": p.name}, "ID")
-    if found:
-        return found
+    company_id: Any = await s.first_id("crm.company.list", {"=TITLE": p.name}, "ID")
+    if company_id:
+        # найдена по названию: реквизит мог не записаться в прошлой попытке (company.add прошёл, requisite.add нет)
+        if p.inn and not await _has_requisite(s, company_id, p.inn):
+            await _add_requisite(s, company_id, p)
+        return str(company_id)
     company_id = await s.call("crm.company.add", {"fields": {"TITLE": p.name}})
     if p.inn:
-        fields: dict[str, Any] = {
-            "ENTITY_TYPE_ID": COMPANY_TYPE,
-            "ENTITY_ID": company_id,
-            "PRESET_ID": PRESET_IP if len(p.inn) == 12 else PRESET_ORG,
-            "NAME": p.name,
-            "RQ_INN": p.inn,
-        }
-        if p.kpp and len(p.inn) == 10:
-            fields["RQ_KPP"] = p.kpp
-        await s.call("crm.requisite.add", {"fields": fields})
+        await _add_requisite(s, company_id, p)
     return str(company_id)
+
+
+async def _has_requisite(s: _Session, company_id: Any, inn: str) -> bool:
+    rows = await s.call(
+        "crm.requisite.list",
+        {"filter": {"ENTITY_ID": int(company_id), "ENTITY_TYPE_ID": COMPANY_TYPE}, "select": ["ID", "RQ_INN"]},
+    )
+    return isinstance(rows, list) and any(isinstance(r, dict) and str(r.get("RQ_INN") or "") == inn for r in rows)
+
+
+async def _add_requisite(s: _Session, company_id: Any, p: Any) -> None:
+    fields: dict[str, Any] = {
+        "ENTITY_TYPE_ID": COMPANY_TYPE,
+        "ENTITY_ID": int(company_id),
+        "PRESET_ID": PRESET_IP if len(p.inn) == 12 else PRESET_ORG,
+        "NAME": p.name,
+        "RQ_INN": p.inn,
+    }
+    if p.kpp and len(p.inn) == 10:
+        fields["RQ_KPP"] = p.kpp
+    await s.call("crm.requisite.add", {"fields": fields})
 
 
 def _comment(doc: ExportDoc) -> str:
@@ -167,7 +184,7 @@ class Bitrix24(BaseConnector):
                     f"поле Битрикс24 «{code}» не подходит: сопоставлять можно только пользовательские (UF_CRM_…)"
                 )
 
-        existing = await s.first_id("crm.deal.list", {"ORIGINATOR_ID": ORIGINATOR, "ORIGIN_ID": str(doc.id)}, "ID")
+        existing = await s.first_id("crm.deal.list", {"=ORIGINATOR_ID": ORIGINATOR, "=ORIGIN_ID": str(doc.id)}, "ID")
         if existing:
             await _ensure_comment(s, existing, doc)
             return existing

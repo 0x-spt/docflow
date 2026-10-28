@@ -13,7 +13,7 @@ from docflow.schemas.library import builtin_schemas
 
 API = "https://company.amocrm.ru/api/v4"
 DOC_ID = "11111111-1111-1111-1111-111111111111"
-TAG = "[docflow:111111111111]"
+TAG = "docflow111111111111"
 
 
 @pytest.fixture
@@ -254,9 +254,56 @@ async def test_repeat_after_failed_note_adds_note_only(http):
 
 async def test_lead_with_other_doc_tag_is_not_a_match(http):
     with respx.mock() as router:
-        a = Amo(router, leads={1: {"name": "x [docflow:222222222222]"}})
+        a = Amo(router, leads={1: {"name": "x docflow222222222222"}})
         await REGISTRY["amocrm"].export(make_ctx(http), make_doc())
     assert len(a.leads) == 2
+
+
+async def test_tag_must_be_at_end_of_name(http):
+    with respx.mock() as router:
+        a = Amo(router, leads={1: {"name": f"подделка {TAG} хвост"}})
+        await REGISTRY["amocrm"].export(make_ctx(http), make_doc())
+    assert len(a.leads) == 2
+
+
+async def test_long_title_truncated_keeps_tag(http):
+    with respx.mock() as router:
+        a = Amo(router)
+        doc = make_doc()
+        doc.title = "Я" * 400
+        await REGISTRY["amocrm"].export(make_ctx(http), doc)
+    name = a.posts("/leads/complex")[0][0]["name"]
+    assert len(name) <= 255 and name.endswith(" " + TAG)
+
+
+async def test_native_value_types(http):
+    # даты — Unix-время полуночи UTC
+    with respx.mock() as router:
+        a = Amo(router)
+        await REGISTRY["amocrm"].export(make_ctx(http, mapping={"issued": "556"}), make_doc())
+    cf = a.posts("/leads/complex")[0][0]["custom_fields_values"]
+    assert cf == [{"field_id": 556, "values": [{"value": 1791158400}]}]
+
+
+def test_boolean_native():
+    from docflow.connectors.crm_common import field_value
+    from docflow.schemas.model import ColumnSpec
+
+    spec = ColumnSpec(name="paid", type="boolean")
+    assert field_value(spec, True, native=True) is True
+    assert field_value(spec, False, native=True) is False
+    assert field_value(spec, True) == "да"
+
+
+@pytest.mark.parametrize("code,retryable", [(302, False), (408, True)])
+async def test_redirect_and_timeout_codes(http, code, retryable):
+    with respx.mock() as router:
+        Amo(router).fail[("GET", "/leads")] = httpx.Response(code)
+        with pytest.raises(ConnectorError) as err:
+            await REGISTRY["amocrm"].export(make_ctx(http), make_doc())
+    assert err.value.retryable is retryable
+    if not retryable:
+        assert err.value.message == "неверный адрес аккаунта amoCRM (перенаправление)"
 
 
 async def test_mapped_fields(http):
@@ -266,7 +313,7 @@ async def test_mapped_fields(http):
         await REGISTRY["amocrm"].export(make_ctx(http, mapping=mapping), make_doc(vat=250))
     cf = a.posts("/leads/complex")[0][0]["custom_fields_values"]
     assert {"field_id": 555, "values": [{"value": "42"}]} in cf
-    assert {"field_id": 556, "values": [{"value": "2026-10-05"}]} in cf
+    assert {"field_id": 556, "values": [{"value": 1791158400}]} in cf
     assert {"field_id": 557, "values": [{"value": 250}]} in cf
 
 
