@@ -91,3 +91,16 @@ def test_uncertain_field_matched_exactly_is_still_uncertain():
     data = {"clinic": "дента-люкс", "_uncertain": ["clinic"]}
     assert resolve_dictionaries(schema(CLINIC), data, {"clinics": CLINICS}) == []
     assert data["_uncertain"] == ["clinic"]
+
+
+def test_latin_spelling_matches_via_transliteration():
+    m = match("Denta - luxe", CLINICS)
+    assert m is not None and m.value == "Дента-Люкс" and not m.exact
+    assert match("Ulybka+", CLINICS).value == "Улыбка+"
+    assert match("Stomat-Servis", CLINICS).value == "Стомат-Сервис"
+
+
+def test_transliteration_does_not_merge_different_names():
+    assert match("Drama - Love", CLINICS) is None
+    assert match("Kim D.O.", DOCTORS).value == "Ким Д.О."
+    assert match("Kuznetsova", [DictEntry("Кузнецов"), DictEntry("Кузнецова")]).value == "Кузнецова"

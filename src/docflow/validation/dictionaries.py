@@ -42,12 +42,25 @@ def dict_key(s: str) -> str:
     return re.sub(r"[\W_]+", "", s.lower().replace("ё", "е"))
 
 
+# Латиница и кириллица в один «скелет»: модель пишет «Denta - luxe» вместо «Дента-Люкс». Схлопываем и близкие
+# звуки (ю/у, ы/и, x/кс), чтобы транслитерации разных систем сходились; это только для нечёткого сравнения
+_CYR = dict(zip("абвгдежзийклмнопрстуфхцчшщъыьэюя", [
+    "a", "b", "v", "g", "d", "e", "zh", "z", "i", "i", "k", "l", "m", "n", "o", "p", "r", "s", "t", "u", "f",
+    "h", "ts", "ch", "sh", "sh", "", "i", "", "e", "u", "a",
+], strict=True))  # fmt: skip
+_LAT = {"x": "ks", "y": "i", "j": "i", "w": "v", "q": "k", "c": "k"}
+
+
+def _skeleton(s: str) -> str:
+    return "".join(_CYR.get(ch, _LAT.get(ch, ch)) for ch in dict_key(s))
+
+
 def _scored(raw: str, entries: Sequence[DictEntry]) -> list[tuple[float, str]]:
-    """Лучшая похожесть для каждой записи (по значению и алиасам), по убыванию."""
-    key = dict_key(raw)
+    """Лучшая похожесть скелетов для каждой записи (по значению и алиасам), по убыванию."""
+    key = _skeleton(raw)
     out = []
     for e in entries:
-        best = max(SequenceMatcher(None, key, dict_key(v)).ratio() for v in (e.value, *e.aliases))
+        best = max(SequenceMatcher(None, key, _skeleton(v)).ratio() for v in (e.value, *e.aliases))
         out.append((best, e.value))
     return sorted(out, key=lambda t: -t[0])
 
@@ -64,6 +77,9 @@ def match(raw: str, entries: Sequence[DictEntry], *, fuzzy: bool = True) -> Matc
     scored = _scored(raw, entries)
     best_score, best_value = scored[0]
     second = scored[1][0] if len(scored) > 1 else 0.0
+    # скелет совпал полностью (другая письменность) и только у одной записи — отрыв не нужен
+    if best_score == 1.0 and second < 1.0:
+        return Match(best_value, False, best_score)
     if best_score >= FUZZY_MIN and best_score - second >= FUZZY_MARGIN:
         return Match(best_value, False, best_score)
     return None

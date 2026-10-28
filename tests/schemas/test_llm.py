@@ -31,10 +31,10 @@ def test_json_schema_shape():
     p = js["properties"]
     assert p["total"]["type"] == ["number", "null"]
     assert p["issued"]["type"] == ["string", "null"]
-    assert p["issued"]["format"] == "date"
-    assert "ГГГГ-ММ-ДД" in p["issued"]["description"]
+    # дату модель переписывает как есть, разбирает её normalize: слабые модели портят перевод «24.10» в ISO
+    assert "как написана" in p["issued"]["description"]
     assert p["issued"]["description"].startswith("Дата")
-    assert set(p["issued"]) == {"type", "format", "description"}
+    assert set(p["issued"]) == {"type", "description"}
     assert p["kind"]["enum"] == ["a", "b", None]
     assert p["items"]["type"] == "array"
     item = p["items"]["items"]

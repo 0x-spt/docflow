@@ -151,3 +151,61 @@ def test_plain_dot_decimal_ok():
     assert _one("total", "12.50") == (12.5, [])
     assert _one("total", "1.234,50") == (1234.5, [])
     assert _one("total", "1,234.50") == (1234.5, [])
+
+
+def _dates_schema() -> DocSchema:
+    return DocSchema.model_validate(
+        {
+            "slug": "t_doc",
+            "title": "Т",
+            "description": "д",
+            "fields": [
+                {"name": "issued", "type": "date"},
+                {"name": "fitting", "type": "date"},
+                {"name": "delivery", "type": "date"},
+            ],
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("22 окт. 26", "2026-10-22"),
+        ("22 октября 2026 г.", "2026-10-22"),
+        ("5 марта 2026", "2026-03-05"),
+        ("1 мая 2026г.", "2026-05-01"),
+        ("23/10/2026", "2026-10-23"),
+        ("23-10-2026", "2026-10-23"),
+        (" 23.10.2026. ", "2026-10-23"),
+    ],
+)
+def test_date_written_forms(raw, expected):
+    assert _one("day", raw) == (expected, [])
+
+
+def test_yearless_dates_take_year_from_document_date():
+    # «24.10» на наряде от 20.10.2026 — это 2026 год, а не «2410-10-24»
+    data, issues = normalize(_dates_schema(), {"issued": "20.10.2026", "fitting": "24.10", "delivery": "24 окт"})
+    assert issues == []
+    assert (data["issued"], data["fitting"], data["delivery"]) == ("2026-10-20", "2026-10-24", "2026-10-24")
+
+
+def test_yearless_date_rolls_over_new_year():
+    data, _ = normalize(_dates_schema(), {"issued": "28.12.2026", "fitting": "03.01", "delivery": None})
+    assert data["fitting"] == "2027-01-03"
+
+
+def test_yearless_date_without_anchor_uses_today(monkeypatch):
+    import sys
+    from datetime import date
+
+    monkeypatch.setattr(sys.modules["docflow.extraction.normalize"], "_today", lambda: date(2026, 10, 28))
+    data, _ = normalize(_dates_schema(), {"issued": None, "fitting": "03.11", "delivery": "02.01"})
+    assert (data["fitting"], data["delivery"]) == ("2026-11-03", "2027-01-02")
+
+
+@pytest.mark.parametrize("raw", ["31.02", "24.13", "45 окт", "окт 2026", "2410"])
+def test_yearless_bad(raw):
+    data, issues = normalize(_dates_schema(), {"issued": "20.10.2026", "fitting": raw})
+    assert data["fitting"] is None and issues[0].code == "bad_value"

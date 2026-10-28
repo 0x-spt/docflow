@@ -5,7 +5,11 @@ from docflow.schemas.model import ColumnSpec, DocSchema
 
 UNCERTAIN = "_uncertain"
 
-_DATE_HINT = "Формат ГГГГ-ММ-ДД."
+# Дату переписываем символ в символ, разбор и год — в normalize: слабые модели превращают «24.10» в «2410-10-24»
+_DATE_HINT = (
+    "Дату перепиши как написана на документе, не меняя формат и не дописывая год: «24.10», «22 окт. 26», "
+    "«23.10.2026»."
+)
 _UNCERTAIN_DESC = (
     "Имена полей этой схемы, которые на документе есть, но прочитать их уверенно нельзя "
     "(размыто, перекрыто, неразборчиво). Не угадывай — назови поле здесь и верни для него null. "
@@ -18,7 +22,7 @@ def _scalar(spec: ColumnSpec) -> dict[str, Any]:
     if spec.type == "enum":
         node: dict[str, Any] = {"type": ["string", "null"], "enum": [*(spec.values or []), None]}
     elif spec.type == "date":
-        node = {"type": ["string", "null"], "format": "date"}
+        node = {"type": ["string", "null"]}
         desc = f"{desc} {_DATE_HINT}".strip()
     else:
         node = {"type": [spec.type, "null"]}
