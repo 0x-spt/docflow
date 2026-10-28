@@ -1,0 +1,63 @@
+"use server";
+
+import { ApiError, apiFetch } from "@/lib/api";
+import { VOLUMES, type LeadState } from "@/lib/leads";
+import type { LeadRequest, LeadVolume } from "@/lib/types";
+
+const TOO_MANY = "Слишком много заявок с вашего адреса, попробуйте позже.";
+const FAILED = "Не получилось отправить заявку. Попробуйте ещё раз или напишите нам на [EMAIL].";
+
+const TEXT_FIELDS = ["name", "company", "contact", "niche", "volume", "documents", "message"] as const;
+
+function str(form: FormData, key: string): string {
+  const v = form.get(key);
+  return typeof v === "string" ? v.trim() : "";
+}
+
+/** Сообщение валидации FastAPI/pydantic без служебного префикса «Value error, ». */
+function humanize(detail: string): string {
+  const text = detail.replace(/Value error,\s*/g, "").trim();
+  return text ? text.charAt(0).toUpperCase() + text.slice(1) : FAILED;
+}
+
+/** Заявка на аудит: проверка полей, затем POST /v1/leads без сессии. */
+export async function submitLead(_prev: LeadState, form: FormData): Promise<LeadState> {
+  const values: Record<string, string> = {};
+  for (const key of TEXT_FIELDS) values[key] = str(form, key);
+  const consent = form.get("consent") === "on";
+  if (consent) values.consent = "on";
+
+  const errors: Record<string, string> = {};
+  if (!values.name) errors.name = "Как к вам обращаться?";
+  if (values.contact.length < 3) errors.contact = "Оставьте телефон, Telegram или email — иначе мы не сможем ответить.";
+  if (!VOLUMES.some((v) => v.value === values.volume)) errors.volume = "Выберите объём — можно «пока не знаю».";
+  if (!consent) errors.consent = "Без согласия на обработку персональных данных мы не можем принять заявку.";
+  if (Object.keys(errors).length) return { ok: false, errors, values };
+
+  const body: LeadRequest = {
+    name: values.name,
+    company: values.company || undefined,
+    contact: values.contact,
+    niche: values.niche || undefined,
+    volume: values.volume as LeadVolume,
+    documents: values.documents || undefined,
+    message: values.message || undefined,
+    consent: true,
+    website: str(form, "website") || undefined,
+  };
+
+  try {
+    await apiFetch<{ id: string }>("/v1/leads", {
+      method: "POST",
+      auth: false,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 429) return { ok: false, message: TOO_MANY, values };
+    if (e instanceof ApiError && e.status === 422) return { ok: false, message: humanize(e.detail), values };
+    console.error("заявка на аудит не отправлена", e);
+    return { ok: false, message: FAILED, values };
+  }
+  return { ok: true };
+}
