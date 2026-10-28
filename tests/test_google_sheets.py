@@ -135,7 +135,7 @@ class Sheet:
     def _read(self, req):
         from urllib.parse import unquote
 
-        raw = unquote(req.url.raw_path.decode().split("/values/")[1])
+        raw = unquote(req.url.path.split("/values/")[1])
         sheet = self._sheet_of(req.url.raw_path.decode())
         rows = self.cells[sheet]
         if raw.endswith("A:A"):
@@ -398,3 +398,33 @@ async def test_same_sheet_names_rejected(http):
     with pytest.raises(ConnectorError) as e:
         await google_sheets.GoogleSheets().test(make_ctx(http, documents_sheet="Лист", items_sheet="лист"))
     assert not e.value.retryable
+
+
+async def test_date_format_applied_when_header_already_exists(http):
+    with respx.mock(assert_all_called=False) as router:
+        mock_token(router)
+        sheet = Sheet(router, docs_col=[["Мои заголовки"]], items_col=[["ID"]])
+        await google_sheets.GoogleSheets().export(make_ctx(http), make_doc())
+    assert not sheet.puts  # чужую шапку не трогаем
+    assert {f["range"]["startColumnIndex"] for f in sheet.formats} >= {3, 5}
+
+
+async def test_column_a_lookup_uses_formatted_values(http):
+    with respx.mock(assert_all_called=False) as router:
+        mock_token(router)
+        Sheet(router)
+        await google_sheets.GoogleSheets().export(make_ctx(http), make_doc())
+        urls = [str(c.request.url) for c in router.calls if c.request.method == "GET"]
+        reads = [u for u in urls if "A%3AA" in u]
+    assert reads and all("valueRenderOption=FORMATTED_VALUE" in u for u in reads)
+
+
+async def test_sheet_titles_compared_case_insensitively(http):
+    with respx.mock(assert_all_called=False) as router:
+        mock_token(router)
+        sheet = Sheet(router, titles=["документы", "позиции"])
+        sheet.cells["документы"] = []
+        await google_sheets.GoogleSheets().export(
+            make_ctx(http, documents_sheet="Документы", items_sheet="Позиции"), make_doc()
+        )
+    assert sheet.created == []

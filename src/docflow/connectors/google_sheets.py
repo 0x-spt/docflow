@@ -167,7 +167,9 @@ class _Session:
 
     async def ensure_sheets(self, *wanted: str) -> dict[str, int]:
         _, existing = await self.titles()
-        missing = [w for w in dict.fromkeys(wanted) if w not in existing]
+        # Google сравнивает названия листов без учёта регистра: «документы» и «Документы» — один лист
+        folded = {t.casefold() for t in existing}
+        missing = [w for w in dict.fromkeys(wanted) if w.casefold() not in folded]
         if missing:
             await self.call(
                 "POST",
@@ -175,16 +177,18 @@ class _Session:
                 json={"requests": [{"addSheet": {"properties": {"title": t}}} for t in missing]},
             )
             _, existing = await self.titles()
-        return existing
+        by_fold = {t.casefold(): i for t, i in existing.items()}
+        return {w: by_fold[w.casefold()] for w in wanted if w.casefold() in by_fold}
 
     async def column_a(self, sheet: str) -> list[str]:
-        data = await self.call("GET", f"{self.base}/values/{range_path(sheet, 'A:A')}")
+        data = await self.call(
+            "GET",
+            f"{self.base}/values/{range_path(sheet, 'A:A')}",
+            params={"valueRenderOption": "FORMATTED_VALUE"},
+        )
         return [(row[0] if row else "") for row in data.get("values", [])]
 
-    async def ensure_header(
-        self, sheet: str, sheet_id: int, column: list[str], header: list[str], date_columns: list[int]
-    ) -> None:
-        """Шапка в пустой лист + формат ДД.ММ.ГГГГ колонкам с датами (даты уходят серийными числами)."""
+    async def ensure_header(self, sheet: str, column: list[str], header: list[str]) -> None:
         if column and column[0] != "":
             return  # шапка есть (наша или клиента) — не трогаем
         await self.call(
@@ -193,6 +197,10 @@ class _Session:
             params={"valueInputOption": "RAW"},
             json={"values": [header]},
         )
+
+    async def format_dates(self, sheet_id: int, date_columns: list[int]) -> None:
+        """Формат ДД.ММ.ГГГГ колонкам с датами (даты уходят серийными числами). Идемпотентно: на каждой записи,
+        чтобы формат был и при шапке клиента, и после сбоя между шапкой и форматом."""
         if date_columns:
             fmt = {"numberFormat": {"type": "DATE", "pattern": DATE_FORMAT}}
             requests = [
@@ -269,25 +277,15 @@ class GoogleSheets(BaseConnector):
         if doc_id in column:
             row = column.index(doc_id) + 1
         else:
-            await s.ensure_header(
-                s.docs_sheet,
-                ids[s.docs_sheet],
-                column,
-                docs_header(doc.schema, ctx.mapping),
-                doc_date_columns(doc.schema, ctx.mapping),
-            )
+            await s.ensure_header(s.docs_sheet, column, docs_header(doc.schema, ctx.mapping))
+            await s.format_dates(ids[s.docs_sheet], doc_date_columns(doc.schema, ctx.mapping))
             row = await s.append(s.docs_sheet, [doc_row(doc, ctx.mapping, target="sheets")])
 
         if items:
             items_col = await s.column_a(s.items_sheet)
             if doc_id not in items_col:  # повтор после сбоя дописывает только недостающее
-                await s.ensure_header(
-                    s.items_sheet,
-                    ids[s.items_sheet],
-                    items_col,
-                    items_header(doc.schema),
-                    item_date_columns(doc.schema),
-                )
+                await s.ensure_header(s.items_sheet, items_col, items_header(doc.schema))
+                await s.format_dates(ids[s.items_sheet], item_date_columns(doc.schema))
                 await s.append(s.items_sheet, items)
         return f"{s.docs_sheet}!A{row}"
 
