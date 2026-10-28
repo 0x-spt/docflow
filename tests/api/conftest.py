@@ -86,7 +86,10 @@ class FakeConnector(connectors_base.BaseConnector):
         connectors_base.FieldDef("endpoint", "Адрес", required=True, type="url"),
         connectors_base.FieldDef("note", "Заметка"),
     ]
-    secret_fields = [connectors_base.FieldDef("token", "Токен", required=True)]
+    secret_fields = [
+        connectors_base.FieldDef("token", "Токен", required=True),
+        connectors_base.FieldDef("hook", "Вебхук", type="url"),
+    ]
     target_fields = [connectors_base.FieldDef("amount", "Сумма")]
 
     def __init__(self):

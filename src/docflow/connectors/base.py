@@ -66,9 +66,9 @@ class ExportDoc:
 @dataclass
 class DestCtx:
     config: dict[str, Any]
-    secrets: dict[str, Any]
+    secrets: dict[str, Any] = field(repr=False)
     mapping: dict[str, str]
-    http: httpx.AsyncClient
+    http: httpx.AsyncClient = field(repr=False)
 
 
 class Connector(Protocol):

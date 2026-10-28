@@ -6,6 +6,7 @@
 
 import asyncio
 import dataclasses
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 import httpx
@@ -15,7 +16,7 @@ from sqlalchemy import select
 
 from docflow.api.deps import Principal, SessionDep, SettingsDep, TenantDep, parse_id, require_owner_or_key
 from docflow.connectors.base import REGISTRY, Connector, ConnectorError, DestCtx, FieldDef
-from docflow.db.models import Destination
+from docflow.db.models import Destination, RoutingRules
 from docflow.secrets import SecretsKeyMissing, decrypt_secrets, encrypt_secrets
 from docflow.webhooks import check_webhook_url
 
@@ -84,11 +85,10 @@ def _check_required(given: dict[str, Any], fields: list[FieldDef], what: str) ->
             raise _unprocessable(f"{what}: заполните «{f.label}»")
 
 
-async def _check_config(config: dict[str, Any], connector: Connector, *, allow_private: bool) -> None:
-    _check_names(config, connector.config_fields, "настройки")
-    _check_required(config, connector.config_fields, "настройки")
-    for f in connector.config_fields:
-        value = config.get(f.name)
+async def _check_urls(values: dict[str, Any], fields: list[FieldDef], *, allow_private: bool) -> None:
+    """SSRF-проверка полей типа url (и в настройках, и в секретах: адрес вебхука Битрикс24 — секрет)."""
+    for f in fields:
+        value = values.get(f.name)
         if f.type != "url" or value in (None, ""):
             continue
         try:
@@ -98,6 +98,18 @@ async def _check_config(config: dict[str, Any], connector: Connector, *, allow_p
             await asyncio.to_thread(check_webhook_url, value, allow_private=allow_private)
         except ValueError as exc:
             raise _unprocessable(f"«{f.label}»: недопустимый адрес: {exc}") from None
+
+
+async def _check_config(config: dict[str, Any], connector: Connector, *, allow_private: bool) -> None:
+    _check_names(config, connector.config_fields, "настройки")
+    _check_required(config, connector.config_fields, "настройки")
+    await _check_urls(config, connector.config_fields, allow_private=allow_private)
+
+
+async def _check_secrets(secrets: dict[str, Any], connector: Connector, *, allow_private: bool) -> None:
+    _check_names(secrets, connector.secret_fields, "секреты")
+    _check_required(secrets, connector.secret_fields, "секреты")
+    await _check_urls(secrets, connector.secret_fields, allow_private=allow_private)
 
 
 def _encrypt(secrets: dict[str, str], key: str) -> str:
@@ -156,8 +168,7 @@ async def create_destination(
 ) -> dict[str, Any]:
     connector = _connector(body.kind)
     await _check_config(body.config, connector, allow_private=settings.webhook_allow_private)
-    _check_names(body.secrets, connector.secret_fields, "секреты")
-    _check_required(body.secrets, connector.secret_fields, "секреты")
+    await _check_secrets(body.secrets, connector, allow_private=settings.webhook_allow_private)
     dest = Destination(
         tenant_id=manager.tenant_id,
         kind=body.kind,
@@ -207,8 +218,21 @@ async def patch_destination(
         dest.config = body.config
     if body.secrets:
         _check_names(body.secrets, connector.secret_fields, "секреты")
-        merged = {**_decrypt(dest, settings.secrets_key), **body.secrets}
-        _check_required(merged, connector.secret_fields, "секреты")
+        try:
+            stored = _decrypt(dest, settings.secrets_key)
+        except HTTPException:
+            # ключ шифрования сменился/потерян: сохранённое не прочитать. Если переданные секреты закрывают
+            # все обязательные поля, перешифровываем их текущим ключом — это путь восстановления
+            try:
+                _check_required(body.secrets, connector.secret_fields, "секреты")
+            except HTTPException:
+                raise _unprocessable(
+                    "сохранённые секреты не расшифровываются (ключ шифрования изменился): "
+                    "введите все обязательные секреты заново"
+                ) from None
+            stored = {}
+        merged = {**stored, **body.secrets}
+        await _check_secrets(merged, connector, allow_private=settings.webhook_allow_private)
         dest.secrets_enc = _encrypt(merged, settings.secrets_key)
     if body.mapping is not None:
         dest.mapping = body.mapping
@@ -226,6 +250,21 @@ async def patch_destination(
 )
 async def delete_destination(destination_id: str, manager: ManagerDep, session: SessionDep) -> Response:
     dest = await _owned(session, manager.tenant_id, destination_id)
+    # правила хранят id получателя внутри JSON: убираем его, чтобы они не ссылались на удалённого
+    row = await session.get(RoutingRules, manager.tenant_id)
+    if row is not None:
+        gone = str(dest.id)
+        pruned = [
+            {
+                **r,
+                "export_to": [i for i in r.get("export_to", []) if i != gone],
+                "notify": [i for i in r.get("notify", []) if i != gone],
+            }
+            for r in row.rules
+        ]
+        if pruned != row.rules:
+            row.rules = pruned
+            row.updated_at = datetime.now(UTC)
     await session.delete(dest)
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -249,6 +288,7 @@ async def test_destination(
         return {"ok": False, "message": f"тип получателя «{dest.kind}» больше не поддерживается"}
     try:
         await _check_config(dest.config or {}, connector, allow_private=settings.webhook_allow_private)
+        await _check_urls(secrets, connector.secret_fields, allow_private=settings.webhook_allow_private)
     except HTTPException as exc:
         return {"ok": False, "message": str(exc.detail)}
     try:

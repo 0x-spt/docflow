@@ -199,3 +199,57 @@ async def test_delete_keeps_export_history(api, auth, fake_connector):
     async with api.sessionmaker() as s:
         kept = await s.get(Export, exp_id)
     assert kept is not None and kept.destination_id is None
+
+
+async def test_secret_url_private_rejected_everywhere(api, auth, fake_connector):
+    bad = "http://127.0.0.1/rest/1/KEY/"
+    r = await create(api, auth, secrets={"token": "t", "hook": bad})
+    assert r.status_code == 422 and "KEY" not in r.text
+    d = (await create(api, auth, secrets={"token": "t", "hook": URL})).json()
+    r = await api.client.patch(f"/v1/destinations/{d['id']}", headers=auth, json={"secrets": {"hook": bad}})
+    assert r.status_code == 422 and "KEY" not in r.text
+    # адрес в секрете мог попасть в БД до проверки или смена DNS: /test проверяет заново
+    api.settings.webhook_allow_private = True
+    p = (await create(api, auth, secrets={"token": "t", "hook": bad})).json()
+    api.settings.webhook_allow_private = False
+    r = await api.client.post(f"/v1/destinations/{p['id']}/test", headers=auth)
+    assert r.status_code == 200 and r.json()["ok"] is False
+    assert "KEY" not in r.text and fake_connector.calls == []
+
+
+async def test_destctx_repr_hides_secrets():
+    from docflow.connectors.base import DestCtx
+
+    ctx = DestCtx(config={"a": 1}, secrets={"token": "TOPSECRET"}, mapping={}, http=None)
+    assert "TOPSECRET" not in repr(ctx) and "TOPSECRET" not in str(ctx)
+
+
+async def test_patch_recovers_after_key_change(api, auth, fake_connector):
+    from cryptography.fernet import Fernet
+
+    d = (await create(api, auth)).json()
+    api.settings.secrets_key = Fernet.generate_key().decode()
+    url = f"/v1/destinations/{d['id']}"
+    # частичный набор секретов при нечитаемых старых: отказ
+    r = await api.client.patch(url, headers=auth, json={"secrets": {"hook": URL}})
+    assert r.status_code == 422
+    # полный набор обязательных: перешифровываем текущим ключом
+    r = await api.client.patch(url, headers=auth, json={"secrets": {"token": "FRESH"}})
+    assert r.status_code == 200, r.text
+    async with api.sessionmaker() as s:
+        row = await s.get(Destination, uuid.UUID(d["id"]))
+    assert decrypt_secrets(row.secrets_enc, api.settings.secrets_key) == {"token": "FRESH"}
+
+
+async def test_delete_prunes_routing_rules(api, auth, fake_connector):
+    a = (await create(api, auth)).json()["id"]
+    b = (await create(api, auth)).json()["id"]
+    rules = [
+        {"name": "r1", "export_to": [a, b], "notify": [a]},
+        {"name": "r2", "export_to": [b], "notify": []},
+    ]
+    assert (await api.client.put("/v1/routing-rules", headers=auth, json={"rules": rules})).status_code == 200
+    assert (await api.client.delete(f"/v1/destinations/{a}", headers=auth)).status_code == 204
+    got = (await api.client.get("/v1/routing-rules", headers=auth)).json()["rules"]
+    assert got[0]["export_to"] == [b] and got[0]["notify"] == []
+    assert got[1]["export_to"] == [b]
