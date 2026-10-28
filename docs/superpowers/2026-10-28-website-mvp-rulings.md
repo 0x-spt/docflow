@@ -1,0 +1,66 @@
+# Решения и отложенные замечания: сайт MVP (28.10.2026)
+
+## Решения (Ruling)
+- Ruling: T10 creates its needs_review document by adding a NEW key to tests/e2e/fake_responses.json for a test-only tenant schema slug (rule violated on purpose), never changing existing keys — the backend e2e suite depends on existing keys — cost if wrong: one more fixture edit.
+- Ruling: no unit tests for Next.js pages (plan relies on tsc/lint/build + Playwright T10) — spec testing section names exactly these — cost if wrong: UI regressions caught later, only by e2e.
+- Ruling: approve after review emits NEW webhook event document.reviewed (added to allowed events) delivered to every endpoint subscribed to document.completed or document.reviewed; reject emits document.failed as before — spec anti-goal 'оператор подтвердил, а вебхук не ушёл' and dedupe key (endpoint, document, event) blocks re-sending document.completed — cost if wrong: clients see a new event name they must handle (documented in README)
+- Ruling: review data = full object (documented in endpoint), cabinet always sends full data; merge-over-stored not implemented — cost if wrong: API clients sending partial data lose fields
+- Ruling: stale/invalid session — requireMe redirects to a GET route handler /auth/expired that deletes df_session and redirects to /login (Server Components cannot set cookies); /login never auto-redirects to /app on cookie presence — Review Focus 1 wants the cookie erased — cost if wrong: one extra redirect hop. Carry into Task 7.
+- Ruling: privacy page extra placeholders [СРОК ХРАНЕНИЯ], [ПЕРЕЧЕНЬ ОБРАБОТЧИКОВ], [ДАТА РЕДАКЦИИ] accepted — legal content must come from operator; Telegram as processor noted — cost if wrong: none (placeholders)
+- Ruling: elevate to required fixes the honesty minors (Measured mode/caveat, 'никто не заметил', 'любого документа', invented date in hero mock), honeypot rename (silent lead loss via autofill), raw English 422 — spec anti-goals on invented claims and lost leads — cost if wrong: one extra small fix round
+- Ruling: from Task 8 on every /app page, server action and route handler calls the API through a session helper that maps ApiError 401 → redirect('/auth/expired') (route handlers: 303 to /auth/expired) — layout requireMe does not rerun on soft navigation (Task 7 review M1) — cost if wrong: 500 on mid-visit expiry
+- Ruling: cabinet review form requires JS (no-JS fallback not built) — spec demands no-JS only for the public audit form — cost if wrong: operators with JS off can't review
+- Ruling: webhooks POST/DELETE restricted to owner sessions or API keys (operators read-only) — README reserves webhooks for owners; exfiltration risk — cost if wrong: operators must ask owner to change webhooks
+- Ruling: compose publishes web/api on 127.0.0.1 only and INTERNAL_TOKEN has no default — production exposes only a reverse proxy — cost if wrong: LAN access to dev stack needs compose override
+- Final fix wave: re-review all 12 addressed; residual design note: empty INTERNAL_TOKEN makes limits site-wide (documented, fail-closed) — Ruling: accepted for MVP, add pre-launch checklist item — cost if wrong: lead/login limits shared until token set
+
+## Отложенные замечания
+- Task 1: minor (deferred): in-process login limiter splits across uvicorn workers — single API worker in compose
+- Task 1: minor (deferred): ratelimit keys never evicted (memory growth)
+- Task 1: minor (deferred): generate_session_token computes sha256 itself instead of hash_key
+- Task 1: minor (deferred): no tests for success-resets-email-counter and require_owner
+- Task 1: minor (deferred): 429 without Retry-After
+- Task 1: minor (deferred): /v1/me no None check on tenant (unreachable)
+- Task 1: minor (deferred): per-email lockout lets anyone lock a known email for 15 min (plan consequence)
+- Task 1: minor (deferred): IP limiter counts successful logins (20/15min per IP; NAT offices) and keeps email slot when IP rejects
+- Task 2: minor (deferred): /v1/leads body not size-capped (RequestSizeLimit covers only /v1/documents)
+- Task 2: minor (deferred): Telegram text may exceed 4096 chars → 400, notified=False
+- Task 2: minor (deferred): embedded newlines in lead fields skew CLI table
+- Task 2: minor (deferred): whitespace-only honeypot (autofill) drops a real lead silently
+- Task 2: minor (deferred): consent not recorded (no consent_at)
+- Task 2: minor (deferred): no tests for leads --limit<1 and X-Client-IP path
+- Task 3: minor (deferred): created_at-only cursor can skip ties across page boundary
+- Task 4: minor (deferred): race path (rowcount!=1) untested; only sequential 409 tested
+- Task 4: minor (deferred): suggestions aggregate on (value, code, canonical) → possible duplicate rows
+- Task 4: minor (deferred): suggestions 500 on non-dict issue element
+- Task 4: minor (deferred): docflow.review imports Principal from api layer
+- Task 4: minor (deferred): no cap on API keys per tenant
+- Task 4: minor (deferred): note on approve stored only in review.note — UI must show it
+- Task 5: minor (deferred): x-forwarded-for first entry spoofable unless proxy overwrites — README note
+- Task 5: minor (deferred): Field id from name only (duplicate ids with two forms)
+- Task 5: minor (deferred): DocStatus defined twice (StatusBadge + types.ts)
+- Task 6: minor (deferred): test leads left in dev DB (3)
+- Task 7: minor (deferred): two 'Тест' tenants in dev DB; clearSession unused
+- Task 7: minor (deferred): GET /auth/expired cross-site forced local logout
+- Task 7: minor (deferred): next lost on expiry
+- Task 7: minor (deferred): safeNext allows control chars; clearSession unused; POST /app/logout without cookie → 307 POST /login
+- Task 8: minor (deferred): failed documents keep pages=0/pdf_url=null though preview+PDF exist (backend should record pages before extraction)
+- Task 8: minor (deferred): boolean checkbox null→false; cabinet review form needs JS
+- Task 8: minor (deferred): document id not validated as UUID in actions/route handlers/page (brief asked)
+- Task 8: minor (deferred): nullable boolean null→false on approve
+- Task 8: minor (deferred): table-cell checkboxes 20px targets
+- Task 8: minor (deferred): PDF link on failed doc downloads 409 text
+- Task 8: minor (deferred): issue errors use role=alert on load
+- Task 9: minor (deferred): upload FormData buffered in memory by Next server action (200mb limit)
+- Task 9: minor (deferred): dictionaries 422 detail has English 'Value error, ' prefix from pydantic (stripped in UI only)
+- Task 9: minor (deferred): 200mb bodySizeLimit applies to all actions incl. login — cap at reverse proxy, document
+- Task 9: minor (deferred): DictionaryEditor focus after row delete; no revalidate after save; applySuggestion discards unsaved edits
+- Task 9: minor (deferred): applySuggestion silently adds as new value if nearest removed; whole-set PUT last-write-wins
+- Task 9: minor (deferred): SecretBox role=status announces secret; copied never resets
+- Task 9: minor (deferred): drop replaces selection, no type filter; >200MB gives framework error page
+- Task 9: minor (deferred): React #418 hydration seen once, unexplained
+- Task 9: minor (deferred): API down → every cabinet page 500 (layout requireMe) — needs a friendly error boundary
+- Task 9: minor (deferred): revokeKey reports 404 as failure (deleteWebhook treats 404 as success)
+- Task 10: minor (deferred): each e2e run leaves tenant/user/lead in dev DB; PLAYWRIGHT_BROWSERS_PATH must be set in shell
+- Task 10: minor (deferred): login IP limiter 20/15min → 4th e2e rerun within 15 min gets 429
+- Task 10: minor (deferred): loose 'Готово' assertion; raw error when stack down; COOKIE_SECURE compose vs README wording
