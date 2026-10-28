@@ -49,3 +49,32 @@ export async function requireMe(): Promise<Me> {
     throw err;
   }
 }
+
+/**
+ * Запрос к API из страниц и server actions кабинета: 401 (сессия истекла/отозвана) → /auth/expired,
+ * остальные ошибки пробрасываются как ApiError.
+ */
+export async function apiFetchAuthed<T>(path: string, init?: Parameters<typeof apiFetch>[1]): Promise<T> {
+  try {
+    return await apiFetch<T>(path, init);
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) await expired();
+    throw err;
+  }
+}
+
+/**
+ * Сессия больше не действует. В server action cookie стираем сразу и ведём на /login?expired=1:
+ * редирект action через /auth/expired клиентский роутер проходит fetch-ем, и в адресной строке
+ * осталось бы /auth/expired. В рендере страницы cookie менять нельзя — тогда через /auth/expired.
+ */
+async function expired(): Promise<never> {
+  let cleared = false;
+  try {
+    await clearSession();
+    cleared = true;
+  } catch {
+    // рендер серверного компонента: cookies() только для чтения
+  }
+  redirect(cleared ? "/login?expired=1" : "/auth/expired");
+}

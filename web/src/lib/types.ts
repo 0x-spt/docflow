@@ -157,3 +157,28 @@ export interface LeadRequest {
   consent: boolean;
   website?: string;
 }
+
+export type ColumnType = "string" | "integer" | "number" | "date" | "boolean" | "enum";
+export type FieldType = ColumnType | "table";
+
+export interface SchemaColumn {
+  name: string;
+  type: ColumnType;
+  description?: string;
+  values?: string[] | null;
+}
+
+export interface SchemaField extends Omit<SchemaColumn, "type"> {
+  type: FieldType;
+  required?: boolean;
+  columns?: SchemaColumn[] | null;
+}
+
+/** GET /v1/schemas/{slug}?version= */
+export interface DocSchema {
+  slug: string;
+  version: number;
+  title: string;
+  description: string;
+  fields: SchemaField[];
+}
