@@ -38,20 +38,14 @@ export async function clearSession(): Promise<void> {
 
 /**
  * Текущий пользователь или редирект на /login.
- * 401 (сессия истекла/отозвана) → cookie стирается и редирект. Другие ошибки API пробрасываются.
+ * 401 (сессия истекла/отозвана) → /auth/expired. Другие ошибки API пробрасываются.
  */
 export async function requireMe(): Promise<Me> {
   try {
     return await apiFetch<Me>("/v1/me");
   } catch (err) {
-    if (err instanceof ApiError && err.status === 401) {
-      try {
-        await clearSession();
-      } catch {
-        // вызвано при рендере страницы: cookie менять нельзя; /login с протухшим cookie всё равно открывается
-      }
-      redirect("/login");
-    }
+    // в рендере cookie не стереть: это делает route handler /auth/expired и ведёт на /login?expired=1
+    if (err instanceof ApiError && err.status === 401) redirect("/auth/expired");
     throw err;
   }
 }
