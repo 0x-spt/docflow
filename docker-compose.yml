@@ -130,6 +130,7 @@ services:
     image: docflow-web
     environment:
       DOCFLOW_API_URL: http://api:8000
+      DOCFLOW_PUBLIC_API_URL: ${DOCFLOW_PUBLIC_API_URL:-http://localhost:8000}
       DOCFLOW_INTERNAL_TOKEN: ${DOCFLOW_INTERNAL_TOKEN:-docflow-internal-dev}
       COOKIE_SECURE: "false"  # dev по http; в проде за https убрать
     ports: ["3000:3000"]
