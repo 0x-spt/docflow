@@ -49,10 +49,15 @@ class Party:
 def party(doc: ExportDoc, side: str) -> Party:
     """Контрагент по умолчанию: supplier/supplier_inn/supplier_kpp (или buyer…). Кривой ИНН/КПП отбрасываем."""
     data = doc.data
-    inn = re.sub(r"\s+", "", clean(data.get(f"{side}_inn")))
-    kpp = re.sub(r"\s+", "", clean(data.get(f"{side}_kpp")))
+    return party_from(data.get(side), data.get(f"{side}_inn"), data.get(f"{side}_kpp"))
+
+
+def party_from(name: Any, inn: Any, kpp: Any) -> Party:
+    """Контрагент из сырых значений документа: текст очищен, кривой ИНН/КПП отброшен."""
+    inn = re.sub(r"\s+", "", clean(inn))
+    kpp = re.sub(r"\s+", "", clean(kpp))
     return Party(
-        name=clean(data.get(side))[:255],
+        name=clean(name)[:255],
         inn=inn if _INN.fullmatch(inn) else "",
         kpp=kpp if _KPP.fullmatch(kpp) else "",
     )
