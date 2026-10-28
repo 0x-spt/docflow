@@ -45,10 +45,15 @@ def check_webhook_url(url: str, *, allow_private: bool = False) -> None:
     host = parts.hostname
     if not host:
         raise ValueError("в URL нет хоста")
+    check_host(host, parts.port or (443 if parts.scheme == "https" else 80), allow_private=allow_private)
+
+
+def check_host(host: str, port: int, *, allow_private: bool = False) -> None:
+    """Та же защита от SSRF для «хост:порт» без схемы (SMTP и т. п.). ValueError при нарушении."""
     if allow_private:
         return
     try:
-        infos = socket.getaddrinfo(host, parts.port or (443 if parts.scheme == "https" else 80))
+        infos = socket.getaddrinfo(host, port)
     except OSError as exc:
         raise UnresolvableHost(f"хост не резолвится: {exc}") from exc
     for info in infos:

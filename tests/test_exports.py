@@ -512,3 +512,14 @@ async def test_bad_scheme_fails_at_once(session, fake_connector, settings, blobs
     (row,) = await exports_of(session, doc.id)
     row, enq = await run(session, row.id, settings, blobs)
     assert row.status == "failed" and "схема" in row.last_error and enq.calls == []
+
+
+async def test_email_host_ssrf_rechecked_at_delivery(session, settings, blobs):
+    """Почта задаёт хост, а не URL: и его перед отправкой проверяем на публичность (без повторов)."""
+    t, doc = await setup(session, status="ok")
+    config = {"host": "127.0.0.1", "from_addr": "df@example.com", "to_addrs": "a@x.ru"}
+    dest = await add_dest(session, t.id, kind="email", config=config, secrets={})
+    await enqueue_exports(session, doc, "notify_new", {dest.id}, ListEnqueuer())
+    (row,) = await exports_of(session, doc.id)
+    row, enq = await run(session, row.id, settings, blobs)
+    assert row.status == "failed" and "не публичный" in row.last_error and enq.calls == []

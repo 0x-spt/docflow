@@ -230,6 +230,9 @@ async def _check_urls(connector: Connector, config: dict, secrets: dict, *, allo
             if not isinstance(value, str):
                 raise ValueError(f"«{f.label}»: адрес должен быть строкой")
             await asyncio.to_thread(check_webhook_url, value, allow_private=allow_private)
+    check_network = getattr(connector, "check_network", None)
+    if check_network is not None:
+        await asyncio.to_thread(check_network, config, allow_private=allow_private)
 
 
 class _Permanent(Exception):

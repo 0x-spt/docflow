@@ -104,6 +104,13 @@ async def _check_config(config: dict[str, Any], connector: Connector, *, allow_p
     _check_names(config, connector.config_fields, "настройки")
     _check_required(config, connector.config_fields, "настройки")
     await _check_urls(config, connector.config_fields, allow_private=allow_private)
+    # коннекторам с хостом вместо URL (почта): своя сетевая проверка
+    check_network = getattr(connector, "check_network", None)
+    if check_network is not None:
+        try:
+            await asyncio.to_thread(check_network, config, allow_private=allow_private)
+        except ValueError as exc:
+            raise _unprocessable(f"недопустимый адрес сервера: {exc}") from None
 
 
 async def _check_secrets(secrets: dict[str, Any], connector: Connector, *, allow_private: bool) -> None:
