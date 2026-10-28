@@ -77,7 +77,7 @@ export async function retryExport(docId: string, exportId: string): Promise<Retr
   } catch (e) {
     unstable_rethrow(e);
     if (e instanceof ApiError && e.status === 409) {
-      revalidatePath(`/app/documents/${docId}`);
+      revalidateExports(docId);
       return { error: "Эту выгрузку уже нельзя повторить: она выполнена или ещё в работе." };
     }
     if (e instanceof ApiError && e.status === 403) return { error: "Повторять выгрузки может владелец аккаунта." };
@@ -85,6 +85,14 @@ export async function retryExport(docId: string, exportId: string): Promise<Retr
     console.error("повтор выгрузки не поставлен", e);
     return { error: "Не удалось повторить: сервис недоступен. Попробуйте ещё раз." };
   }
-  revalidatePath(`/app/documents/${docId}`);
+  revalidateExports(docId);
   return { ok: true };
+}
+
+/** После «Повторить» меняются карточка документа, список ошибок выгрузки и счётчики на очереди и подключениях. */
+function revalidateExports(docId: string) {
+  revalidatePath(`/app/documents/${docId}`);
+  revalidatePath("/app/exports");
+  revalidatePath("/app/integrations");
+  revalidatePath("/app");
 }

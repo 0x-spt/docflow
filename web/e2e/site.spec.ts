@@ -97,6 +97,23 @@ test("anonymous app redirects to login", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Вход" })).toBeVisible();
 });
 
+test("file link from CRM/table: anonymous → login → back to the PDF", async ({ page }) => {
+  // такие ссылки DocFlow пишет в CRM, Таблицы и Excel: открыть их можно только после входа
+  const file = `/app/files/${state.docId}/digital`;
+  await page.goto(file);
+  await expect(page).toHaveURL(/\/login\?next=/);
+  expect(new URL(page.url()).searchParams.get("next")).toBe(file);
+  const pdf = page.waitForResponse(
+    (r) => new URL(r.url()).pathname === file && r.request().isNavigationRequest() && r.status() === 200,
+  );
+  page.on("download", () => {}); // headless может отдать PDF как скачивание — это тоже «открылся»
+  await page.getByLabel("Email").fill(state.email);
+  await page.getByLabel("Пароль").fill(state.password);
+  await page.getByRole("button", { name: "Войти" }).click();
+  const res = await pdf;
+  expect(res.headers()["content-type"]).toContain("application/pdf");
+});
+
 test("login wrong password shows error", async ({ page }) => {
   await login(page, "wrong-password-123");
   await expect(page.getByRole("alert").filter({ hasText: "Неверный email или пароль" })).toBeVisible();
@@ -320,9 +337,29 @@ test("exports block shows failed delivery with retry; excel registry downloads",
     await expect(page.getByRole("alert").filter({ hasText: "Конец периода раньше начала" })).toBeVisible();
     await expect(page).toHaveURL(/\/app$/);
 
-    for (const q of ["schema=../x&from=2026-01-01&to=2026-01-02", `schema=e2e_order&from=2026-02-31&to=${today}`, `schema=e2e_order&from=${today}&to=2020-01-01`]) {
+    for (const q of ["schema=../x&from=2026-01-01&to=2026-01-02", `schema=e2e_order&from=2026-02-31&to=${today}`, `schema=e2e_order&from=${today}&to=2020-01-01`, `schema=e2e_order&from=${today}&to=${today}&tz=../etc`]) {
       expect((await page.request.get(`/app/files/excel?${q}`)).status(), q).toBe(400);
     }
+    const inTz = await page.request.get(`/app/files/excel?schema=e2e_order&from=${today}&to=${today}&status=all&tz=Asia/Novosibirsk`);
+    expect(inTz.status()).toBe(200);
+
+    // ошибки выгрузки видны без захода в документ: на очереди, у подключения и отдельным списком
+    await page.goto("/app");
+    await page.getByRole("link", { name: /Ошибки выгрузки: \d+/ }).click();
+    await expect(page).toHaveURL(/\/app\/exports\?status=failed$/);
+    await expect(page.getByRole("heading", { name: "Ошибки выгрузки", level: 1 })).toBeVisible();
+    const failedRow = page.getByRole("row").filter({ has: page.getByRole("link", { name: `Документ ${docId}` }) });
+    await expect(failedRow.first()).toBeVisible();
+    await expect(failedRow.first().getByRole("button", { name: /Повторить выгрузку/ })).toBeVisible();
+
+    await page.goto("/app/integrations");
+    const destName = (await apiJson<{ name: string }>(`/v1/destinations/${dest}`)).name;
+    const badge = page.getByRole("link", { name: new RegExp(`^\\d+ ошиб\\S* выгрузки: ${destName}$`) });
+    await expect(badge).toBeVisible();
+    await badge.click();
+    await expect(page).toHaveURL(new RegExp(`/app/exports\\?status=failed&destination=${dest}$`));
+    await expect(page.getByText(`Подключение «${destName}».`)).toBeVisible();
+    await expect(failedRow.first()).toBeVisible();
   } finally {
     server.close();
     await apiJson("/v1/routing-rules", { method: "PUT", body: JSON.stringify({ rules: [] }) });

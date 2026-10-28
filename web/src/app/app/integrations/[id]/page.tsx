@@ -86,7 +86,13 @@ export default async function IntegrationPage({
             {(connector?.config_fields ?? []).map((f) => (
               <div key={f.name} className="contents">
                 <dt className="font-mono text-sm text-muted">{f.label}</dt>
-                <dd className="break-words">{String(destination.config[f.name] ?? "—")}</dd>
+                <dd className="break-words">
+                  {(() => {
+                    const v = destination.config[f.name];
+                    if (v === undefined || v === null || v === "") return "—";
+                    return f.option_labels?.[String(v)] ?? String(v);
+                  })()}
+                </dd>
               </div>
             ))}
             <dt className="font-mono text-sm text-muted">Секреты</dt>

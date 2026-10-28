@@ -53,7 +53,7 @@ function ConfigInput({ f, value, error }: { f: FieldDef; value: string; error?: 
         {f.required && known ? null : <option value="">{f.required ? "— выберите —" : "Не выбрано"}</option>}
         {options.map((o) => (
           <option key={o} value={o}>
-            {o}
+            {f.option_labels?.[o] ?? o}
           </option>
         ))}
       </Field>
@@ -295,6 +295,10 @@ export function DestinationForm({
     const v = destination?.config[f.name];
     return v === undefined || v === null ? "" : String(v);
   };
+  const mainFields = connector.config_fields.filter((f) => !f.advanced);
+  const advancedFields = connector.config_fields.filter((f) => f.advanced);
+  // редкие поля свёрнуты, но раскрыты, если в них уже что-то есть или ошибка: спрятанное значение путает
+  const advancedOpen = advancedFields.some((f) => cfg(f) !== "" || Boolean(state.fieldErrors?.[f.name]));
 
   // Таблицы/CRM: только поля выбранной схемы (чужие ключи от просмотренных схем не отправляем); 1С как есть.
   // Таблицы хранят и пустое название колонки (поле включено), остальные - только заполненные.
@@ -335,9 +339,25 @@ export function DestinationForm({
           defaultValue={state.name ?? destination?.name ?? connector.label}
           hint="Для вас: чтобы отличать подключения друг от друга."
         />
-        {connector.config_fields.map((f) => (
+        {mainFields.map((f) => (
           <ConfigInput key={f.name} f={f} value={cfg(f)} error={state.fieldErrors?.[f.name]} />
         ))}
+        {advancedFields.length > 0 ? (
+          <details open={advancedOpen} className="group border-2 border-ink bg-card">
+            <summary className="flex min-h-11 cursor-pointer items-center gap-2 px-4 font-semibold">
+              <span aria-hidden="true" className="font-mono transition-transform group-open:rotate-90">
+                ›
+              </span>
+              Дополнительно
+              <span className="font-mono text-sm font-normal text-muted">обычно не нужно</span>
+            </summary>
+            <div className="flex flex-col gap-4 border-t-2 border-ink p-4">
+              {advancedFields.map((f) => (
+                <ConfigInput key={f.name} f={f} value={cfg(f)} error={state.fieldErrors?.[f.name]} />
+              ))}
+            </div>
+          </details>
+        ) : null}
         {connector.secret_fields.length > 0 ? (
           <fieldset className="flex flex-col gap-4 border-2 border-ink bg-card p-4">
             <legend className="px-2 font-mono text-sm font-medium">Секреты</legend>

@@ -81,3 +81,12 @@ export function fieldLabel(spec: Pick<SchemaColumn, "name" | "description">): st
   const text = head && head.length <= 40 ? head : spec.name.replace(/_/g, " ");
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
+
+/** Русское множественное число: plural(5, ["ошибка", "ошибки", "ошибок"]) → «ошибок». */
+export function plural(n: number, forms: [string, string, string]): string {
+  const m10 = n % 10;
+  const m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return forms[0];
+  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return forms[1];
+  return forms[2];
+}

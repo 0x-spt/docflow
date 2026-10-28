@@ -44,9 +44,7 @@ export default async function NewIntegrationPage({
                 className="flex min-h-24 flex-col justify-between gap-3 border-2 border-ink bg-card p-4 shadow-hard hover:bg-paper active:translate-x-1.5 active:translate-y-1.5 active:shadow-none"
               >
                 <span className="text-2xl font-semibold tracking-tight">{c.label}</span>
-                <span className="font-mono text-sm text-muted">
-                  {c.secret_fields.length > 0 ? "нужен ключ доступа" : "без ключей"}
-                </span>
+                {c.description ? <span className="text-base text-muted">{c.description}</span> : null}
               </Link>
             </li>
           ))}

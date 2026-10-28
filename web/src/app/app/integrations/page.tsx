@@ -1,10 +1,12 @@
 import Link from "next/link";
+import { unstable_rethrow } from "next/navigation";
 
 import { TestConnection } from "@/components/app/TestConnection";
 import { Button } from "@/components/ui";
+import { plural } from "@/lib/format";
 import { isUuid } from "@/lib/ids";
 import { apiFetchAuthed, requireMe } from "@/lib/session";
-import type { ConnectorInfo, Destination } from "@/lib/types";
+import type { ConnectorInfo, Destination, ExportsSummary } from "@/lib/types";
 
 import { deleteDestination, setDestinationActive } from "./actions";
 
@@ -34,11 +36,18 @@ export default async function IntegrationsPage({
   const confirmId = isUuid(confirmRaw) ? confirmRaw : null;
   const me = await requireMe();
   const isOwner = me.user?.role === "owner";
-  const [destinations, catalog] = await Promise.all([
+  const [destinations, catalog, summary] = await Promise.all([
     apiFetchAuthed<Destination[]>("/v1/destinations"),
     apiFetchAuthed<ConnectorInfo[]>("/v1/connectors"),
+    // счётчики ошибок — подсказка, не главное: без них страница всё равно нужна
+    apiFetchAuthed<ExportsSummary>("/v1/exports/summary").catch((e) => {
+      unstable_rethrow(e);
+      console.error("не удалось получить сводку выгрузок", e);
+      return null;
+    }),
   ]);
   const labels = new Map(catalog.map((c) => [c.kind, c.label]));
+  const failedBy = new Map((summary?.items ?? []).map((s) => [s.destination_id, s.failed]));
 
   return (
     <div className="flex flex-col gap-8">
@@ -75,6 +84,7 @@ export default async function IntegrationsPage({
           {destinations.map((d) => {
             const system = labels.get(d.kind) ?? d.kind;
             const confirming = confirmId === d.id;
+            const failed = failedBy.get(d.id) ?? 0;
             return (
               <li key={d.id} className="flex flex-col gap-4 border-2 border-ink bg-card p-4">
                 <div className="flex flex-wrap items-start justify-between gap-2">
@@ -90,6 +100,16 @@ export default async function IntegrationsPage({
                     {d.active ? "Включено" : "Отключено"}
                   </span>
                 </div>
+                {failed > 0 ? (
+                  <Link
+                    href={`/app/exports?status=failed&destination=${d.id}`}
+                    className="inline-flex min-h-11 w-fit items-center gap-2 border-2 border-accent-text bg-paper px-3 font-mono text-sm font-medium text-accent-text hover:bg-card"
+                    aria-label={`${failed} ${plural(failed, ["ошибка", "ошибки", "ошибок"])} выгрузки: ${d.name}`}
+                  >
+                    <span aria-hidden="true" className="inline-block size-3 border-2 border-ink bg-accent-text" />
+                    {failed} {plural(failed, ["ошибка", "ошибки", "ошибок"])}
+                  </Link>
+                ) : null}
                 {isOwner ? (
                   <>
                     <TestConnection id={d.id} />

@@ -12,6 +12,7 @@ const STATUS: Record<ExportStatus, { label: string; square: string }> = {
   done: { label: "Отправлено", square: "bg-ink" },
   pending: { label: "В очереди", square: "bg-card" },
   failed: { label: "Ошибка", square: "bg-accent-text" },
+  skipped: { label: "Пропущено", square: "bg-muted" },
 };
 
 /** «Выгрузки» документа: куда ушёл, с каким результатом; для failed — «Повторить» (владелец). */
@@ -60,7 +61,15 @@ export function ExportsBlock({
                       <span aria-hidden="true" className={`inline-block size-3 border-2 border-ink ${st.square}`} />
                       {st.label}
                     </span>
-                    {e.error ? <p className="mt-1 max-w-[20rem] break-words font-medium text-accent-text">{e.error}</p> : null}
+                    {e.error ? (
+                      <p
+                        className={`mt-1 max-w-[20rem] break-words ${
+                          e.status === "skipped" ? "text-muted" : "font-medium text-accent-text"
+                        }`}
+                      >
+                        {e.error}
+                      </p>
+                    ) : null}
                   </td>
                   <td className="px-3 py-2.5 font-mono break-all">{e.external_id ?? "—"}</td>
                   <td className="whitespace-nowrap px-3 py-2.5 font-mono tabular-nums">{formatDateTime(e.updated_at)}</td>

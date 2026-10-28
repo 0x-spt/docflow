@@ -5,7 +5,7 @@ import { ExcelRegistryForm } from "@/components/app/ExcelRegistryForm";
 import { Button, Stat, StatusBadge } from "@/components/ui";
 import { formatDateTime, summaryValue } from "@/lib/format";
 import { apiFetchAuthed } from "@/lib/session";
-import type { DocStatus, DocumentList, SchemaListItem, Stats } from "@/lib/types";
+import type { DocStatus, DocumentList, ExportsSummary, SchemaListItem, Stats } from "@/lib/types";
 
 export const metadata = { title: "Очередь — DocFlow" };
 
@@ -58,7 +58,7 @@ export default async function QueuePage({
   if (status) listQuery.set("status", status);
   if (before) listQuery.set("before", before);
 
-  const [stats, list, next, schemas] = await Promise.all([
+  const [stats, list, next, schemas, exportsSummary] = await Promise.all([
     apiFetchAuthed<Stats>(`/v1/stats?days=${STATS_DAYS}`),
     apiFetchAuthed<DocumentList>(`/v1/documents?${listQuery}`),
     apiFetchAuthed<DocumentList>("/v1/documents?status=needs_review&limit=1"),
@@ -66,7 +66,13 @@ export default async function QueuePage({
       unstable_rethrow(e);
       return [] as SchemaListItem[];
     }),
+    apiFetchAuthed<ExportsSummary>("/v1/exports/summary").catch((e) => {
+      unstable_rethrow(e);
+      console.error("не удалось получить сводку выгрузок", e);
+      return null;
+    }),
   ]);
+  const failedExports = exportsSummary?.failed ?? 0;
   const today = new Date();
   const monthStart = new Date(Date.UTC(today.getFullYear(), today.getMonth(), 1)).toISOString().slice(0, 10);
   const todayIso = new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate())).toISOString().slice(0, 10);
@@ -90,6 +96,16 @@ export default async function QueuePage({
         ) : null}
       </div>
 
+      {failedExports > 0 ? (
+        <Link
+          href="/app/exports?status=failed"
+          className="inline-flex min-h-11 w-fit items-center gap-2 border-2 border-accent-text bg-paper px-4 font-medium text-accent-text hover:bg-card"
+        >
+          <span aria-hidden="true" className="inline-block size-3 border-2 border-ink bg-accent-text" />
+          Ошибки выгрузки: <span className="font-mono tabular-nums">{failedExports}</span>
+        </Link>
+      ) : null}
+
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <Stat value={processed} label="Обработано" />
         <Stat value={percent(stats.auto_share)} label="Без участия человека" />
@@ -102,7 +118,7 @@ export default async function QueuePage({
           <h2 id="excel-title" className="text-2xl font-semibold tracking-tight">
             Реестр в Excel
           </h2>
-          <p className="mt-1 text-muted">Документы одного типа за период — таблицей для бухгалтерии. Период считается по дате загрузки.</p>
+          <p className="mt-1 text-muted">Документы одного типа за период — таблицей для бухгалтерии. Период считается по дате загрузки в вашем часовом поясе.</p>
           <ExcelRegistryForm schemas={schemas} monthStart={monthStart} today={todayIso} />
         </section>
       ) : null}

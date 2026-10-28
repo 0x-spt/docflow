@@ -22,6 +22,9 @@ export function ExcelRegistryForm({
   async function onSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const query = new URLSearchParams(new FormData(e.currentTarget) as unknown as Record<string, string>);
+    // период — сутки в поясе пользователя, а не сервера (без JS API возьмёт Europe/Moscow)
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (tz) query.set("tz", tz);
     setError(null);
     setBusy(true);
     try {

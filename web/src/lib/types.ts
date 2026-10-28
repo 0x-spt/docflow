@@ -68,7 +68,8 @@ export interface DocumentPayload {
   exports?: ExportItem[];
 }
 
-export type ExportStatus = "pending" | "done" | "failed";
+/** skipped — доставка больше не нужна (уведомление устарело): не ошибка, «Повторить» нет */
+export type ExportStatus = "pending" | "done" | "failed" | "skipped";
 
 /** Выгрузка или уведомление по документу (поле `exports` в документе) */
 export interface ExportItem {
@@ -81,6 +82,20 @@ export interface ExportItem {
   external_id: string | null;
   error: string | null;
   updated_at: string | null;
+}
+
+/** GET /v1/exports: строка журнала (выгрузка + документ, номер попытки, время создания) */
+export interface ExportLogItem extends ExportItem {
+  document_id: string;
+  attempt: number;
+  next_attempt_at: string | null;
+  created_at: string | null;
+}
+
+/** GET /v1/exports/summary: ошибки и очередь по получателям; failed — все ошибки тенанта */
+export interface ExportsSummary {
+  items: { destination_id: string; failed: number; pending: number }[];
+  failed: number;
 }
 
 export type RuleOp =
@@ -245,11 +260,16 @@ export interface FieldDef {
   help: string;
   type: "text" | "url" | "number" | "textarea" | "select";
   options?: string[] | null;
+  /** подписи вариантов select: значение → подпись */
+  option_labels?: Record<string, string> | null;
+  /** редко нужное поле: в форме — под «Дополнительно» */
+  advanced?: boolean;
 }
 
 export interface ConnectorInfo {
   kind: string;
   label: string;
+  description?: string;
   can_export: boolean;
   can_notify: boolean;
   config_fields: FieldDef[];
