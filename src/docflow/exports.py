@@ -159,6 +159,14 @@ async def _fail(session: AsyncSession, export: Export, reason: str) -> None:
     await session.commit()
 
 
+async def _skip(session: AsyncSession, export: Export, reason: str) -> None:
+    """Доставка больше не нужна — не ошибка: в счётчики ошибок не попадает, «Повторить» нет."""
+    export.status = "skipped"
+    export.last_error = reason[:MAX_ERROR]
+    export.next_attempt_at = None
+    await session.commit()
+
+
 def _issued(value: Any) -> date | None:
     if isinstance(value, str):
         try:
@@ -181,7 +189,9 @@ def build_export_doc(document: Document, schema: DocSchema, settings: Settings, 
     data = dict(document.data or {})
     status, created_at, reviewed = document.status, document.created_at, document.reviewed_at is not None
     ready = status in ("ok", "needs_review")
-    api = settings.public_base_url.rstrip("/")
+    # ссылки читают люди (CRM, таблица, Excel): API требует Bearer-токен, а прокси кабинета — вход по сессии;
+    # без сессии кабинет отправит на вход и вернёт обратно к файлу
+    site = settings.public_site_url.rstrip("/")
 
     async def load_scan() -> bytes | None:
         try:
@@ -211,9 +221,9 @@ def build_export_doc(document: Document, schema: DocSchema, settings: Settings, 
         title=schema.title,
         number=_number(data.get("number")),
         issued=_issued(data.get("issued")),
-        cabinet_url=f"{settings.public_site_url.rstrip('/')}/app/documents/{doc_id}",
-        digital_pdf_url=f"{api}/v1/documents/{doc_id}/digital.pdf" if ready else None,
-        scan_pdf_url=f"{api}/v1/documents/{doc_id}/pdf" if ready else None,
+        cabinet_url=f"{site}/app/documents/{doc_id}",
+        digital_pdf_url=f"{site}/app/files/{doc_id}/digital" if ready else None,
+        scan_pdf_url=f"{site}/app/files/{doc_id}/pdf" if ready else None,
         issues=[dict(i) for i in document.issues or []],
         digital_loader=load_digital,
         scan_loader=load_scan,
@@ -323,7 +333,8 @@ async def deliver_export(
     if document is None:
         return await _fail(session, export, DOCUMENT_GONE)
     if reason := _stale(export, document):
-        return await _fail(session, export, reason)
+        # устаревшее уведомление — пропуск; неподтверждённый документ в учётку — ошибка, её видно и можно повторить
+        return await (_skip if reason == STALE_NOTIFICATION else _fail)(session, export, reason)
     connector = REGISTRY.get(dest.kind)
     if connector is None:
         return await _fail(session, export, f"тип получателя «{dest.kind}» больше не поддерживается")

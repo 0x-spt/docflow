@@ -62,11 +62,11 @@ async def test_period_inclusive_status_and_schema_filters(api, auth):
     await add_doc(api, auth, data=DATA, created_at=datetime(2026, 9, 30, 23, 59, tzinfo=UTC))
     await add_doc(api, auth, data=DATA, created_at=datetime(2026, 10, 10, tzinfo=UTC), schema_slug="act_ru")
 
-    ok = book(await api.client.get(URL, headers=auth, params=params()))
+    ok = book(await api.client.get(URL, headers=auth, params=params(tz="UTC")))
     assert ok["Документы"].max_row == 3  # 1 и 31 октября включительно
-    allr = book(await api.client.get(URL, headers=auth, params=params(status="all")))
+    allr = book(await api.client.get(URL, headers=auth, params=params(status="all", tz="UTC")))
     assert allr["Документы"].max_row == 4
-    review = book(await api.client.get(URL, headers=auth, params=params(status="needs_review")))
+    review = book(await api.client.get(URL, headers=auth, params=params(status="needs_review", tz="UTC")))
     assert review["Документы"].max_row == 2
 
 
@@ -132,3 +132,37 @@ async def test_untrusted_text_stays_text_and_control_chars_removed(api, auth):
         assert row[title].value == value and row[title].data_type == "s"
     assert row["БИК банка поставщика"].value == "badchars"
     assert wb["Позиции"]["C2"].value == "=HYPERLINK(1)" and wb["Позиции"]["C2"].data_type == "s"
+
+
+async def test_schema_without_table_gives_header_only_items_sheet(api, auth):
+    passport = {"series": "4515", "number": "012345", "full_name": "Иванов Иван Иванович"}
+    await add_doc(
+        api, auth, data=passport, schema_slug="passport_ru", created_at=datetime(2026, 10, 5, 12, tzinfo=UTC)
+    )
+    r = await api.client.get(URL, headers=auth, params=params(schema="passport_ru"))
+    assert r.status_code == 200, r.text
+    wb = book(r)
+    assert wb["Документы"].max_row == 2
+    assert [c.value for c in wb["Позиции"][1]] == ["ID документа", "Номер"] and wb["Позиции"].max_row == 1
+
+
+async def test_period_in_client_timezone(api, auth):
+    # 30.09 22:30 UTC — уже 1 октября в Москве (UTC+3), но ещё 30 сентября в UTC
+    await add_doc(api, auth, data=DATA, created_at=datetime(2026, 9, 30, 22, 30, tzinfo=UTC))
+    # 31.10 22:30 UTC — уже 1 ноября в Москве
+    await add_doc(api, auth, data=DATA, created_at=datetime(2026, 10, 31, 22, 30, tzinfo=UTC))
+    moscow = book(await api.client.get(URL, headers=auth, params=params()))  # по умолчанию Europe/Moscow
+    assert moscow["Документы"].max_row == 2
+    utc = book(await api.client.get(URL, headers=auth, params=params(tz="UTC")))
+    assert utc["Документы"].max_row == 2
+    ids = lambda wb: {wb["Документы"].cell(2, 1).value}  # noqa: E731
+    assert ids(moscow) != ids(utc)  # в Москве попал сентябрьский по UTC, в UTC — октябрьский по Москве
+    vladivostok = book(await api.client.get(URL, headers=auth, params=params(tz="Asia/Vladivostok")))
+    assert vladivostok["Документы"].max_row == 2
+
+
+async def test_bad_timezone_422(api, auth):
+    r = await api.client.get(URL, headers=auth, params=params(tz="Mars/Olympus"))
+    assert r.status_code == 422 and "часовой пояс" in r.json()["detail"]
+    r = await api.client.get(URL, headers=auth, params=params(tz="../../etc/passwd"))
+    assert r.status_code == 422

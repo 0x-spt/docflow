@@ -58,6 +58,7 @@ async def _call(ctx: DestCtx, method: str, payload: dict[str, Any]) -> Any:
 class Telegram(BaseConnector):
     kind = "telegram"
     label = "Telegram"
+    description = "уведомления о проверке и новых документах"
     config_fields = [
         FieldDef(
             "chat_id",

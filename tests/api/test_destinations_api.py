@@ -172,6 +172,8 @@ async def test_connectors_catalog(api, auth, fake_connector):
         "help": "",
         "type": "url",
         "options": None,
+        "option_labels": None,
+        "advanced": False,
     }
     assert item["secret_fields"][0]["name"] == "token"
     assert item["target_fields"][0]["name"] == "amount"
@@ -180,6 +182,22 @@ async def test_connectors_catalog(api, auth, fake_connector):
     assert (by_kind["telegram"]["can_export"], by_kind["telegram"]["can_notify"]) == (False, True)
     assert (by_kind["google_sheets"]["can_export"], by_kind["google_sheets"]["can_notify"]) == (True, False)
     assert (await api.client.get("/v1/connectors")).status_code == 401
+
+
+async def test_catalog_descriptions_and_option_labels(api, auth):
+    by_kind = {c["kind"]: c for c in (await api.client.get("/v1/connectors", headers=auth)).json()}
+    assert by_kind["onec_odata"]["description"] == "поступления и контрагенты по ИНН"
+    assert by_kind["google_sheets"]["description"] == "строка на каждый документ"
+    assert all(by_kind[k]["description"] for k in ("bitrix24", "amocrm", "telegram", "email"))
+    fields = {f["name"]: f for f in by_kind["onec_odata"]["config_fields"]}
+    assert fields["document_kind"]["option_labels"]["purchase"] == "Поступление (входящие документы)"
+    assert fields["vat_rate"]["option_labels"]["НДС22"] == "НДС 22%"
+    assert set(fields["vat_rate"]["option_labels"]) == set(fields["vat_rate"]["options"])
+    advanced = {n for n, f in fields.items() if f["advanced"]}
+    assert advanced == {
+        "contract_key", "currency_key", "operation_kind", "document_object", "counterparty_object",
+        "nomenclature_object", "field_names",
+    }
 
 
 async def test_delete_keeps_export_history(api, auth, fake_connector):

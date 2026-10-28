@@ -557,6 +557,26 @@ def test_worker_settings_registered():
     assert ws.redis_settings.host
 
 
+@pytest.mark.parametrize(
+    ("site", "allow_private", "warns"),
+    [
+        ("http://localhost:3000", False, True),
+        ("http://127.0.0.1:3000", False, True),
+        ("http://app.localhost", False, True),
+        ("http://localhost:3000", True, False),  # dev и e2e: частные адреса разрешены
+        ("https://docflow.example.ru", False, False),
+    ],
+)
+def test_site_url_warning(site, allow_private, warns):
+    from docflow import worker
+    from docflow.config import Settings
+
+    msg = worker.site_url_warning(Settings(public_site_url=site, webhook_allow_private=allow_private))
+    assert (msg is not None) == warns
+    if warns:
+        assert "DOCFLOW_PUBLIC_SITE_URL" in msg
+
+
 async def test_worker_startup_fake_mode(tmp_path, monkeypatch):
     from docflow import worker
     from docflow.config import get_settings

@@ -159,6 +159,7 @@ def _send(config: dict[str, Any], secrets: dict[str, Any], msg: EmailMessage, se
 class Email(BaseConnector):
     kind = "email"
     label = "Почта"
+    description = "уведомления на e-mail"
     config_fields = [
         FieldDef(
             "host", "SMTP-сервер", required=True, help="Имя хоста, например smtp.yandex.ru (без http:// и порта)."

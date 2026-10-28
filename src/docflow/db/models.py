@@ -298,7 +298,8 @@ class Export(Base):
     __tablename__ = "exports"
     __table_args__ = (
         CheckConstraint("purpose IN ('export', 'notify_review', 'notify_new')", name="purpose"),
-        CheckConstraint("status IN ('pending', 'done', 'failed')", name="status"),
+        # skipped — доставка больше не нужна (уведомление устарело): не ошибка, «Повторить» нет
+        CheckConstraint("status IN ('pending', 'done', 'failed', 'skipped')", name="status"),
         UniqueConstraint("document_id", "destination_id", "purpose", name="document_destination_purpose"),
         Index("ix_exports_status_next_attempt_at", "status", "next_attempt_at"),
         # журнал тенанта «новые сверху»; покрывает и выборки по одному tenant_id

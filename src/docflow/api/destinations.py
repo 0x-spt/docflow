@@ -149,7 +149,9 @@ async def _owned(session, tenant_id, destination_id: str) -> Destination:
     summary="Типы получателей",
     description=(
         "Какие системы можно подключить и какие поля заполнить: настройки, секреты, целевые поля для маппинга. "
-        "`can_export` — умеет выгрузку документов, `can_notify` — уведомления."
+        "`can_export` — умеет выгрузку документов, `can_notify` — уведомления; `description` — одна строка, что "
+        "делает подключение. У полей: `option_labels` — подписи вариантов select (хранится значение), "
+        "`advanced` — редко нужное поле."
     ),
 )
 async def list_connectors(_: TenantDep) -> list[dict[str, Any]]:
@@ -157,6 +159,7 @@ async def list_connectors(_: TenantDep) -> list[dict[str, Any]]:
         {
             "kind": c.kind,
             "label": c.label,
+            "description": getattr(c, "description", ""),
             "can_export": supports(c, "export"),
             "can_notify": supports(c, "notify_review"),
             "config_fields": [dataclasses.asdict(f) for f in c.config_fields],

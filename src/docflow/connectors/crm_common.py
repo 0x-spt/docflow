@@ -79,6 +79,9 @@ def total_of(doc: ExportDoc) -> float | None:
     return int(value) if float(value).is_integer() else float(value)
 
 
+LINKS_NOTE = "Ссылки открываются после входа в кабинет DocFlow."
+
+
 def links_text(doc: ExportDoc) -> list[str]:
     lines = []
     if doc.digital_pdf_url:
@@ -87,6 +90,8 @@ def links_text(doc: ExportDoc) -> list[str]:
         lines.append(f"Скан (PDF): {doc.scan_pdf_url}")
     if doc.cabinet_url:
         lines.append(f"Кабинет DocFlow: {doc.cabinet_url}")
+    if lines:
+        lines.append(LINKS_NOTE)
     return lines
 
 

@@ -32,6 +32,10 @@ class FieldDef:
     help: str = ""
     type: FieldKind = "text"
     options: list[str] | None = None
+    # подписи вариантов select для людей (значение → подпись); в настройках хранится само значение
+    option_labels: dict[str, str] | None = None
+    # редко нужное поле: форма прячет его в свёрнутый блок «Дополнительно»
+    advanced: bool = False
 
 
 Loader = Callable[[], Awaitable[bytes | None]]
@@ -76,6 +80,7 @@ class DestCtx:
 class Connector(Protocol):
     kind: str
     label: str
+    description: str
     config_fields: list[FieldDef]
     secret_fields: list[FieldDef]
     target_fields: list[FieldDef]
@@ -95,6 +100,7 @@ class BaseConnector:
 
     kind = ""
     label = ""
+    description = ""  # одна строка «что делает» для выбора системы в кабинете
     config_fields: list[FieldDef] = []
     secret_fields: list[FieldDef] = []
     target_fields: list[FieldDef] = []

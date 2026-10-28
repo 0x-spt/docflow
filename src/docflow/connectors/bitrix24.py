@@ -139,6 +139,7 @@ async def _ensure_comment(s: _Session, deal_id: str, doc: ExportDoc) -> None:
 class Bitrix24(BaseConnector):
     kind = "bitrix24"
     label = "Битрикс24"
+    description = "сделка и компания по ИНН"
     config_fields = [
         FieldDef(
             "assigned_by_id", "Ответственный (ID)", type="number", help="ID сотрудника; по умолчанию владелец вебхука."
@@ -150,6 +151,7 @@ class Bitrix24(BaseConnector):
             "Контрагент",
             type="select",
             options=["supplier", "buyer"],
+            option_labels={"supplier": "Поставщик (входящие счета)", "buyer": "Покупатель (исходящие)"},
             help="Чья компания попадает в сделку: поставщика (входящие счета) или покупателя.",
         ),
     ]

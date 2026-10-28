@@ -81,7 +81,7 @@ def make_doc(**data) -> ExportDoc:
         number="42",
         issued=datetime(2026, 10, 5).date(),
         cabinet_url="https://site/app/documents/1",
-        digital_pdf_url="https://api/v1/documents/1/digital.pdf",
+        digital_pdf_url="https://site/app/files/1/digital",
     )
 
 
@@ -108,6 +108,7 @@ class Sheet:
         self.puts: list[tuple[str, list]] = []
         self.created: list[str] = []
         self.formats: list[dict] = []
+        self.props: list[dict] = []
         router.get(API).mock(side_effect=lambda req: httpx.Response(200, json=meta(*self.titles)))
         router.post(f"{API}:batchUpdate").mock(side_effect=self._batch)
         router.get(url__regex=rf"{API}/values/.*").mock(side_effect=self._read)
@@ -126,6 +127,9 @@ class Sheet:
         for r in json.loads(req.content)["requests"]:
             if "repeatCell" in r:
                 self.formats.append(r["repeatCell"])
+                continue
+            if "updateSpreadsheetProperties" in r:
+                self.props.append(r["updateSpreadsheetProperties"])
                 continue
             title = r["addSheet"]["properties"]["title"]
             self.titles.append(title)
@@ -182,7 +186,7 @@ async def test_token_refreshed_when_near_expiry(http):
         c = google_sheets.GoogleSheets()
         await c.test(make_ctx(http))
         await c.test(make_ctx(http))
-    assert route.call_count == 2
+    assert route.call_count == 4  # по токену на каждый запрос: метаданные и проверка записи, дважды
 
 
 async def test_test_ok_and_url_id_extraction(http):
@@ -192,7 +196,7 @@ async def test_test_ok_and_url_id_extraction(http):
         msg = await google_sheets.GoogleSheets().test(
             make_ctx(http, spreadsheet_id=f"https://docs.google.com/spreadsheets/d/{SHEET}/edit#gid=0")
         )
-    assert msg == "Таблица «Реестр» доступна"
+    assert msg == "Таблица «Реестр» доступна для записи"
 
 
 async def test_test_rejects_bad_service_account(http):
@@ -428,3 +432,54 @@ async def test_sheet_titles_compared_case_insensitively(http):
             make_ctx(http, documents_sheet="Документы", items_sheet="Позиции"), make_doc()
         )
     assert sheet.created == []
+
+
+async def test_test_checks_write_access_with_same_title(http):
+    with respx.mock(assert_all_called=False) as router:
+        mock_token(router)
+        sheet = Sheet(router)
+        await google_sheets.GoogleSheets().test(make_ctx(http))
+    # запись права на редактирование — то же название таблицы, ничего видимого не меняется
+    assert sheet.props == [{"properties": {"title": "Реестр"}, "fields": "title"}]
+    assert not sheet.appends and not sheet.puts and not sheet.created
+
+
+async def test_test_read_only_share_fails_with_hint(http):
+    with respx.mock(assert_all_called=False) as router:
+        mock_token(router)
+        router.get(API).respond(json=meta(DOCS))
+        denied = {"error": {"message": "The caller does not have permission"}}
+        router.post(f"{API}:batchUpdate").respond(403, json=denied)
+        with pytest.raises(ConnectorError) as e:
+            await google_sheets.GoogleSheets().test(make_ctx(http))
+    assert not e.value.retryable
+    assert e.value.message == f"у сервисного аккаунта только чтение — откройте доступ на редактирование для {EMAIL}"
+
+
+async def test_other_schema_header_rejected_not_retryable(http):
+    act = builtin_schemas()["upd_ru"]
+    with respx.mock(assert_all_called=False) as router:
+        mock_token(router)
+        sheet = Sheet(router)
+        await google_sheets.GoogleSheets().export(make_ctx(http), make_doc())  # шапка счёта
+        other = make_doc()
+        other.id = uuid.UUID("22222222-2222-2222-2222-222222222222")
+        other.schema, other.title = act, act.title
+        with pytest.raises(ConnectorError) as e:
+            await google_sheets.GoogleSheets().export(make_ctx(http), other)
+    assert not e.value.retryable
+    assert e.value.message == (
+        "в этой таблице уже другие колонки — для другого типа документа заведите отдельное подключение или другой лист"
+    )
+    assert len(sheet.cells[DOCS]) == 2  # строка УПД со сдвигом колонок не записана
+
+
+async def test_same_schema_header_accepted_on_next_document(http):
+    with respx.mock(assert_all_called=False) as router:
+        mock_token(router)
+        sheet = Sheet(router)
+        await google_sheets.GoogleSheets().export(make_ctx(http), make_doc())
+        second = make_doc()
+        second.id = uuid.UUID("33333333-3333-3333-3333-333333333333")
+        await google_sheets.GoogleSheets().export(make_ctx(http), second)
+    assert len(sheet.cells[DOCS]) == 3 and len(sheet.puts) == 2  # шапки записаны один раз

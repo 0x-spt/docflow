@@ -6,6 +6,7 @@
 import json
 import logging
 from datetime import UTC, datetime, timedelta
+from urllib.parse import urlsplit
 from uuid import UUID
 
 import httpx
@@ -50,8 +51,25 @@ STALE_QUEUED = timedelta(minutes=5)
 CONNECTOR_TIMEOUT = 20.0
 
 
+LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+
+
 class FakeExtractorNotAllowed(RuntimeError):
     pass
+
+
+def site_url_warning(settings: Settings) -> str | None:
+    """Прод (частные адреса запрещены) с адресом кабинета по умолчанию: ссылки в CRM, таблицах и уведомлениях
+    вели бы на localhost клиента."""
+    if settings.webhook_allow_private:
+        return None
+    host = (urlsplit(settings.public_site_url).hostname or "").lower()
+    if host in LOCAL_HOSTS or host.endswith(".localhost"):
+        return (
+            f"DOCFLOW_PUBLIC_SITE_URL={settings.public_site_url} — локальный адрес: ссылки на документы в "
+            "выгрузках и уведомлениях не откроются у клиента. Укажите внешний адрес кабинета."
+        )
+    return None
 
 
 def _extractors(settings: Settings) -> dict[str, Extractor]:
@@ -91,6 +109,8 @@ async def startup(ctx: dict) -> None:
     )
     if settings.fake_extractor:
         logger.warning("DOCFLOW_FAKE_EXTRACTOR включён: ответы берутся из %s", settings.fake_responses)
+    if warning := site_url_warning(settings):
+        logger.warning(warning)
 
 
 async def shutdown(ctx: dict) -> None:

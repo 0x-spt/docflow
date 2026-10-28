@@ -162,6 +162,50 @@ async def test_list_exports_filters_and_isolation(api, auth, make_tenant, fake_c
 DEST_OFF_TEXT = "получатель отключён"
 
 
+async def test_summary_counts_failed_and_pending_per_destination(api, auth, make_tenant, fake_connector):
+    a = await add_dest(api, auth, name="1С")
+    b = await add_dest(api, auth, name="Таблица")
+    quiet = await add_dest(api, auth, name="Без выгрузок")
+    docs = [await add_doc(api, auth) for _ in range(4)]
+    await add_export(api, auth, docs[0], a, status="failed")
+    await add_export(api, auth, docs[1], a, status="failed")
+    await add_export(api, auth, docs[2], a, status="pending")
+    await add_export(api, auth, docs[3], a, status="done")
+    await add_export(api, auth, docs[0], b, status="skipped", last_error="уведомление не актуально")
+    await add_export(api, auth, docs[1], b, status="pending")
+    await add_export(api, auth, docs[2], None, purpose="notify_new", status="failed")  # получатель удалён
+    other = await make_tenant("Чужой")
+    od = await add_doc(api, other)
+    other_dest = await add_dest(api, other, name="Чужой")
+    await add_export(api, other, od, other_dest, status="failed")
+
+    r = await api.client.get("/v1/exports/summary", headers=auth)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    by_dest = {i["destination_id"]: i for i in body["items"]}
+    assert by_dest[str(a)] == {"destination_id": str(a), "failed": 2, "pending": 1}
+    assert by_dest[str(b)] == {"destination_id": str(b), "failed": 0, "pending": 1}  # skipped — не ошибка
+    assert str(quiet) not in by_dest and str(other_dest) not in by_dest
+    assert body["failed"] == 3  # вместе с удалённым получателем
+    operator, _ = await session_for(api, auth, role="operator")
+    assert (await api.client.get("/v1/exports/summary", headers=operator)).status_code == 200
+    assert (await api.client.get("/v1/exports/summary")).status_code == 401
+
+
+async def test_list_filters_by_destination_and_skipped_status(api, auth, fake_connector):
+    a = await add_dest(api, auth, name="1С")
+    b = await add_dest(api, auth, name="Таблица")
+    d = await add_doc(api, auth)
+    ea = await add_export(api, auth, d, a, status="failed")
+    await add_export(api, auth, d, b, status="failed")
+    es = await add_export(api, auth, d, b, purpose="notify_new", status="skipped")
+    r = await api.client.get("/v1/exports", headers=auth, params={"destination_id": str(a), "status": "failed"})
+    assert [i["id"] for i in r.json()["items"]] == [str(ea)]
+    r = await api.client.get("/v1/exports", headers=auth, params={"status": "skipped"})
+    assert [i["id"] for i in r.json()["items"]] == [str(es)]
+    assert (await api.client.post(f"/v1/exports/{es}/retry", headers=auth)).status_code == 409
+
+
 async def test_document_payload_has_exports(api, auth, fake_connector):
     dest = await add_dest(api, auth)
     doc_id = await add_doc(api, auth)

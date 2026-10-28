@@ -18,6 +18,7 @@ import jwt
 from docflow.connectors.base import REGISTRY, BaseConnector, ConnectorError, DestCtx, ExportDoc, FieldDef
 from docflow.tabular import (
     DOCS_SHEET,
+    ID_HEADER,
     ITEMS_SHEET,
     Cell,
     doc_date_columns,
@@ -37,6 +38,11 @@ JWT_LIFETIME = 3600
 
 # (email, отпечаток ключа) -> (токен, монотонное время истечения); в процессе воркера/API
 TOKENS: dict[tuple[str, str], tuple[str, float]] = {}
+
+OTHER_COLUMNS = (
+    "в этой таблице уже другие колонки — для другого типа документа заведите отдельное подключение или другой лист"
+)
+READ_ONLY = "у сервисного аккаунта только чтение — откройте доступ на редактирование для {email}"
 
 _SHEET_ID = re.compile(r"/spreadsheets/d/([A-Za-z0-9_-]+)")
 
@@ -133,7 +139,8 @@ class _Session:
         TOKENS[key] = (access, time.monotonic() + lifetime)
         return access
 
-    async def call(self, method: str, url: str, **kwargs: Any) -> dict[str, Any]:
+    async def call(self, method: str, url: str, *, forbidden: str | None = None, **kwargs: Any) -> dict[str, Any]:
+        """forbidden — своё сообщение на 403 (когда уже известно, что таблица открыта на чтение)."""
         headers = {"Authorization": f"Bearer {await self.token()}"}
         try:
             resp = await self.http.request(method, url, headers=headers, **kwargs)
@@ -142,6 +149,8 @@ class _Session:
         code = resp.status_code
         if code < 300:
             return resp.json() if resp.content else {}
+        if code == 403 and forbidden:
+            raise ConnectorError(forbidden)
         if code in (403, 404):
             raise ConnectorError(
                 "нет доступа к таблице или выключен Google Sheets API — откройте доступ на редактирование "
@@ -190,7 +199,17 @@ class _Session:
 
     async def ensure_header(self, sheet: str, column: list[str], header: list[str]) -> None:
         if column and column[0] != "":
-            return  # шапка есть (наша или клиента) — не трогаем
+            if column[0] == ID_HEADER:
+                # шапка наша: колонки должны совпасть, иначе строка документа другой схемы встанет со сдвигом
+                data = await self.call(
+                    "GET",
+                    f"{self.base}/values/{range_path(sheet, '1:1')}",
+                    params={"valueRenderOption": "FORMATTED_VALUE"},
+                )
+                existing = [str(v) for v in (data.get("values") or [[]])[0]]
+                if existing != header:
+                    raise ConnectorError(OTHER_COLUMNS)
+            return  # шапка клиента — не трогаем
         await self.call(
             "PUT",
             f"{self.base}/values/{range_path(sheet, 'A1')}",
@@ -241,6 +260,7 @@ def _api_message(resp: httpx.Response) -> str:
 class GoogleSheets(BaseConnector):
     kind = "google_sheets"
     label = "Google Таблицы"
+    description = "строка на каждый документ"
     config_fields = [
         FieldDef(
             "spreadsheet_id",
@@ -265,7 +285,15 @@ class GoogleSheets(BaseConnector):
     async def test(self, ctx: DestCtx) -> str | None:
         s = _Session(ctx)
         title, _ = await s.titles()
-        return f"Таблица «{title}» доступна"
+        # право на запись: записываем таблице её же название — видимых изменений нет, а у читателя будет 403
+        # (пустой batchUpdate Google не принимает, а метаданные доступны и на чтение)
+        await s.call(
+            "POST",
+            f"{s.base}:batchUpdate",
+            json={"requests": [{"updateSpreadsheetProperties": {"properties": {"title": title}, "fields": "title"}}]},
+            forbidden=READ_ONLY.format(email=s.email),
+        )
+        return f"Таблица «{title}» доступна для записи"
 
     async def export(self, ctx: DestCtx, doc: ExportDoc) -> str | None:
         s = _Session(ctx)

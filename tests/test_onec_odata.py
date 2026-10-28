@@ -241,7 +241,9 @@ async def test_odata_query_format(http):
         one = OneC(router)
         await REGISTRY["onec_odata"].export(make_ctx(http), make_doc())
     first = one.gets(PURCHASE)[0]
-    assert first["$filter"].startswith(f"substringof('docflow:{DOC_ID}', Комментарий) and Date ge ")
+    assert first["$filter"].startswith(
+        f"substringof('docflow:{DOC_ID}', Комментарий) and DeletionMark eq false and Date ge "
+    )
     assert first["$format"] == "json" and first["$select"] == "Ref_Key,Number"
     assert any("ИНН eq '7707083893'" in q["$filter"] for q in one.gets(PARTNERS))
     assert all("+" not in u.split("?", 1)[1] for u in one.raw_urls if "?" in u)  # пробелы — %20, не «+»
@@ -624,7 +626,7 @@ async def test_idempotency_lookup_narrowed_by_date(http):
         await REGISTRY["onec_odata"].export(make_ctx(http), make_doc())
         flt = one.gets(PURCHASE)[0]["$filter"]
         assert flt == (
-            f"substringof('docflow:{DOC_ID}', Комментарий)"
+            f"substringof('docflow:{DOC_ID}', Комментарий) and DeletionMark eq false"
             " and Date ge datetime'2026-10-04T00:00:00' and Date le datetime'2026-10-06T23:59:59'"
         )
         one.calls.clear()
@@ -638,7 +640,20 @@ async def test_idempotency_without_date_plain_filter(http):
     with respx.mock() as router:
         one = OneC(router)
         await REGISTRY["onec_odata"].export(make_ctx(http), doc)
-    assert one.gets(PURCHASE)[0]["$filter"] == f"substringof('docflow:{DOC_ID}', Комментарий)"
+    assert one.gets(PURCHASE)[0]["$filter"] == f"substringof('docflow:{DOC_ID}', Комментарий) and DeletionMark eq false"
+
+
+async def test_document_marked_for_deletion_is_created_again(http):
+    deleted = {
+        "Ref_Key": str(uuid.uuid4()),
+        "Комментарий": f"DocFlow docflow:{DOC_ID}",
+        "Date": "2026-10-05T00:00:00",
+        "DeletionMark": True,
+    }
+    with respx.mock() as router:
+        one = OneC(router, docs=[deleted])
+        key = await REGISTRY["onec_odata"].export(make_ctx(http), make_doc())
+    assert key != deleted["Ref_Key"] and len(one.posts(PURCHASE)) == 1
 
 
 @pytest.mark.parametrize(

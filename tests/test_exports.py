@@ -178,8 +178,9 @@ async def test_deliver_success_passes_doc_and_secrets(session, fake_connector, s
     assert sent.number == "15" and sent.issued == date(2026, 10, 20)
     assert sent.data["total"] == 250.0
     assert sent.cabinet_url == f"https://docflow.example.test/app/documents/{doc.id}"
-    assert sent.digital_pdf_url == f"https://api.example.test/v1/documents/{doc.id}/digital.pdf"
-    assert sent.scan_pdf_url == f"https://api.example.test/v1/documents/{doc.id}/pdf"
+    # ссылки для людей — через кабинет (сессия), а не API с Bearer-токеном
+    assert sent.digital_pdf_url == f"https://docflow.example.test/app/files/{doc.id}/digital"
+    assert sent.scan_pdf_url == f"https://docflow.example.test/app/files/{doc.id}/pdf"
     assert await sent.load_scan_pdf() == b"%PDF-scan"
 
 
@@ -470,7 +471,7 @@ async def test_stale_notification_not_sent(session, fake_connector, settings, bl
     await session.commit()
     (row,) = await exports_of(session, doc.id)
     row, enq = await run(session, row.id, settings, blobs)
-    assert row.status == "failed" and row.last_error == STALE_NOTIFICATION and enq.calls == []
+    assert row.status == "skipped" and row.last_error == STALE_NOTIFICATION and enq.calls == []
     assert fake_connector.calls == []
 
 

@@ -54,8 +54,8 @@ def make_doc(**data) -> ExportDoc:
         number="42",
         issued=datetime(2026, 10, 5).date(),
         cabinet_url="https://site/app/documents/1",
-        digital_pdf_url="https://api/v1/documents/1/digital.pdf",
-        scan_pdf_url="https://api/v1/documents/1/pdf",
+        digital_pdf_url="https://site/app/files/1/digital",
+        scan_pdf_url="https://site/app/files/1/pdf",
     )
 
 
@@ -176,7 +176,8 @@ async def test_export_creates_lead_with_new_company(http):
     assert lead["_embedded"]["tags"] == [{"name": "DocFlow"}]
     assert ext == str(a.next_id)
     text = a.notes[a.next_id][0]
-    assert "digital.pdf" in text and f"docflow:{DOC_ID}" in text
+    assert "https://site/app/files/1/digital" in text and "после входа в кабинет" in text
+    assert f"docflow:{DOC_ID}" in text
 
 
 async def test_company_found_by_inn_field(http):

@@ -154,6 +154,7 @@ def _field_id(code: str) -> int:
 class AmoCrm(BaseConnector):
     kind = "amocrm"
     label = "amoCRM"
+    description = "сделка и компания"
     config_fields = [
         FieldDef(
             "subdomain",
@@ -175,6 +176,7 @@ class AmoCrm(BaseConnector):
             "Контрагент",
             type="select",
             options=["supplier", "buyer"],
+            option_labels={"supplier": "Поставщик (входящие счета)", "buyer": "Покупатель (исходящие)"},
             help="Чья компания попадает в сделку: поставщика (входящие счета) или покупателя.",
         ),
     ]

@@ -53,8 +53,8 @@ def make_doc(**data) -> ExportDoc:
         number="42",
         issued=datetime(2026, 10, 5).date(),
         cabinet_url="https://site/app/documents/1",
-        digital_pdf_url="https://api/v1/documents/1/digital.pdf",
-        scan_pdf_url="https://api/v1/documents/1/pdf",
+        digital_pdf_url="https://site/app/files/1/digital",
+        scan_pdf_url="https://site/app/files/1/pdf",
     )
 
 
@@ -169,7 +169,9 @@ async def test_export_creates_company_requisite_deal_comment(http):
     assert str(fields["COMPANY_ID"]) == "101"
     comment = b.comments[0]
     assert comment["ENTITY_TYPE"] == "deal" and str(comment["ENTITY_ID"]) == ext
-    assert "digital.pdf" in comment["COMMENT"] and f"docflow:{DOC_ID}" in comment["COMMENT"]
+    assert "https://site/app/files/1/digital" in comment["COMMENT"]
+    assert "после входа в кабинет" in comment["COMMENT"]
+    assert f"docflow:{DOC_ID}" in comment["COMMENT"]
 
 
 async def test_company_found_by_inn(http):

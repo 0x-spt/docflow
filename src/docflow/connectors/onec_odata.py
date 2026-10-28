@@ -25,6 +25,7 @@ DOC_OBJECTS = {"purchase": "Document_ПоступлениеТоваровУсл�
 COUNTERPARTY_OBJECT = "Catalog_Контрагенты"
 NOMENCLATURE_OBJECT = "Catalog_Номенклатура"
 VAT_RATES = {"НДС22": 22, "НДС20": 20, "НДС10": 10, "НДС0": 0, "БезНДС": 0}
+VAT_LABELS = {"НДС22": "НДС 22%", "НДС20": "НДС 20%", "НДС10": "НДС 10%", "НДС0": "НДС 0%", "БезНДС": "Без НДС"}
 DEFAULT_VAT = "НДС22"
 DEFAULT_OPERATION = "Товары"
 # реквизиты 1С, которые мы пишем; клиент может переименовать любой строкой «Стандартное=Своё»
@@ -486,6 +487,7 @@ def _date_window(day: date) -> str:
 class OneCOData(BaseConnector):
     kind = "onec_odata"
     label = "1С (OData)"
+    description = "поступления и контрагенты по ИНН"
     config_fields = [
         FieldDef(
             "base_url",
@@ -509,32 +511,46 @@ class OneCOData(BaseConnector):
             "Вид документа",
             type="select",
             options=["purchase", "sale"],
-            help="purchase — «Поступление товаров и услуг» (входящие счета, УПД, накладные; контрагент — поставщик), "
-            "sale — «Реализация товаров и услуг» (контрагент — покупатель).",
+            option_labels={"purchase": "Поступление (входящие документы)", "sale": "Реализация (исходящие)"},
+            help="Поступление товаров и услуг — входящие счета, УПД, накладные (контрагент — поставщик); "
+            "Реализация товаров и услуг — исходящие (контрагент — покупатель).",
         ),
         FieldDef("warehouse_key", "Склад (Ref_Key)", help="GUID склада из Catalog_Склады; пусто — заполнит бухгалтер."),
         FieldDef(
-            "contract_key", "Договор (Ref_Key)", help="GUID договора из Catalog_ДоговорыКонтрагентов; обычно пусто."
+            "contract_key",
+            "Договор (Ref_Key)",
+            help="GUID договора из Catalog_ДоговорыКонтрагентов; обычно пусто.",
+            advanced=True,
         ),
         FieldDef(
             "currency_key",
             "Валюта (Ref_Key)",
             help="GUID валюты из Catalog_Валюты; пусто — валюту, как и счета учёта, заполнит бухгалтер "
             "(«Заполнить счета учета» в документе).",
+            advanced=True,
         ),
         FieldDef(
             "vat_rate",
             "Ставка НДС",
             type="select",
             options=list(VAT_RATES),
-            help="Ставка для всех позиций; по умолчанию НДС22 (основная ставка с 2026 года).",
+            option_labels=VAT_LABELS,
+            help="Ставка для всех позиций; по умолчанию НДС 22% (основная ставка с 2026 года).",
         ),
-        FieldDef("operation_kind", "Вид операции", help="Значение ВидОперации документа; по умолчанию «Товары»."),
         FieldDef(
-            "document_object", "Объект документа", help="Пусто — по виду документа (Document_ПоступлениеТоваровУслуг)."
+            "operation_kind",
+            "Вид операции",
+            help="Значение ВидОперации документа; по умолчанию «Товары».",
+            advanced=True,
         ),
-        FieldDef("counterparty_object", "Справочник контрагентов", help="Пусто — Catalog_Контрагенты."),
-        FieldDef("nomenclature_object", "Справочник номенклатуры", help="Пусто — Catalog_Номенклатура."),
+        FieldDef(
+            "document_object",
+            "Объект документа",
+            help="Пусто — по виду документа (Document_ПоступлениеТоваровУслуг).",
+            advanced=True,
+        ),
+        FieldDef("counterparty_object", "Справочник контрагентов", help="Пусто — Catalog_Контрагенты.", advanced=True),
+        FieldDef("nomenclature_object", "Справочник номенклатуры", help="Пусто — Catalog_Номенклатура.", advanced=True),
         FieldDef(
             "field_names",
             "Имена реквизитов",
@@ -542,6 +558,7 @@ class OneCOData(BaseConnector):
             help="Для нетиповых конфигураций: строки «Стандартное=Своё», например «Комментарий=Примечание». "
             "Умолчания — «Бухгалтерия предприятия 3.0»; в УТ 11 и ERP флаг НДС называется иначе — добавьте "
             f"«СуммаВключаетНДС=ЦенаВключаетНДС». Стандартные: {', '.join(FIELDS)}.",
+            advanced=True,
         ),
     ]
     secret_fields = [
@@ -583,7 +600,8 @@ class OneCOData(BaseConnector):
             )
 
         # без даты документа ставим «сегодня», а повтор может прийти завтра — тогда ищем без окна по дате
-        flt = f"substringof({_literal(marker(doc))}, {f['Комментарий']})"
+        # помеченный на удаление документ — не «уже выгружен»: бухгалтер его удалил, создаём заново
+        flt = f"substringof({_literal(marker(doc))}, {f['Комментарий']}) and {_ACTIVE}"
         existing = await s.find(st.document, flt + (_date_window(doc.issued) if doc.issued else ""), "Ref_Key,Number")
         if existing:
             return existing[0]["Ref_Key"]

@@ -70,7 +70,8 @@ def docs_header(schema: DocSchema, mapping: dict[str, str] | None = None) -> lis
 
 def items_header(schema: DocSchema) -> list[str]:
     table = table_field(schema)
-    return [ID_HEADER, "Номер", *(label(c) for c in (table.columns or []) if table)]
+    columns = (table.columns or []) if table else []
+    return [ID_HEADER, "Номер", *(label(c) for c in columns)]
 
 
 def cell(spec: ColumnSpec, value: Any, *, target: Target) -> Cell:
