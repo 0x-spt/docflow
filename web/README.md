@@ -47,9 +47,13 @@ http://localhost:3000) и `E2E_API_URL` (API, http://localhost:8000).
 
 | Переменная | Назначение |
 | --- | --- |
-| `DOCFLOW_API_URL` | адрес API |
-| `DOCFLOW_INTERNAL_TOKEN` | секрет для `X-Internal-Token`; тот же, что `internal_token` у API |
-| `COOKIE_SECURE` | `false` отключает флаг Secure у cookie в dev |
+| `DOCFLOW_API_URL` | адрес API, по которому ходит сервер сайта (в compose — `http://api:8000`) |
+| `DOCFLOW_PUBLIC_API_URL` | публичный адрес API для примеров в кабинете (то, что клиент вписывает в интеграцию) |
+| `DOCFLOW_INTERNAL_TOKEN` | секрет для `X-Internal-Token`; тот же, что `DOCFLOW_INTERNAL_TOKEN` у API. Пусто — адрес посетителя API не передаётся как доверенный |
+| `COOKIE_SECURE` | `false` отключает флаг Secure у cookie в dev; в проде за https — `true` |
+
+Адрес посетителя сайт берёт из `X-Real-IP` (его обязан ставить обратный прокси: `proxy_set_header X-Real-IP
+$remote_addr;`), без него — из последнего адреса `X-Forwarded-For`.
 
 ## Дизайн-система
 

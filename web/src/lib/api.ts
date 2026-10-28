@@ -20,12 +20,19 @@ function apiBase(): string {
   return (process.env.DOCFLOW_API_URL ?? "http://localhost:8000").replace(/\/+$/, "");
 }
 
-/** IP клиента из заголовков запроса к сайту; вне контекста запроса (сборка) — null. */
+/**
+ * IP клиента для лимитов API; вне контекста запроса (сборка) — null.
+ * Первому адресу X-Forwarded-For верить нельзя — его пишет сам клиент. Берём X-Real-IP, который ставит наш
+ * прокси (`proxy_set_header X-Real-IP $remote_addr`), иначе последний адрес X-Forwarded-For — его дописал
+ * ближайший к сайту узел. Ничего нет — X-Client-IP не отправляем.
+ */
 async function clientIp(): Promise<string | null> {
   try {
     const h = await headers();
-    const forwarded = h.get("x-forwarded-for")?.split(",")[0]?.trim();
-    return forwarded || h.get("x-real-ip")?.trim() || null;
+    const real = h.get("x-real-ip")?.trim();
+    if (real) return real;
+    const last = h.get("x-forwarded-for")?.split(",").pop()?.trim();
+    return last || null;
   } catch {
     return null;
   }

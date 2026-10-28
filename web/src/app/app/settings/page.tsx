@@ -4,6 +4,7 @@ import { CreateKeyForm } from "@/components/app/CreateKeyForm";
 import { CreateWebhookForm } from "@/components/app/CreateWebhookForm";
 import { Section } from "@/components/ui";
 import { formatDateTime } from "@/lib/format";
+import { isUuid } from "@/lib/ids";
 import { apiFetchAuthed, requireMe } from "@/lib/session";
 import type { ApiKey, Webhook } from "@/lib/types";
 
@@ -18,9 +19,9 @@ function publicApiUrl(): string {
   return (process.env.DOCFLOW_PUBLIC_API_URL ?? "http://localhost:8000").replace(/\/+$/, "");
 }
 
-const ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ERRORS: Record<string, string> = {
   key_forbidden: "Ключами управляет только владелец аккаунта.",
+  hook_forbidden: "Вебхуками управляет только владелец аккаунта.",
   key_failed: "Не удалось отозвать ключ. Проверьте соединение и попробуйте ещё раз.",
   hook_failed: "Не удалось удалить вебхук. Проверьте соединение и попробуйте ещё раз.",
 };
@@ -39,7 +40,7 @@ export default async function SettingsPage({
   const errorText = errCode && Object.hasOwn(ERRORS, errCode) ? ERRORS[errCode] : null;
   // подтверждение без JS-диалогов: ?confirm=key:<uuid> или ?confirm=webhook:<uuid>
   const [confirmKind, confirmId] = (one(sp.confirm) ?? "").split(":");
-  const confirming = confirmId && ID_RE.test(confirmId) ? { kind: confirmKind, id: confirmId } : null;
+  const confirming = confirmId && isUuid(confirmId) ? { kind: confirmKind, id: confirmId } : null;
   const me = await requireMe();
   const isOwner = me.user?.role === "owner";
   const [keys, hooks] = await Promise.all([
@@ -131,7 +132,7 @@ export default async function SettingsPage({
             <CreateKeyForm />
           </div>
         ) : (
-          <p className="border-2 border-ink bg-card p-4">Ключи API управляет владелец аккаунта.</p>
+          <p className="border-2 border-ink bg-card p-4">Ключами API управляет владелец аккаунта.</p>
         )}
       </Section>
 
@@ -144,7 +145,7 @@ export default async function SettingsPage({
               <table className="w-full min-w-[38rem] border-collapse text-left text-sm">
                 <thead className="bg-ink text-paper">
                   <tr>
-                    {["Адрес", "События", "Добавлен", ""].map((h, i) => (
+                    {["Адрес", "События", "Добавлен", ...(isOwner ? [""] : [])].map((h, i) => (
                       <th key={i} scope="col" className="px-3 py-2 font-mono font-medium">
                         {h || <span className="sr-only">Действия</span>}
                       </th>
@@ -163,35 +164,41 @@ export default async function SettingsPage({
                       <td className="whitespace-nowrap px-3 py-2.5 font-mono tabular-nums">
                         {formatDateTime(h.created_at)}
                       </td>
-                      <td className="px-3 py-1.5">
-                        {confirming?.kind === "webhook" && confirming.id === h.id ? (
-                          <div className="flex flex-wrap items-center gap-2">
-                            <form action={deleteWebhook.bind(null, h.id)}>
-                              <button type="submit" className={SMALL_BTN}>
-                                Точно удалить?
-                              </button>
-                            </form>
-                            <Link href="/app/settings" className={SMALL_BTN}>
-                              Отмена
+                      {isOwner ? (
+                        <td className="px-3 py-1.5">
+                          {confirming?.kind === "webhook" && confirming.id === h.id ? (
+                            <div className="flex flex-wrap items-center gap-2">
+                              <form action={deleteWebhook.bind(null, h.id)}>
+                                <button type="submit" className={SMALL_BTN}>
+                                  Точно удалить?
+                                </button>
+                              </form>
+                              <Link href="/app/settings" className={SMALL_BTN}>
+                                Отмена
+                              </Link>
+                            </div>
+                          ) : (
+                            <Link
+                              href={`/app/settings?confirm=webhook:${h.id}`}
+                              className={SMALL_BTN}
+                              aria-label={`Удалить вебхук ${h.url}`}
+                            >
+                              Удалить
                             </Link>
-                          </div>
-                        ) : (
-                          <Link
-                            href={`/app/settings?confirm=webhook:${h.id}`}
-                            className={SMALL_BTN}
-                            aria-label={`Удалить вебхук ${h.url}`}
-                          >
-                            Удалить
-                          </Link>
-                        )}
-                      </td>
+                          )}
+                        </td>
+                      ) : null}
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
           )}
-          <CreateWebhookForm />
+          {isOwner ? (
+            <CreateWebhookForm />
+          ) : (
+            <p className="border-2 border-ink bg-card p-4">Вебхуками управляет владелец аккаунта.</p>
+          )}
         </div>
       </Section>
 

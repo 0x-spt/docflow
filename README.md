@@ -72,7 +72,7 @@ docker compose exec api docflow set-auto-ok <id> yes
 Запуск вместе со всем стеком:
 
 ```
-docker compose up -d --build        # сайт: http://localhost:3000, API: http://localhost:8000
+docker compose up -d --build        # сайт: http://localhost:3000, API: http://localhost:8000 (только 127.0.0.1)
 ```
 
 Клиент и его пользователь (пароль не короче 10 символов; без `--password` будет сгенерирован и показан один раз):
@@ -90,11 +90,16 @@ docker compose exec api docflow create-user <tenant_id> boss@example.com --role 
 
 В проде:
 
-- сайт и API за прокси с TLS; cookie получает флаг `Secure` в production-сборке. `COOKIE_SECURE=false` нужен
-  только для проверки по http и в проде не ставится;
-- прокси сам выставляет `X-Forwarded-For` (перезаписывая присланный клиентом): по нему сайт передаёт API адрес
-  посетителя для лимитов на заявки и вход. API верит этому адресу только с общим секретом
-  `DOCFLOW_INTERNAL_TOKEN` (одинаковый у сайта и API; смените значение по умолчанию);
+- сайт и API за обратным прокси с TLS; в `docker-compose.yml` порты 3000 и 8000 опубликованы только на
+  `127.0.0.1`, наружу смотрит лишь прокси;
+- cookie получает флаг `Secure` в production-сборке, если не задано `COOKIE_SECURE=false`. В compose по умолчанию
+  `false` (dev по http) — в проде за https задайте в `.env` `COOKIE_SECURE=true`;
+- прокси обязан сам выставлять `X-Real-IP` адресом соединения и не пропускать присланный клиентом: в nginx
+  `proxy_set_header X-Real-IP $remote_addr;` (и `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`).
+  Сайт берёт адрес посетителя из `X-Real-IP`, без него — из последнего адреса `X-Forwarded-For`; первому адресу не
+  верит. Этот адрес он передаёт API для лимитов на заявки и вход, а API верит ему только с общим секретом
+  `DOCFLOW_INTERNAL_TOKEN` — одинаковым у сайта и API. Значения по умолчанию нет: задайте случайное в `.env`
+  (пусто — API не верит адресу от сайта, и все посетители делят один лимит по адресу контейнера сайта);
 - загрузка документов идёт через сайт, поэтому лимит тела ~200 MB (`client_max_body_size 200m;`) ставьте только
   на `location /app/upload`, на остальных адресах оставьте малый;
 - `DOCFLOW_API_URL` у сайта — внутренний адрес API, наружу порт 8000 в проде не публикуется.
@@ -142,12 +147,13 @@ def verify(secret: str, body: bytes, signature: str) -> bool:
 
 | Сервис | На хосте | Внутри сети compose |
 |---|---|---|
-| API | 8000 (все интерфейсы — для dev) | `api:8000` |
+| Сайт | 127.0.0.1:3000 | `web:3000` |
+| API | 127.0.0.1:8000 | `api:8000` |
 | Postgres | **127.0.0.1:55432** (5432 оставлен локальному Postgres) | `postgres:5432` |
 | Redis | 127.0.0.1:6379, с паролем | `redis:6379` |
 | S3 (SeaweedFS) | 127.0.0.1:8333 | `s3:8333` |
 
-Хранилища опубликованы только на loopback. Секреты (`DOCFLOW_PG_USER`/`DOCFLOW_PG_PASSWORD`,
+API, сайт и хранилища опубликованы только на loopback. Секреты (`DOCFLOW_PG_USER`/`DOCFLOW_PG_PASSWORD`,
 `DOCFLOW_REDIS_PASSWORD`, `DOCFLOW_S3_ACCESS_KEY`/`DOCFLOW_S3_SECRET_KEY`) compose берёт из окружения или `.env`
 (образец — `.env.example`); без них подставляются dev-значения. Файл ключей SeaweedFS генерируется при старте
 контейнера из `DOCFLOW_S3_*`.
@@ -212,5 +218,5 @@ USER`). Пароли подставляются в URL без экраниров
 
 Никогда не публикуйте наружу порты Redis, Postgres и S3 — в compose они привязаны к `127.0.0.1`, так и оставьте.
 Особенно Redis: arq хранит в нём задачи в pickle, и любой, кто может записать в Redis, исполнит свой код в
-воркере. API в `docker-compose.yml` слушает `0.0.0.0:8000` ради удобства dev; в проде ставьте его за прокси с TLS
-и публикуйте только прокси.
+воркере. API и сайт в `docker-compose.yml` тоже опубликованы только на `127.0.0.1`; в проде ставьте их за прокси с
+TLS и публикуйте только прокси.

@@ -7,6 +7,7 @@ import { ReviewForm } from "@/components/app/ReviewForm";
 import { StatusBadge } from "@/components/ui";
 import { ApiError } from "@/lib/api";
 import { fieldLabel, formatDateTime } from "@/lib/format";
+import { isDocId } from "@/lib/ids";
 import { INFO_CODES, notesByField } from "@/lib/review-form";
 import { apiFetchAuthed } from "@/lib/session";
 import type { DocSchema, DocumentPayload, Issue } from "@/lib/types";
@@ -85,6 +86,7 @@ function Issues({ issues, schema }: { issues: Issue[]; schema: DocSchema | null 
 
 export default async function DocumentPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
+  if (!isDocId(id)) notFound();
   let doc: DocumentPayload;
   try {
     doc = await apiFetchAuthed<DocumentPayload>(`/v1/documents/${encodeURIComponent(id)}`);

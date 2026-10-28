@@ -62,14 +62,23 @@ export function AuditForm() {
       ) : null}
 
       <div className="grid gap-6 md:grid-cols-2">
-        <Field label="Имя *" name="name" autoComplete="name" required defaultValue={v.name} error={e.name} />
-        <Field label="Компания" name="company" autoComplete="organization" defaultValue={v.company} />
+        <Field
+          label="Имя *"
+          name="name"
+          autoComplete="name"
+          required
+          maxLength={100}
+          defaultValue={v.name}
+          error={e.name}
+        />
+        <Field label="Компания" name="company" autoComplete="organization" maxLength={200} defaultValue={v.company} />
       </div>
 
       <Field
         label="Контакт *"
         name="contact"
         required
+        maxLength={200}
         hint="Телефон, Telegram или email — как вам удобнее."
         defaultValue={v.contact}
         error={e.contact}
@@ -108,6 +117,7 @@ export function AuditForm() {
         rows={3}
         label="Какие документы"
         name="documents"
+        maxLength={2000}
         hint="Например: заказ-наряды от руки, счета, ТТН."
         defaultValue={v.documents}
       />
@@ -116,6 +126,7 @@ export function AuditForm() {
         rows={3}
         label="Что ещё важно"
         name="message"
+        maxLength={2000}
         hint="Куда передавать данные, где хранятся документы сейчас, сроки."
         defaultValue={v.message}
       />

@@ -3,6 +3,7 @@
 import { redirect, unstable_rethrow } from "next/navigation";
 
 import { ApiError } from "@/lib/api";
+import { isDocId } from "@/lib/ids";
 import { buildData } from "@/lib/review-form";
 import { apiFetchAuthed } from "@/lib/session";
 import type { DocSchema, DocumentList, DocumentPayload, ReviewRequest } from "@/lib/types";
@@ -23,6 +24,7 @@ export async function reject(id: string, _prev: ReviewState, form: FormData): Pr
 }
 
 async function review(id: string, decision: ReviewRequest["decision"], form: FormData): Promise<ReviewState> {
+  if (!isDocId(id)) return { error: "Документ не найден" };
   const note = String(form.get("note") ?? "").trim();
   if (note.length > NOTE_MAX) return { error: `Комментарий длиннее ${NOTE_MAX} символов` };
   if (decision === "reject" && !note) return { error: "Укажите причину отклонения" };

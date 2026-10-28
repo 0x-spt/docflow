@@ -1,7 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { startTransition, useActionState, useEffect, useRef, useState, type FormEvent } from "react";
+import {
+  startTransition,
+  useActionState,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type KeyboardEvent,
+} from "react";
 
 import { approve, reject, type ReviewState } from "@/app/app/documents/[id]/actions";
 import { Button, Field } from "@/components/ui";
@@ -286,11 +294,20 @@ export function ReviewForm({
     startTransition(() => (decision === "reject" ? rejectAction(form) : approveAction(form)));
   }
 
+  // Enter в поле ввода не отправляет форму: иначе неявная отправка нажала бы первую кнопку — «Подтвердить».
+  // Решение принимается только явным нажатием кнопки; в комментарии (textarea) Enter — перенос строки.
+  function onKeyDown(event: KeyboardEvent<HTMLFormElement>) {
+    const target = event.target as HTMLElement;
+    if (event.key === "Enter" && (target instanceof HTMLInputElement || target instanceof HTMLSelectElement)) {
+      event.preventDefault();
+    }
+  }
+
   const scalars = schema.fields.filter((f) => f.type !== "table");
   const tables = schema.fields.filter((f) => f.type === "table");
 
   return (
-    <form onSubmit={onSubmit} aria-busy={pending} className="flex flex-col gap-8">
+    <form onSubmit={onSubmit} onKeyDown={onKeyDown} aria-busy={pending} className="flex flex-col gap-8">
       <div className="grid gap-x-4 gap-y-5 sm:grid-cols-2">
         {scalars.map((f) => (
           <ScalarField key={f.name} spec={f} value={data[f.name]} notes={notes[f.name]} />

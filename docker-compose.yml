@@ -1,7 +1,7 @@
 # Полный стек DocFlow: docker compose up -d --build
-# Порты на хосте: API 8000 (0.0.0.0 — для dev), Postgres 55432 (5432 часто занят локальным Postgres), Redis 6379,
-# S3 8333. Хранилища опубликованы только на 127.0.0.1: в Redis лежат задачи arq в pickle — кто может писать
-# в Redis, тот исполняет код в воркере.
+# Порты на хосте (все — только 127.0.0.1; в проде наружу публикуется лишь обратный прокси): сайт 3000, API 8000,
+# Postgres 55432 (5432 часто занят локальным Postgres), Redis 6379, S3 8333. Хранилищам loopback особенно
+# важен: в Redis лежат задачи arq в pickle — кто может писать в Redis, тот исполняет код в воркере.
 # Секреты — из окружения хоста или .env рядом с этим файлом (образец — .env.example); значения по умолчанию
 # годятся только для локальной разработки.
 x-app-env: &app-env
@@ -20,8 +20,9 @@ x-app-env: &app-env
   # локальный режим (152-ФЗ): Ollama на хосте; в проде — адрес GPU-сервера внутри периметра клиента
   DOCFLOW_OLLAMA_URL: ${DOCFLOW_OLLAMA_URL:-http://host.docker.internal:11434}
   DOCFLOW_OLLAMA_MODEL: ${DOCFLOW_OLLAMA_MODEL:-qwen3-vl:30b-a3b-instruct}
-  # общий секрет с сайтом: по нему API доверяет X-Client-IP (пусто = не доверять)
-  DOCFLOW_INTERNAL_TOKEN: ${DOCFLOW_INTERNAL_TOKEN:-docflow-internal-dev}
+  # общий секрет с сайтом: по нему API доверяет X-Client-IP. Без значения по умолчанию: пусто = API не верит
+  # X-Client-IP и считает лимиты по адресу контейнера сайта. Задайте случайное значение в .env
+  DOCFLOW_INTERNAL_TOKEN: ${DOCFLOW_INTERNAL_TOKEN:-}
 
 services:
   postgres:
@@ -91,8 +92,8 @@ services:
     image: docflow-api
     build: {context: ., dockerfile: docker/Dockerfile, target: api}
     environment: *app-env
-    # API открыт на всех интерфейсах ради dev (телефон в той же сети); в проде — за прокси, см. README
-    ports: ["8000:8000"]
+    # только loopback: в проде наружу публикуется лишь обратный прокси с TLS, см. README
+    ports: ["127.0.0.1:8000:8000"]
     depends_on:
       migrate: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
@@ -131,9 +132,11 @@ services:
     environment:
       DOCFLOW_API_URL: http://api:8000
       DOCFLOW_PUBLIC_API_URL: ${DOCFLOW_PUBLIC_API_URL:-http://localhost:8000}
-      DOCFLOW_INTERNAL_TOKEN: ${DOCFLOW_INTERNAL_TOKEN:-docflow-internal-dev}
-      COOKIE_SECURE: "false"  # dev по http; в проде за https убрать
-    ports: ["3000:3000"]
+      DOCFLOW_INTERNAL_TOKEN: ${DOCFLOW_INTERNAL_TOKEN:-}
+      # false — dev по http; в проде за https задайте COOKIE_SECURE=true в .env
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+    # только loopback: в проде наружу публикуется лишь обратный прокси с TLS
+    ports: ["127.0.0.1:3000:3000"]
     depends_on:
       api: {condition: service_healthy}
     restart: unless-stopped
