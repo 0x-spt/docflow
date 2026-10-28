@@ -9,10 +9,10 @@
 """
 
 import re
-from datetime import date
+from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import httpx
 
@@ -41,7 +41,8 @@ FIELDS = (
     "НомерВходящегоДокумента",
     "ДатаВходящегоДокумента",
     "Комментарий",
-    "ЦенаВключаетНДС",
+    "СуммаВключаетНДС",
+    "ВалютаДокумента_Key",
     "СуммаДокумента",
     "Товары",
     "Номенклатура_Key",
@@ -74,9 +75,14 @@ ITEM_COLUMNS = {
     "item_amount_with_vat": "amount_with_vat",
 }
 MAX_MISSING_SHOWN = 3
+MIN_FALLBACK_NAME = 4  # короче — поиск по вхождению не делаем
+FALLBACK_LENGTH_RATIO = 3  # наименование в 1С не длиннее распознанного в 3 раза
 _GUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 _NAME = re.compile(r"[^\W\d]\w*")  # имя объекта/реквизита 1С: буквы (в т. ч. кириллица), цифры, «_»
 _KOPECK = Decimal("0.01")
+# больше триллиона рублей/штук в одной строке не бывает: это мусор OCR, а 1С и Decimal на таком ломаются
+MAX_AMOUNT = Decimal(10) ** 12
+BAD_AMOUNT = "некорректная сумма в документе"
 _AUTH_MESSAGE = "1С не приняла логин или пароль (или у пользователя нет прав на OData)"
 
 
@@ -89,6 +95,10 @@ def _root(raw: Any) -> str:
     url = str(raw or "").strip().rstrip("/")
     if not url:
         raise ConnectorError("не указан адрес публикации 1С")
+    if "@" in urlsplit(url).netloc:
+        raise ConnectorError(
+            "в адресе публикации 1С не должно быть логина и пароля — укажите их в полях «Пользователь 1С» и «Пароль»"
+        )
     if not url.endswith(ODATA_SUFFIX):
         url += ODATA_SUFFIX
     return url + "/"
@@ -139,8 +149,19 @@ def _out(value: Decimal) -> int | float:
     return int(value) if value == value.to_integral_value() else float(value)
 
 
+def _checked(value: Decimal | None) -> Decimal | None:
+    if value is not None and abs(value) >= MAX_AMOUNT:
+        raise ConnectorError(BAD_AMOUNT)
+    return value
+
+
 def _kopecks(value: Decimal) -> Decimal:
-    return value.quantize(_KOPECK, rounding=ROUND_HALF_UP)
+    try:
+        result = value.quantize(_KOPECK, rounding=ROUND_HALF_UP)
+    except ArithmeticError:  # InvalidOperation: значение не помещается в точность Decimal
+        raise ConnectorError(BAD_AMOUNT) from None
+    _checked(result)
+    return result
 
 
 def _odata_date(d: date) -> str:
@@ -163,6 +184,7 @@ class _Settings:
         self.organization = self._guid(config, "organization_key", "Организация (Ref_Key)", required=True)
         self.warehouse = self._guid(config, "warehouse_key", "Склад (Ref_Key)")
         self.contract = self._guid(config, "contract_key", "Договор (Ref_Key)")
+        self.currency = self._guid(config, "currency_key", "Валюта (Ref_Key)")
         rate = str(config.get("vat_rate") or DEFAULT_VAT).strip()
         if rate not in VAT_RATES:
             raise ConnectorError(f"«Ставка НДС»: выберите одну из {', '.join(VAT_RATES)}")
@@ -288,11 +310,16 @@ async def _find_nomenclature(s: _Session, st: _Settings, name: str) -> str | Non
     exact = await s.find(st.nomenclature, f"Description eq {_literal(name)} and {flt}", "Ref_Key,Description", 1)
     if exact:
         return exact[0]["Ref_Key"]
-    # запасной вариант: наименование в 1С длиннее распознанного — берём, только если совпадение одно
+    # запасной вариант: наименование в 1С длиннее распознанного — берём, только если совпадение одно и не «чужое»:
+    # короткое имя («Мел») найдётся где угодно, а имя в 1С втрое длиннее — уже другая позиция
+    if len(name) < MIN_FALLBACK_NAME:
+        return None
     similar = await s.find(
         st.nomenclature, f"substringof({_literal(name)}, Description) and {flt}", "Ref_Key,Description", 2
     )
-    return similar[0]["Ref_Key"] if len(similar) == 1 else None
+    if len(similar) != 1 or len(str(similar[0].get("Description") or "")) > FALLBACK_LENGTH_RATIO * len(name):
+        return None
+    return similar[0]["Ref_Key"]
 
 
 async def _nomenclature(s: _Session, st: _Settings, names: list[str]) -> dict[str, str]:
@@ -393,7 +420,7 @@ def _lines(src: _Sources, doc: ExportDoc) -> list[_Line]:
     lines = []
     for i, row in enumerate(src.rows(doc), start=1):
         name = " ".join(clean(src.cell(row, "item_name")).split())
-        qty, price, amount = (_num(src.cell(row, r)) for r in ("item_qty", "item_price", "item_amount"))
+        qty, price, amount = (_checked(_num(src.cell(row, r))) for r in ("item_qty", "item_price", "item_amount"))
         if not name:
             if qty is None and price is None and amount is None:
                 continue  # пустая строка таблицы
@@ -401,12 +428,20 @@ def _lines(src: _Sources, doc: ExportDoc) -> list[_Line]:
         if amount is None and qty is not None and price is not None:
             amount = _kopecks(qty * price)
         if qty is None:
-            qty = (amount / price).quantize(Decimal("0.001")) if amount is not None and price else Decimal(1)
+            try:
+                qty = (amount / price).quantize(Decimal("0.001")) if amount is not None and price else Decimal(1)
+            except ArithmeticError:
+                raise ConnectorError(BAD_AMOUNT) from None
+            _checked(qty)
         if price is None:
             price = _kopecks(amount / qty) if amount is not None and qty else Decimal(0)
         lines.append(
             _Line(
-                name, qty, price, amount if amount is not None else Decimal(0), _num(src.cell(row, "item_vat_amount"))
+                name,
+                qty,
+                price,
+                amount if amount is not None else Decimal(0),
+                _checked(_num(src.cell(row, "item_vat_amount"))),
             )
         )
     return lines
@@ -434,6 +469,18 @@ def _incoming(src: _Sources, doc: ExportDoc) -> tuple[str, date | None]:
         except ValueError:
             issued = None
     return number, issued
+
+
+def _entity_properties(metadata: str, entity: str) -> set[str] | None:
+    """Реквизиты типа объекта из $metadata; None — тип не описан (тогда не проверяем)."""
+    m = re.search(rf"<EntityType\b[^>]*\bName=\"{re.escape(entity)}\"[^>]*>(.*?)</EntityType>", metadata, re.S)
+    return set(re.findall(r"<Property\b[^>]*\bName=\"([^\"]+)\"", m.group(1))) if m else None
+
+
+def _date_window(day: date) -> str:
+    """Дата документа ±1 день: сужает поиск по комментарию (иначе 1С перебирает все документы)."""
+    since, until = day - timedelta(days=1), day + timedelta(days=1)
+    return f" and Date ge datetime'{since:%Y-%m-%d}T00:00:00' and Date le datetime'{until:%Y-%m-%d}T23:59:59'"
 
 
 class OneCOData(BaseConnector):
@@ -470,6 +517,12 @@ class OneCOData(BaseConnector):
             "contract_key", "Договор (Ref_Key)", help="GUID договора из Catalog_ДоговорыКонтрагентов; обычно пусто."
         ),
         FieldDef(
+            "currency_key",
+            "Валюта (Ref_Key)",
+            help="GUID валюты из Catalog_Валюты; пусто — валюту, как и счета учёта, заполнит бухгалтер "
+            "(«Заполнить счета учета» в документе).",
+        ),
+        FieldDef(
             "vat_rate",
             "Ставка НДС",
             type="select",
@@ -486,8 +539,9 @@ class OneCOData(BaseConnector):
             "field_names",
             "Имена реквизитов",
             type="textarea",
-            help="Только для нетиповых конфигураций: строки «Стандартное=Своё», например «Комментарий=Примечание». "
-            f"Стандартные: {', '.join(FIELDS)}.",
+            help="Для нетиповых конфигураций: строки «Стандартное=Своё», например «Комментарий=Примечание». "
+            "Умолчания — «Бухгалтерия предприятия 3.0»; в УТ 11 и ERP флаг НДС называется иначе — добавьте "
+            f"«СуммаВключаетНДС=ЦенаВключаетНДС». Стандартные: {', '.join(FIELDS)}.",
         ),
     ]
     secret_fields = [
@@ -506,6 +560,14 @@ class OneCOData(BaseConnector):
                 f"в публикации OData нет объектов: {', '.join(missing)} — включите их в составе стандартного "
                 "интерфейса OData"
             )
+        # флаг НДС: в БП 3.0 — СуммаВключаетНДС, в УТ 11/ERP — ЦенаВключаетНДС; проверяем, если тип описан
+        props = _entity_properties(resp.text, st.document)
+        flag = st.f["СуммаВключаетНДС"]
+        if props is not None and flag not in props:
+            raise ConnectorError(
+                f"у {st.document} нет реквизита {flag} — для УТ/ERP добавьте в «Имена реквизитов» строку "
+                "«СуммаВключаетНДС=ЦенаВключаетНДС»"
+            )
         return "Публикация 1С доступна, объекты найдены"
 
     async def export(self, ctx: DestCtx, doc: ExportDoc) -> str | None:
@@ -520,9 +582,9 @@ class OneCOData(BaseConnector):
                 "в документе не распознан контрагент (нет ни названия, ни ИНН) — выгрузить в 1С нельзя"
             )
 
-        existing = await s.find(
-            st.document, f"substringof({_literal(marker(doc))}, {f['Комментарий']})", "Ref_Key,Number"
-        )
+        # без даты документа ставим «сегодня», а повтор может прийти завтра — тогда ищем без окна по дате
+        flt = f"substringof({_literal(marker(doc))}, {f['Комментарий']})"
+        existing = await s.find(st.document, flt + (_date_window(doc.issued) if doc.issued else ""), "Ref_Key,Number")
         if existing:
             return existing[0]["Ref_Key"]
 
@@ -546,6 +608,8 @@ class OneCOData(BaseConnector):
             body[f["ДоговорКонтрагента_Key"]] = st.contract
         if st.warehouse:
             body[f["Склад_Key"]] = st.warehouse
+        if st.currency:
+            body[f["ВалютаДокумента_Key"]] = st.currency
         if st.kind == "purchase":
             if number:
                 body[f["НомерВходящегоДокумента"]] = number
@@ -555,7 +619,7 @@ class OneCOData(BaseConnector):
             on_top = _vat_on_top(src, doc, lines)
             rate = st.vat_percent
             rows, total = [], Decimal(0)
-            for i, ln in enumerate(lines, start=1):
+            for ln in lines:
                 if not rate:
                     vat = Decimal(0)
                 elif on_top:
@@ -565,7 +629,6 @@ class OneCOData(BaseConnector):
                 total += ln.amount + (vat if on_top else 0)
                 rows.append(
                     {
-                        "LineNumber": str(i),
                         f["Номенклатура_Key"]: goods[ln.name],
                         f["Количество"]: _out(ln.qty),
                         f["Цена"]: _out(ln.price),
@@ -574,11 +637,11 @@ class OneCOData(BaseConnector):
                         f["СуммаНДС"]: _out(vat),
                     }
                 )
-            body[f["ЦенаВключаетНДС"]] = not on_top
+            body[f["СуммаВключаетНДС"]] = not on_top
             body[f["СуммаДокумента"]] = _out(total)
             body[f["Товары"]] = rows
         elif (doc_total := total_of(doc)) is not None:
-            body[f["ЦенаВключаетНДС"]] = True
+            body[f["СуммаВключаетНДС"]] = True
             body[f["СуммаДокумента"]] = doc_total
         return await s.create(st.document, body)
 

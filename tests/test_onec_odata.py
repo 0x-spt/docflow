@@ -26,10 +26,12 @@ GOODS = "Catalog_Номенклатура"
 METADATA = """<?xml version="1.0" encoding="UTF-8"?>
 <edmx:Edmx xmlns:edmx="http://schemas.microsoft.com/ado/2007/06/edmx" Version="1.0">
 <edmx:DataServices><Schema xmlns="http://schemas.microsoft.com/ado/2009/11/edm" Namespace="StandardODATA">
+{types}
 <EntityContainer Name="InfoBase" m:IsDefaultEntityContainer="true">
 {sets}
 </EntityContainer></Schema></edmx:DataServices></edmx:Edmx>"""
 ALL_SETS = [PARTNERS, GOODS, PURCHASE, f"{PURCHASE}_Товары", SALE, f"{SALE}_Товары"]
+DOC_PROPS = ["Ref_Key", "Date", "Комментарий", "СуммаВключаетНДС"]
 
 
 @pytest.fixture
@@ -86,7 +88,8 @@ def _literal(flt: str, pattern: str) -> str | None:
 class OneC:
     """Имитация стандартного интерфейса OData 1С: справочники и документы в памяти, JSON как у 1С."""
 
-    def __init__(self, router, partners=None, goods=None, docs=None, sets=None):
+    def __init__(self, router, partners=None, goods=None, docs=None, sets=None, doc_props=None):
+        self.doc_props = DOC_PROPS if doc_props is None else doc_props
         self.partners: list[dict] = list(partners or [])
         self.goods: list[dict] = list(goods or [{"Description": "Бумага А4"}, {"Description": "Ручка"}])
         for g in self.goods:
@@ -110,7 +113,14 @@ class OneC:
             return self.fail[(request.method, entity)]
         if entity == "$metadata":
             sets = "\n".join(f'<EntitySet Name="{s}" EntityType="StandardODATA.{s}"/>' for s in self.sets)
-            return httpx.Response(200, text=METADATA.format(sets=sets), headers={"content-type": "application/xml"})
+            props = "".join(f'<Property Name="{p}" Type="Edm.String" Nullable="true"/>' for p in self.doc_props)
+            types = "\n".join(
+                f'<EntityType Name="{s}"><Key><PropertyRef Name="Ref_Key"/></Key>{props}</EntityType>'
+                for s in self.sets
+                if s.startswith("Document_") and not s.endswith("_Товары")
+            )
+            text = METADATA.format(sets=sets, types=types)
+            return httpx.Response(200, text=text, headers={"content-type": "application/xml"})
         if entity not in self.sets:
             return httpx.Response(404, json={"odata.error": {"code": "", "message": {"lang": "ru", "value": "Нет"}}})
         if query.get("$format") != "json":
@@ -141,6 +151,10 @@ class OneC:
         if mark is not None and mark not in row.get("Комментарий", ""):
             return False
         if "DeletionMark eq false" in flt and row.get("DeletionMark"):
+            return False
+        if (since := _literal(flt, r"Date ge datetime'([^']*)'")) is not None and row.get("Date", "") < since:
+            return False
+        if (until := _literal(flt, r"Date le datetime'([^']*)'")) is not None and row.get("Date", "") > until:
             return False
         return True
 
@@ -204,10 +218,10 @@ async def test_export_creates_counterparty_and_document(http):
     assert doc["ВидОперации"] == "Товары"
     assert doc["НомерВходящегоДокумента"] == "42" and doc["ДатаВходящегоДокумента"] == "2026-10-05T00:00:00"
     assert doc["Комментарий"] == f"DocFlow docflow:{DOC_ID} · https://site/app/documents/1"
-    assert doc["ЦенаВключаетНДС"] is True and doc["СуммаДокумента"] == 1220
+    assert doc["СуммаВключаетНДС"] is True and doc["СуммаДокумента"] == 1220
+    assert "ЦенаВключаетНДС" not in doc and "ВалютаДокумента_Key" not in doc
     rows = doc["Товары"]
     assert rows[0] == {
-        "LineNumber": "1",
         "Номенклатура_Key": one.goods[0]["Ref_Key"],
         "Количество": 2,
         "Цена": 500,
@@ -215,7 +229,7 @@ async def test_export_creates_counterparty_and_document(http):
         "СтавкаНДС": "НДС22",
         "СуммаНДС": 180.33,  # 1000 * 22 / 122
     }
-    assert rows[1]["LineNumber"] == "2" and rows[1]["Номенклатура_Key"] == one.goods[1]["Ref_Key"]
+    assert "LineNumber" not in rows[1] and rows[1]["Номенклатура_Key"] == one.goods[1]["Ref_Key"]
     assert rows[1]["СуммаНДС"] == 39.67
     # без проводки: только поиск и создание
     assert [m for m, *_ in one.calls].count("POST") == 2
@@ -227,7 +241,7 @@ async def test_odata_query_format(http):
         one = OneC(router)
         await REGISTRY["onec_odata"].export(make_ctx(http), make_doc())
     first = one.gets(PURCHASE)[0]
-    assert first["$filter"] == f"substringof('docflow:{DOC_ID}', Комментарий)"
+    assert first["$filter"].startswith(f"substringof('docflow:{DOC_ID}', Комментарий) and Date ge ")
     assert first["$format"] == "json" and first["$select"] == "Ref_Key,Number"
     assert any("ИНН eq '7707083893'" in q["$filter"] for q in one.gets(PARTNERS))
     assert all("+" not in u.split("?", 1)[1] for u in one.raw_urls if "?" in u)  # пробелы — %20, не «+»
@@ -392,7 +406,7 @@ async def test_upd_amounts_without_vat(http):
         one = OneC(router)
         await REGISTRY["onec_odata"].export(make_ctx(http), make_doc("upd_ru", items=items, total=1220, vat=220))
     doc = one.posts(PURCHASE)[0]
-    assert doc["ЦенаВключаетНДС"] is False and doc["СуммаДокумента"] == 1220
+    assert doc["СуммаВключаетНДС"] is False and doc["СуммаДокумента"] == 1220
     assert doc["Товары"][0]["Сумма"] == 1000 and doc["Товары"][0]["СуммаНДС"] == 220
 
 
@@ -401,7 +415,7 @@ async def test_invoice_vat_on_top(http):
         one = OneC(router)
         await REGISTRY["onec_odata"].export(make_ctx(http), make_doc(subtotal=1220, total=1488.4, vat=268.4))
     doc = one.posts(PURCHASE)[0]
-    assert doc["ЦенаВключаетНДС"] is False and doc["СуммаДокумента"] == 1488.4
+    assert doc["СуммаВключаетНДС"] is False and doc["СуммаДокумента"] == 1488.4
     assert doc["Товары"][0]["СуммаНДС"] == 220
 
 
@@ -491,13 +505,17 @@ async def test_connection_error_retryable(http):
     assert err.value.retryable and "1c.example.ru" not in err.value.message
 
 
-async def test_credentials_in_url_never_in_message(http):
+@pytest.mark.parametrize("method", ["test", "export"])
+async def test_credentials_in_url_rejected(http, method):
+    connector = REGISTRY["onec_odata"]
     with respx.mock(assert_all_called=False) as router:
-        router.route(url__startswith="https://user:").mock(return_value=httpx.Response(500))
-        router.route(url__startswith="https://1c.example.ru/").mock(return_value=httpx.Response(500))
+        one = OneC(router)
+        ctx = make_ctx(http, base_url=f"https://user:{PASSWORD}@1c.example.ru/base")
         with pytest.raises(ConnectorError) as err:
-            await REGISTRY["onec_odata"].test(make_ctx(http, base_url=f"https://user:{PASSWORD}@1c.example.ru/base"))
+            await (connector.test(ctx) if method == "test" else connector.export(ctx, make_doc()))
+    assert not err.value.retryable and "логина и пароля" in err.value.message
     assert PASSWORD not in err.value.message and "user" not in err.value.message
+    assert not one.calls
 
 
 @pytest.mark.parametrize(
@@ -550,3 +568,111 @@ async def test_row_without_name_is_permanent_error(http):
         with pytest.raises(ConnectorError) as err:
             await REGISTRY["onec_odata"].export(make_ctx(http), make_doc(items=items))
     assert not err.value.retryable and "строка 1" in err.value.message
+
+
+async def test_test_checks_vat_flag_property(http):
+    with respx.mock() as router:
+        OneC(router, doc_props=["Ref_Key", "Date", "ЦенаВключаетНДС"])
+        with pytest.raises(ConnectorError) as err:
+            await REGISTRY["onec_odata"].test(make_ctx(http))
+    assert not err.value.retryable
+    assert "СуммаВключаетНДС" in err.value.message and "Имена реквизитов" in err.value.message
+
+    with respx.mock() as router:  # УТ/ERP: флаг переименован — проверяется уже своё имя
+        OneC(router, doc_props=["Ref_Key", "Date", "ЦенаВключаетНДС"])
+        msg = await REGISTRY["onec_odata"].test(make_ctx(http, field_names="СуммаВключаетНДС=ЦенаВключаетНДС"))
+    assert msg == "Публикация 1С доступна, объекты найдены"
+
+
+async def test_test_skips_flag_check_without_entity_type(http):
+    with respx.mock() as router:
+        OneC(router, sets=ALL_SETS, doc_props=[])
+        router.routes.clear()
+        router.route(url__startswith=ROOT).mock(
+            return_value=httpx.Response(
+                200, text=METADATA.format(types="", sets="".join(f'<EntitySet Name="{s}"/>' for s in ALL_SETS))
+            )
+        )
+        msg = await REGISTRY["onec_odata"].test(make_ctx(http))
+    assert msg == "Публикация 1С доступна, объекты найдены"
+
+
+async def test_vat_flag_renamed_for_ut_erp(http):
+    with respx.mock() as router:
+        one = OneC(router)
+        await REGISTRY["onec_odata"].export(make_ctx(http, field_names="СуммаВключаетНДС=ЦенаВключаетНДС"), make_doc())
+    doc = one.posts(PURCHASE)[0]
+    assert doc["ЦенаВключаетНДС"] is True and "СуммаВключаетНДС" not in doc
+
+
+async def test_currency_key(http):
+    cur = "bbbbbbbb-0000-0000-0000-000000000643"
+    with respx.mock() as router:
+        one = OneC(router)
+        await REGISTRY["onec_odata"].export(make_ctx(http, currency_key=cur.upper()), make_doc())
+    assert one.posts(PURCHASE)[0]["ВалютаДокумента_Key"] == cur
+    with respx.mock(assert_all_called=False) as router:
+        OneC(router)
+        with pytest.raises(ConnectorError) as err:
+            await REGISTRY["onec_odata"].export(make_ctx(http, currency_key="рубль"), make_doc())
+    assert not err.value.retryable and "Валюта" in err.value.message
+
+
+async def test_idempotency_lookup_narrowed_by_date(http):
+    with respx.mock() as router:
+        one = OneC(router)
+        await REGISTRY["onec_odata"].export(make_ctx(http), make_doc())
+        flt = one.gets(PURCHASE)[0]["$filter"]
+        assert flt == (
+            f"substringof('docflow:{DOC_ID}', Комментарий)"
+            " and Date ge datetime'2026-10-04T00:00:00' and Date le datetime'2026-10-06T23:59:59'"
+        )
+        one.calls.clear()
+        await REGISTRY["onec_odata"].export(make_ctx(http), make_doc())
+    assert [(m, e) for m, e, _, _ in one.calls] == [("GET", PURCHASE)]
+
+
+async def test_idempotency_without_date_plain_filter(http):
+    doc = make_doc()
+    doc.issued = None
+    with respx.mock() as router:
+        one = OneC(router)
+        await REGISTRY["onec_odata"].export(make_ctx(http), doc)
+    assert one.gets(PURCHASE)[0]["$filter"] == f"substringof('docflow:{DOC_ID}', Комментарий)"
+
+
+@pytest.mark.parametrize(
+    ("ocr", "in_1c"),
+    [
+        ("Мел", "Мел белый"),  # короче 4 символов — без запасного поиска
+        ("Клей", "Клей ПВА канцелярский 125 мл в тюбике"),  # в 1С длиннее 3× — другая позиция
+    ],
+)
+async def test_nomenclature_fallback_limits(http, ocr, in_1c):
+    items = [{"name": ocr, "qty": 1, "price": 5, "amount": 5}]
+    with respx.mock() as router:
+        one = OneC(router, goods=[{"Description": in_1c}])
+        with pytest.raises(ConnectorError) as err:
+            await REGISTRY["onec_odata"].export(make_ctx(http), make_doc(items=items))
+    assert f"«{ocr}»" in err.value.message and not one.posts(PURCHASE)
+    substring_queries = [q for q in one.gets(GOODS) if "substringof" in q["$filter"]]
+    assert bool(substring_queries) == (len(ocr) >= 4)
+
+
+async def test_nomenclature_fallback_within_limit(http):
+    items = [{"name": "Клей ПВА", "qty": 1, "price": 5, "amount": 5}]
+    with respx.mock() as router:
+        one = OneC(router, goods=[{"Description": "Клей ПВА 125 мл"}])
+        await REGISTRY["onec_odata"].export(make_ctx(http), make_doc(items=items))
+    assert one.posts(PURCHASE)[0]["Товары"][0]["Номенклатура_Key"] == one.goods[0]["Ref_Key"]
+
+
+@pytest.mark.parametrize("amount", [1e40, "1e40", "1" * 30])
+async def test_absurd_amount_is_permanent(http, amount):
+    items = [{"name": "Бумага А4", "qty": 2, "price": None, "amount": amount}]
+    with respx.mock(assert_all_called=False) as router:
+        one = OneC(router)
+        with pytest.raises(ConnectorError) as err:
+            await REGISTRY["onec_odata"].export(make_ctx(http), make_doc(items=items))
+    assert not err.value.retryable and err.value.message == "некорректная сумма в документе"
+    assert not one.posts(PURCHASE)
