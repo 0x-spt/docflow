@@ -10,6 +10,8 @@ import type { ConnectorInfo, Destination, TestResult } from "@/lib/types";
 
 export type SaveState = {
   error?: string;
+  /** Ошибки по полям настроек: имя поля -> текст */
+  fieldErrors?: Record<string, string>;
   saved?: boolean;
   /** Несекретные значения для повторного показа после ошибки. Секреты сюда не попадают никогда. */
   name?: string;
@@ -19,11 +21,13 @@ export type SaveState = {
 const FAILED = "Сервис недоступен. Попробуйте ещё раз.";
 const FORBIDDEN = "Подключениями управляет владелец аккаунта.";
 const LIST = "/app/integrations";
+const NUMBER_RE = /^-?\d+([.,]\d+)?$/;
 
 /** Коды ошибок для ?err=… — страница показывает по ним фиксированный текст. */
 export type IntegrationErr = "forbidden" | "failed";
 
-function parseMapping(raw: string): Record<string, string> {
+/** keepEmpty: у Google Таблиц пустое название колонки значит «поле включено, название по умолчанию». */
+function parseMapping(raw: string, keepEmpty: boolean): Record<string, string> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw || "{}");
@@ -33,7 +37,7 @@ function parseMapping(raw: string): Record<string, string> {
   const out: Record<string, string> = {};
   if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
     for (const [k, v] of Object.entries(parsed)) {
-      if (typeof v === "string" && v.trim()) out[k] = v.trim();
+      if (typeof v === "string" && (keepEmpty || v.trim())) out[k] = v.trim();
     }
   }
   return out;
@@ -59,15 +63,18 @@ export async function saveDestination(_prev: SaveState, form: FormData): Promise
 
   const rawConfig: Record<string, string> = {};
   const config: Record<string, string | number> = {};
+  const fieldErrors: Record<string, string> = {};
   for (const f of connector.config_fields) {
     const v = String(form.get(`c_${f.name}`) ?? "").trim();
     rawConfig[f.name] = v;
     if (v === "") continue;
     if (f.type === "number") {
-      const n = Number(v.replace(",", "."));
-      if (!Number.isFinite(n)) return { error: `«${f.label}»: введите число.`, name, config: rawConfig };
-      config[f.name] = n;
+      if (!NUMBER_RE.test(v)) fieldErrors[f.name] = "Введите число, например 25 или 0,5.";
+      else config[f.name] = Number(v.replace(",", "."));
     } else config[f.name] = v;
+  }
+  if (Object.keys(fieldErrors).length > 0) {
+    return { error: "Исправьте отмеченные поля.", fieldErrors, name, config: rawConfig };
   }
   const secrets: Record<string, string> = {};
   for (const f of connector.secret_fields) {
@@ -75,7 +82,7 @@ export async function saveDestination(_prev: SaveState, form: FormData): Promise
     if (v.trim() !== "") secrets[f.name] = v;
   }
   if (!name) return { error: "Введите название подключения.", name, config: rawConfig };
-  const mapping = parseMapping(String(form.get("mapping") ?? ""));
+  const mapping = parseMapping(String(form.get("mapping") ?? ""), kind === "google_sheets");
 
   let newId: string | null = null;
   try {

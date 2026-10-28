@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useMemo, useState } from "react";
+import { useActionState, useEffect, useMemo, useRef, useState } from "react";
 
 import { saveDestination, type SaveState } from "@/app/app/integrations/actions";
 import { Button, Field } from "@/components/ui";
@@ -16,7 +16,7 @@ const FREE_TARGET: Record<string, { label: string; placeholder: string; help: st
   google_sheets: {
     label: "Название колонки",
     placeholder: "как в шапке таблицы",
-    help: "В таблицу попадут только перечисленные поля, в этом порядке. Если не указать ни одного, выгружаются все поля схемы.",
+    help: "Отметьте поля, которые попадут в таблицу; колонки идут в порядке полей документа. Название колонки можно не задавать: возьмётся название поля. Если не отметить ни одного, выгружаются все поля схемы.",
   },
   bitrix24: {
     label: "Код поля Битрикс24",
@@ -34,8 +34,9 @@ export function hasMapping(c: ConnectorInfo): boolean {
   return c.target_fields.length > 0 || Object.hasOwn(FREE_TARGET, c.kind);
 }
 
-function ConfigInput({ f, value }: { f: FieldDef; value: string }) {
+function ConfigInput({ f, value, error }: { f: FieldDef; value: string; error?: string }) {
   const common = {
+    error,
     label: f.label,
     name: `c_${f.name}`,
     hint: f.help || undefined,
@@ -43,17 +44,21 @@ function ConfigInput({ f, value }: { f: FieldDef; value: string }) {
     defaultValue: value,
   };
   if (f.type === "textarea") return <Field {...common} as="textarea" rows={4} autoComplete="off" />;
-  if (f.type === "select")
+  if (f.type === "select") {
+    const options = f.options ?? [];
+    // сохранённого значения нет среди вариантов: не подставляем первый молча, а просим выбрать
+    const known = options.includes(value);
     return (
-      <Field {...common} as="select">
-        {f.required ? null : <option value="">Не выбрано</option>}
-        {(f.options ?? []).map((o) => (
+      <Field {...common} defaultValue={known ? value : ""} as="select">
+        {f.required && known ? null : <option value="">{f.required ? "— выберите —" : "Не выбрано"}</option>}
+        {options.map((o) => (
           <option key={o} value={o}>
             {o}
           </option>
         ))}
       </Field>
     );
+  }
   return (
     <Field
       {...common}
@@ -68,6 +73,17 @@ function ConfigInput({ f, value }: { f: FieldDef; value: string }) {
 function SecretInput({ f, saved }: { f: FieldDef; saved: boolean }) {
   const name = `s_${f.name}`;
   const [replacing, setReplacing] = useState(false);
+  const replaceBtn = useRef<HTMLButtonElement>(null);
+  const first = useRef(true);
+  useEffect(() => {
+    // фокус не теряется при смене кнопки на поле и обратно (не трогаем при первом показе)
+    if (first.current) {
+      first.current = false;
+      return;
+    }
+    if (replacing) document.getElementById(`f-${name}`)?.focus();
+    else replaceBtn.current?.focus();
+  }, [replacing, name]);
   if (f.type === "textarea") {
     // сохранённый секрет не показываем и не подставляем: чтобы заменить, нужно явно нажать «Заменить»
     if (saved && !replacing) {
@@ -79,7 +95,7 @@ function SecretInput({ f, saved }: { f: FieldDef; saved: boolean }) {
               ••••••••••••
             </span>
             <span className="sr-only">Значение сохранено и скрыто.</span>
-            <button type="button" onClick={() => setReplacing(true)} className={LINK_BTN}>
+            <button ref={replaceBtn} type="button" onClick={() => setReplacing(true)} className={LINK_BTN}>
               Заменить<span className="sr-only">: {f.label}</span>
             </button>
           </div>
@@ -124,33 +140,39 @@ function SecretInput({ f, saved }: { f: FieldDef; saved: boolean }) {
   );
 }
 
+/** Схема, под которую уже сохранено больше всего полей. */
+function initialSchema(schemas: MappingSchema[], mapping: Record<string, string>): string {
+  const keys = new Set(Object.keys(mapping));
+  let best = schemas[0]?.slug ?? "";
+  let score = -1;
+  for (const s of schemas) {
+    const n = s.rows.filter((r) => keys.has(r.key)).length;
+    if (n > score) {
+      best = s.slug;
+      score = n;
+    }
+  }
+  return best;
+}
+
 function MappingEditor({
   connector,
   schemas,
+  slug,
+  onSlug,
   value,
   onChange,
 }: {
   connector: ConnectorInfo;
   schemas: MappingSchema[];
+  slug: string;
+  onSlug: (slug: string) => void;
   value: Record<string, string>;
   onChange: (next: Record<string, string>) => void;
 }) {
   const free = FREE_TARGET[connector.kind];
   const withTables = connector.kind === "onec_odata";
-  const [slug, setSlug] = useState(() => {
-    // схема, под которую уже сохранено больше всего полей
-    const keys = new Set(Object.keys(value));
-    let best = schemas[0]?.slug ?? "";
-    let score = -1;
-    for (const s of schemas) {
-      const n = s.rows.filter((r) => keys.has(r.key)).length;
-      if (n > score) {
-        best = s.slug;
-        score = n;
-      }
-    }
-    return best;
-  });
+  const sheets = connector.kind === "google_sheets";
   const schema = schemas.find((s) => s.slug === slug);
   const rows = useMemo(() => (schema?.rows ?? []).filter((r) => withTables || !r.group), [schema, withTables]);
 
@@ -170,7 +192,7 @@ function MappingEditor({
           name="mapping_schema"
           as="select"
           value={slug}
-          onChange={(e) => setSlug(e.target.value)}
+          onChange={(e) => onSlug(e.target.value)}
         >
           {schemas.map((s) => (
             <option key={s.slug} value={s.slug}>
@@ -182,17 +204,39 @@ function MappingEditor({
       <ul className="flex flex-col border-2 border-ink bg-card">
         {rows.map((r, i) => {
           const id = `map-${i}`;
+          const included = Object.hasOwn(value, r.key);
           const current = value[r.key] ?? "";
+          const cell = "min-h-11 w-full border-2 border-ink bg-paper px-3 py-2 text-base";
           return (
             <li
               key={r.key}
               className="grid gap-2 border-t-2 border-ink p-3 first:border-t-0 sm:grid-cols-2 sm:items-center sm:gap-4"
             >
-              <label htmlFor={id} className="min-w-0">
-                <span className="block font-mono text-xs text-muted">Поле документа</span>
-                <span className="block break-words font-medium">{r.label}</span>
-                <span className="sr-only"> — {free ? free.label : "поле системы"}</span>
-              </label>
+              {sheets ? (
+                <label className="inline-flex min-h-11 min-w-0 items-center gap-3">
+                  <input
+                    type="checkbox"
+                    checked={included}
+                    onChange={(e) => {
+                      const next = { ...value };
+                      if (e.target.checked) next[r.key] = "";
+                      else delete next[r.key];
+                      onChange(next);
+                    }}
+                    className="size-5 shrink-0 accent-ink"
+                  />
+                  <span className="min-w-0">
+                    <span className="block font-mono text-xs text-muted">Выгружать поле документа</span>
+                    <span className="block break-words font-medium">{r.label}</span>
+                  </span>
+                </label>
+              ) : (
+                <label htmlFor={id} className="min-w-0">
+                  <span className="block font-mono text-xs text-muted">Поле документа</span>
+                  <span className="block break-words font-medium">{r.label}</span>
+                  <span className="sr-only"> — {free ? free.label : "поле системы"}</span>
+                </label>
+              )}
               {free ? (
                 <input
                   id={id}
@@ -200,16 +244,18 @@ function MappingEditor({
                   value={current}
                   maxLength={200}
                   autoComplete="off"
-                  placeholder={free.placeholder}
+                  disabled={sheets && !included}
+                  placeholder={sheets ? `по умолчанию: ${r.label}` : free.placeholder}
+                  aria-label={sheets ? `Название колонки для «${r.label}»` : undefined}
                   onChange={(e) => onChange({ ...value, [r.key]: e.target.value })}
-                  className="min-h-11 w-full border-2 border-ink bg-paper px-3 py-2 text-base"
+                  className={`${cell} disabled:opacity-50`}
                 />
               ) : (
                 <select
                   id={id}
                   value={current}
                   onChange={(e) => onChange({ ...value, [r.key]: e.target.value })}
-                  className="min-h-11 w-full border-2 border-ink bg-paper px-3 py-2 text-base"
+                  className={cell}
                 >
                   <option value="">не выгружать</option>
                   {connector.target_fields.map((t) => (
@@ -239,6 +285,7 @@ export function DestinationForm({
 }) {
   const [state, action, pending] = useActionState(saveDestination, INITIAL);
   const [mapping, setMapping] = useState<Record<string, string>>(destination?.mapping ?? {});
+  const [slug, setSlug] = useState(() => initialSchema(schemas, destination?.mapping ?? {}));
   const editing = Boolean(destination);
   const savedSecrets = Boolean(destination?.has_secrets);
 
@@ -249,8 +296,14 @@ export function DestinationForm({
     return v === undefined || v === null ? "" : String(v);
   };
 
-  // пустые значения не отправляем
-  const mappingJson = JSON.stringify(Object.fromEntries(Object.entries(mapping).filter(([, v]) => v.trim() !== "")));
+  // Таблицы/CRM: только поля выбранной схемы (чужие ключи от просмотренных схем не отправляем); 1С как есть.
+  // Таблицы хранят и пустое название колонки (поле включено), остальные - только заполненные.
+  const sheets = connector.kind === "google_sheets";
+  const allowed = new Set((schemas.find((s) => s.slug === slug)?.rows ?? []).map((r) => r.key));
+  const scoped = connector.kind === "onec_odata" ? Object.keys(mapping) : Object.keys(mapping).filter((k) => allowed.has(k));
+  const mappingJson = JSON.stringify(
+    Object.fromEntries(scoped.filter((k) => sheets || mapping[k].trim() !== "").map((k) => [k, mapping[k]])),
+  );
 
   return (
     <form action={action} aria-busy={pending} className="flex flex-col gap-8">
@@ -265,11 +318,9 @@ export function DestinationForm({
           </p>
         ) : null}
       </div>
-      {state.saved ? (
-        <p role="status" className="border-2 border-ink bg-card p-4 font-medium">
-          Сохранено.
-        </p>
-      ) : null}
+      <div role="status" aria-live="polite">
+        {state.saved ? <p className="border-2 border-ink bg-card p-4 font-medium">Сохранено.</p> : null}
+      </div>
 
       <section aria-labelledby="dest-main" className="flex max-w-2xl flex-col gap-4">
         <h2 id="dest-main" className="text-2xl font-semibold tracking-tight">
@@ -285,7 +336,7 @@ export function DestinationForm({
           hint="Для вас: чтобы отличать подключения друг от друга."
         />
         {connector.config_fields.map((f) => (
-          <ConfigInput key={f.name} f={f} value={cfg(f)} />
+          <ConfigInput key={f.name} f={f} value={cfg(f)} error={state.fieldErrors?.[f.name]} />
         ))}
         {connector.secret_fields.length > 0 ? (
           <fieldset className="flex flex-col gap-4 border-2 border-ink bg-card p-4">
@@ -306,7 +357,14 @@ export function DestinationForm({
           <h2 id="dest-map" className="text-2xl font-semibold tracking-tight">
             Сопоставление полей
           </h2>
-          <MappingEditor connector={connector} schemas={schemas} value={mapping} onChange={setMapping} />
+          <MappingEditor
+            connector={connector}
+            schemas={schemas}
+            slug={slug}
+            onSlug={setSlug}
+            value={mapping}
+            onChange={setMapping}
+          />
         </section>
       ) : null}
 

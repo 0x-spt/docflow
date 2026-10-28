@@ -53,11 +53,12 @@ def table_field(schema: DocSchema) -> FieldSpec | None:
 
 
 def doc_fields(schema: DocSchema, mapping: dict[str, str] | None = None) -> list[tuple[ColumnSpec, str]]:
-    """Поля документа с заголовками колонок. Маппинг не пуст — только перечисленные, в его порядке."""
+    """Поля документа с заголовками колонок. Маппинг не пуст — только перечисленные, в порядке схемы
+    (порядок ключей маппинга не хранится: JSONB его не сохраняет)."""
     flat = {f.name: f for f in schema.fields if f.type != "table"}
     if mapping:
         return [
-            (flat[name], str(title).strip() or label(flat[name])) for name, title in mapping.items() if name in flat
+            (spec, str(mapping[name] or "").strip() or label(spec)) for name, spec in flat.items() if name in mapping
         ]
     return [(f, label(f)) for f in flat.values()]
 
