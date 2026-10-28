@@ -11,7 +11,7 @@ const BASE =
 
 const VARIANTS: Record<Variant, string> = {
   primary: "bg-ink text-paper",
-  accent: "bg-accent text-ink",
+  accent: "bg-accent text-white",
   ghost: "bg-card text-ink",
 };
 

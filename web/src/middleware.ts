@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 // Только быстрая проверка наличия cookie (без запроса в API); недействительную сессию ловит requireMe().
+// дубль SESSION_COOKIE из lib/session.ts (оттуда нельзя: server-only, middleware работает в edge)
 const SESSION_COOKIE = "df_session";
 
 export function middleware(request: NextRequest) {
