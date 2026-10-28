@@ -259,3 +259,63 @@ class Lead(Base):
     ip: Mapped[str | None] = mapped_column(String, nullable=True)
     # ушло ли уведомление в Telegram
     notified: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class Destination(Base):
+    """Подключение тенанта к внешней системе (1С, CRM, таблица, Telegram, почта)."""
+
+    __tablename__ = "destinations"
+    __table_args__ = (Index("ix_destinations_tenant_id", "tenant_id"),)
+
+    id: Mapped[uuid.UUID] = _id()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"))
+    kind: Mapped[str] = mapped_column(String)
+    name: Mapped[str] = mapped_column(String)
+    # несекретные настройки (адрес, ID таблицы, ...)
+    config: Mapped[dict] = mapped_column(JsonType, default=dict)
+    # секреты одним зашифрованным (Fernet) JSON; None — секретов нет
+    secrets_enc: Mapped[str | None] = mapped_column(String, nullable=True)
+    # поле документа -> поле системы
+    mapping: Mapped[dict] = mapped_column(JsonType, default=dict)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = _created()
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_now, onupdate=_now)
+
+
+class RoutingRules(Base):
+    """Правила маршрутизации тенанта: весь упорядоченный список одним документом."""
+
+    __tablename__ = "routing_rules"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True)
+    rules: Mapped[list] = mapped_column(JsonType, default=list)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_now, onupdate=_now)
+
+
+class Export(Base):
+    """Доставка документа получателю (выгрузка или уведомление). История переживает удаление получателя."""
+
+    __tablename__ = "exports"
+    __table_args__ = (
+        CheckConstraint("purpose IN ('export', 'notify_review', 'notify_new')", name="purpose"),
+        CheckConstraint("status IN ('pending', 'done', 'failed')", name="status"),
+        UniqueConstraint("document_id", "destination_id", "purpose", name="document_destination_purpose"),
+        Index("ix_exports_status_next_attempt_at", "status", "next_attempt_at"),
+        Index("ix_exports_tenant_id", "tenant_id"),
+    )
+
+    id: Mapped[uuid.UUID] = _id()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"))
+    document_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"))
+    destination_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("destinations.id", ondelete="SET NULL"), nullable=True
+    )
+    purpose: Mapped[str] = mapped_column(String, default="export")
+    status: Mapped[str] = mapped_column(String, default="pending")
+    attempt: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String, nullable=True)
+    # ID созданной сущности во внешней системе
+    external_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = _created()
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_now, onupdate=_now)

@@ -3,10 +3,12 @@ from dataclasses import dataclass
 import httpx
 import pytest
 from api_helpers import BASE_URL
+from cryptography.fernet import Fernet
 from sqlalchemy import event
 
 from docflow.api.app import create_app
 from docflow.config import Settings
+from docflow.connectors import base as connectors_base
 from docflow.db.models import ApiKey, Base, Tenant, generate_api_key
 from docflow.db.session import make_engine, make_sessionmaker
 from docflow.queue import ListEnqueuer
@@ -41,6 +43,7 @@ async def api(tmp_path):
         max_file_mb=20,
         max_pages=30,
         webhook_allow_private=False,
+        secrets_key=Fernet.generate_key().decode(),
     )
     app = create_app(settings, sessionmaker=sm, blobs=blobs, enqueuer=enqueuer)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
@@ -72,3 +75,34 @@ def make_tenant(api):
 @pytest.fixture
 async def auth(make_tenant):
     return await make_tenant()
+
+
+class FakeConnector(connectors_base.BaseConnector):
+    """Фиктивный получатель для тестов API: помнит вызовы, ошибку можно подложить."""
+
+    kind = "test_fake"
+    label = "Тестовый"
+    config_fields = [
+        connectors_base.FieldDef("endpoint", "Адрес", required=True, type="url"),
+        connectors_base.FieldDef("note", "Заметка"),
+    ]
+    secret_fields = [connectors_base.FieldDef("token", "Токен", required=True)]
+    target_fields = [connectors_base.FieldDef("amount", "Сумма")]
+
+    def __init__(self):
+        self.calls = []
+        self.error: Exception | None = None
+
+    async def test(self, ctx):
+        self.calls.append(("test", dict(ctx.config), dict(ctx.secrets)))
+        if self.error:
+            raise self.error
+        return "Всё хорошо"
+
+
+@pytest.fixture
+def fake_connector():
+    fake = FakeConnector()
+    connectors_base.REGISTRY["test_fake"] = fake
+    yield fake
+    connectors_base.REGISTRY.pop("test_fake", None)
