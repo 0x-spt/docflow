@@ -342,6 +342,7 @@ async def get_document_pdf(document_id: str, tenant_id: TenantDep, session: Sess
     )
 
 
+DIGITAL_FAILED = "не удалось сформировать цифровую версию: слишком длинные значения"
 DIGITAL_CONFLICT = "цифровая версия доступна для документов в статусах ok и needs_review"
 
 
@@ -373,16 +374,20 @@ async def get_document_digital_pdf(
         schema = await schemas.resolve(session, document.tenant_id, document.schema_slug, document.schema_version)
     except SchemaNotFound as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from None
-    pdf = await asyncio.to_thread(
-        lambda: render_digital_pdf(
-            schema,
-            document.data or {},
-            status=document.status,
-            created_at=document.created_at,
-            reviewed=document.reviewed_at is not None,
-            font_path=settings.pdf_font_path,
+    try:
+        pdf = await asyncio.to_thread(
+            lambda: render_digital_pdf(
+                schema,
+                document.data or {},
+                status=document.status,
+                created_at=document.created_at,
+                reviewed=document.reviewed_at is not None,
+                font_path=settings.pdf_font_path,
+            )
         )
-    )
+    except Exception:
+        logger.exception("цифровая версия документа %s не сформирована", document.id)
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, DIGITAL_FAILED) from None
     return Response(
         content=pdf,
         media_type="application/pdf",
@@ -452,7 +457,7 @@ async def review_document_endpoint(
     except ReviewConflict:
         raise HTTPException(status.HTTP_409_CONFLICT, REVIEW_CONFLICT) from None
     except SchemaNotFound as exc:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from None
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from None
     try:
         await enqueue_webhooks(
             session, document, enqueuer, event=EVENT_REVIEWED if body.decision == "approve" else None

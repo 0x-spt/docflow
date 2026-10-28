@@ -21,6 +21,8 @@ _FONT = "DocFlow"
 _NUMBER, _ISSUED = "number", "issued"
 _GRAY = (110, 110, 110)
 _HEAD_FILL = (235, 235, 235)
+LONG_VALUE = 300  # значения длиннее выводятся абзацем на всю ширину, а не ячейкой сетки
+CELL_MAX = 1500  # длиннее в ячейке таблицы не помещается на страницу: обрезаем
 
 
 def column_title(spec: ColumnSpec) -> str:
@@ -103,23 +105,46 @@ def _header_line(schema: DocSchema, data: dict) -> str:
 
 
 def _draw_grid(pdf: _Pdf, fields: list[FieldSpec], data: dict) -> None:
-    cells = [f"{column_title(f)}: {format_value(f, data.get(f.name))}" for f in fields]
-    if not cells:
+    pairs = [(column_title(f), format_value(f, data.get(f.name))) for f in fields]
+    if not pairs:
         return
-    pdf.set_font(_FONT, "", 10)
     half = (pdf.w - 2 * MARGIN_MM) / 2
-    with pdf.table(
-        col_widths=(half, half),
-        borders_layout=TableBordersLayout.NONE,
-        first_row_as_headings=False,
-        line_height=5.2,
-        cell_fill_mode="NONE",
-    ) as table:
-        for i in range(0, len(cells), 2):
-            row = table.row()
-            row.cell(cells[i])
-            row.cell(cells[i + 1] if i + 1 < len(cells) else "")
-    pdf.ln(3)
+
+    def flush(short: list[str]) -> None:
+        if not short:
+            return
+        pdf.set_font(_FONT, "", 10)
+        with pdf.table(
+            col_widths=(half, half),
+            borders_layout=TableBordersLayout.NONE,
+            first_row_as_headings=False,
+            line_height=5.2,
+            cell_fill_mode="NONE",
+        ) as table:
+            for i in range(0, len(short), 2):
+                row = table.row()
+                row.cell(short[i])
+                row.cell(short[i + 1] if i + 1 < len(short) else "")
+        pdf.ln(2)
+
+    short: list[str] = []
+    for title, value in pairs:
+        if len(value) <= LONG_VALUE:
+            short.append(f"{title}: {value}")
+            continue
+        flush(short)  # порядок полей сохраняем: сначала накопленная сетка, потом абзац
+        short = []
+        pdf.set_font(_FONT, "B", 10)
+        pdf.multi_cell(0, 5.2, title, new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font(_FONT, "", 10)
+        pdf.multi_cell(0, 5.2, value, new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(2)
+    flush(short)
+    pdf.ln(1)
+
+
+def _clip(text: str) -> str:
+    return text if len(text) <= CELL_MAX else text[:CELL_MAX] + "…"
 
 
 def _column_widths(columns: list[ColumnSpec], rows: list[list[str]], total: float) -> list[float]:
@@ -137,14 +162,14 @@ def _column_widths(columns: list[ColumnSpec], rows: list[list[str]], total: floa
 def _draw_table(pdf: _Pdf, field: FieldSpec, items) -> None:
     columns = field.columns or []
     pdf.set_font(_FONT, "B", 11)
-    pdf.cell(0, 7, column_title(field), new_x="LMARGIN", new_y="NEXT")
+    pdf.multi_cell(0, 7, column_title(field), new_x="LMARGIN", new_y="NEXT")
     rows_in = [r for r in (items if isinstance(items, list) else []) if isinstance(r, dict)]
     if not rows_in:
         pdf.set_font(_FONT, "", 10)
         pdf.cell(0, 6, EMPTY, new_x="LMARGIN", new_y="NEXT")
         pdf.ln(2)
         return
-    rows = [[format_value(c, r.get(c.name)) for c in columns] for r in rows_in]
+    rows = [[_clip(format_value(c, r.get(c.name))) for c in columns] for r in rows_in]
     widths = _column_widths(columns, rows, pdf.w - 2 * MARGIN_MM)
     aligns = tuple("RIGHT" if c.type in ("number", "integer") else "LEFT" for c in columns)
     pdf.set_font(_FONT, "", 9)
@@ -183,7 +208,7 @@ def render_digital_pdf(
     line = _header_line(schema, data)
     if line:
         pdf.set_font(_FONT, "", 11)
-        pdf.cell(0, 6, line, new_x="LMARGIN", new_y="NEXT")
+        pdf.multi_cell(0, 6, line, new_x="LMARGIN", new_y="NEXT")
     pdf.ln(3)
 
     # в строку под заголовком уходят только заполненные номер и дата; пустые остаются в сетке как «—»

@@ -618,3 +618,15 @@ async def test_digital_pdf_foreign_404(api, auth, make_tenant):
     doc_id = (await upload(api, auth)).json()["id"]
     await set_status(api, doc_id, status="ok", data={})
     assert (await api.client.get(f"/v1/documents/{doc_id}/digital.pdf", headers=other)).status_code == 404
+
+
+async def test_digital_pdf_render_failure_is_422(digital_font, api, auth, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("row too high")
+
+    monkeypatch.setattr("docflow.api.documents.render_digital_pdf", boom)
+    doc_id = (await upload(api, auth)).json()["id"]
+    await set_status(api, doc_id, status="ok", data={"number": "1"}, finished_at=datetime.now(UTC))
+    r = await api.client.get(f"/v1/documents/{doc_id}/digital.pdf", headers=auth)
+    assert r.status_code == 422
+    assert "слишком длинные значения" in r.json()["detail"]

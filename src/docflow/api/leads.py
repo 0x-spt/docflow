@@ -48,6 +48,11 @@ class LeadIn(BaseModel):
     # приманка для ботов: настоящая форма держит поле пустым и невидимым
     website: str | None = Field(default=None, max_length=2000)
 
+    @field_validator("targets", mode="before")
+    @classmethod
+    def _targets_null(cls, v: object) -> object:
+        return [] if v is None else v
+
     @field_validator("targets")
     @classmethod
     def _targets_unique(cls, v: list[str]) -> list[str]:

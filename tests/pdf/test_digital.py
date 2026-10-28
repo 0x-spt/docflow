@@ -102,3 +102,35 @@ def test_render_very_long_unbroken_value(digital_font):
 def test_render_without_title_uses_name(digital_font):
     schema = DocSchema(slug="my_doc", title="Мой док", description="d", fields=[{"name": "foo_bar", "type": "string"}])
     assert "foo_bar" in _text(render_digital_pdf(schema, {"foo_bar": "знач"}, status="ok", created_at=CREATED))
+
+
+def _long_schema():
+    from docflow.schemas.model import FieldSpec
+
+    return DocSchema(
+        slug="long_test", version=1, title="Тест", description="т",
+        fields=[
+            FieldSpec(name="number", type="string", title="Номер"),
+            FieldSpec(name="note", type="string", title="Примечание"),
+            FieldSpec(name="rows", type="table", title="Строки", columns=[
+                ColumnSpec(name="a", type="string", title="А"), ColumnSpec(name="b", type="string", title="Б")]),
+        ],
+    )
+
+
+def test_long_grid_value_renders(digital_font):
+    data = {"number": "1", "note": "слово " * 1000}
+    text = _text(render_digital_pdf(_long_schema(), data, status="ok", created_at=CREATED))
+    assert "Примечание" in text and "слово" in text
+
+
+def test_long_unbroken_table_cell_renders(digital_font):
+    data = {"number": "1", "rows": [{"a": "Ж" * 5000, "b": "ok"}]}
+    text = _text(render_digital_pdf(_long_schema(), data, status="ok", created_at=CREATED))
+    assert "ЖЖЖ" in text and "…" in text
+
+
+def test_long_number_renders(digital_font):
+    data = {"number": "Н" * 300}
+    text = _text(render_digital_pdf(_long_schema(), data, status="ok", created_at=CREATED))
+    assert "ННН" in text

@@ -25,10 +25,20 @@ curl -s -X POST http://localhost:8000/v1/documents \
 # → {"id": "…", "status": "queued"}
 
 curl -s http://localhost:8000/v1/documents/<id> -H "Authorization: Bearer $KEY"
-# → status: queued → processing → ok | needs_review | failed; data, issues, pdf_url
+# → status: queued → processing → ok | needs_review | failed; data, issues, pdf_url, digital_pdf_url
 
 curl -s -o scan.pdf http://localhost:8000/v1/documents/<id>/pdf -H "Authorization: Bearer $KEY"
+curl -s -o digital.pdf http://localhost:8000/v1/documents/<id>/digital.pdf -H "Authorization: Bearer $KEY"
 ```
+
+`GET /v1/documents/{id}/digital.pdf` отдаёт цифровую версию: PDF, набранный заново по извлечённым данным (не скан).
+Заголовок берётся из поля `title` схемы (у полей и колонок `title` — подпись; без него печатается `name`). Доступна
+в статусах `ok` и `needs_review` (иначе 409; чужой документ — 404; слишком длинные значения, которые не помещаются
+на страницу, — 422). Ссылка `digital_pdf_url` приходит в ответе `GET /v1/documents/{id}` и в payload вебхуков
+(как `pdf_url`; `null`, пока документ не готов). Шрифт с кириллицей задаётся `DOCFLOW_PDF_FONT_PATH`
+(по умолчанию `/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf`, в образе уже есть; жирное начертание ищется рядом:
+`<имя>-Bold.ttf`). `docflow seed-schemas` при каждом запуске (его делает сервис `migrate`) обновляет и тела уже
+засеянных встроенных схем, поэтому новые `title` доходят до существующих баз.
 
 Повтор `POST` с тем же `Idempotency-Key` вернёт уже принятый документ. Документация API — http://localhost:8000/docs.
 
@@ -86,7 +96,9 @@ docker compose exec api docflow create-user <tenant_id> boss@example.com --role 
 
 Заявки на аудит из формы на лендинге сохраняются в БД: `docker compose exec api docflow leads`. Мгновенное
 уведомление в Telegram включается переменными `DOCFLOW_LEADS_TG_TOKEN` (токен бота) и `DOCFLOW_LEADS_TG_CHAT`
-(id чата); без них заявки просто лежат в БД.
+(id чата); без них заявки просто лежат в БД. В заявке `POST /v1/leads` поле `targets` — список систем, куда
+выгружать данные: `1c`, `bitrix24`, `amocrm`, `google_sheets`, `excel`, `own_system`, `unknown` (без повторов,
+до 7; `null` или отсутствие поля — пустой список).
 
 В проде:
 

@@ -172,28 +172,32 @@ def cmd_create_user(args: argparse.Namespace) -> int:
     return 0
 
 
-async def _seed_schemas() -> int:
+async def _seed_schemas() -> tuple[int, int]:
+    """Добавляет недостающие встроенные схемы и обновляет body у существующих (tenant_id NULL), если он изменился."""
     engine = make_engine(get_settings().database_url)
-    added = 0
+    added = updated = 0
     try:
         async with make_sessionmaker(engine)() as session:
-            q = select(SchemaRecord.slug, SchemaRecord.version).where(SchemaRecord.tenant_id.is_(None))
-            existing = set((await session.execute(q)).all())
+            rows = (await session.execute(select(SchemaRecord).where(SchemaRecord.tenant_id.is_(None)))).scalars()
+            existing = {(r.slug, r.version): r for r in rows}
             for slug, schema in builtin_schemas().items():
-                if (slug, schema.version) in existing:
-                    continue
-                session.add(
-                    SchemaRecord(tenant_id=None, slug=slug, version=schema.version, body=schema.model_dump(mode="json"))
-                )
-                added += 1
+                body = schema.model_dump(mode="json")
+                row = existing.get((slug, schema.version))
+                if row is None:
+                    session.add(SchemaRecord(tenant_id=None, slug=slug, version=schema.version, body=body))
+                    added += 1
+                elif row.body != body:
+                    row.body = body
+                    updated += 1
             await session.commit()
     finally:
         await engine.dispose()
-    return added
+    return added, updated
 
 
 def cmd_seed_schemas(args: argparse.Namespace) -> int:
-    print(f"Встроенных схем добавлено: {asyncio.run(_seed_schemas())}")
+    added, updated = asyncio.run(_seed_schemas())
+    print(f"Встроенных схем добавлено: {added}, обновлено: {updated}")
     return 0
 
 

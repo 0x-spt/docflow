@@ -154,3 +154,10 @@ async def test_lead_targets_saved_and_optional(api):
 async def test_lead_targets_invalid_422(api, targets):
     r = await api.client.post("/v1/leads", json={**GOOD, "targets": targets})
     assert r.status_code == 422
+
+
+async def test_lead_targets_null_is_empty(api):
+    r = await api.client.post("/v1/leads", json={**GOOD, "targets": None})
+    assert r.status_code == 201
+    [lead] = await _leads(api)
+    assert lead.targets == []

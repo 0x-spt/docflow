@@ -262,3 +262,45 @@ def test_leads_shows_targets(db_url, capsys):
     assert main(["leads"]) == 0
     out = capsys.readouterr().out
     assert "Битрикс24, Своя система" in out
+
+
+def test_seed_schemas_updates_changed_builtin_body(db_url, capsys, monkeypatch):
+    from docflow.schemas import library
+
+    assert main(["seed-schemas"]) == 0
+    capsys.readouterr()
+    original = library.builtin_schemas()
+    slug, schema = next(iter(original.items()))
+
+    async def tenant_row(s):
+        t = Tenant(name="Свой", extractor="ollama")
+        s.add(t)
+        await s.flush()
+        s.add(SchemaRecord(tenant_id=t.id, slug=slug, version=schema.version, body={"x": 1}))
+        await s.commit()
+
+    _query(db_url, tenant_row)
+
+    # старая база: в строке нет title
+    async def strip_title(s):
+        q = select(SchemaRecord).where(SchemaRecord.tenant_id.is_(None), SchemaRecord.slug == slug)
+        row = (await s.execute(q)).scalar_one()
+        body = dict(row.body)
+        body.pop("title", None)
+        row.body = body
+        await s.commit()
+
+    _query(db_url, strip_title)
+    assert main(["seed-schemas"]) == 0
+    assert "обновлено: 1" in capsys.readouterr().out
+
+    async def bodies(s):
+        rows = (await s.execute(select(SchemaRecord).where(SchemaRecord.slug == slug))).scalars().all()
+        return {r.tenant_id is None: r.body for r in rows}
+
+    got = _query(db_url, bodies)
+    assert got[True]["title"] == schema.title and got[True] == schema.model_dump(mode="json")
+    assert got[False] == {"x": 1}  # схема арендатора не тронута
+
+    assert main(["seed-schemas"]) == 0
+    assert "обновлено: 0" in capsys.readouterr().out

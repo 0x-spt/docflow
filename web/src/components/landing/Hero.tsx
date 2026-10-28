@@ -40,9 +40,7 @@ function Fan({ count, direction }: { count: number; direction: "in" | "out" }) {
 function Core() {
   return (
     <div className="flex flex-col gap-5 border-2 border-ink bg-ink p-5 text-paper shadow-hard">
-      <p className="text-3xl font-semibold tracking-tight">
-        DocFlow<sup className="ml-0.5 text-xs text-accent">®</sup>
-      </p>
+      <p className="text-3xl font-semibold tracking-tight">DocFlow</p>
       <ol className="space-y-2 font-mono text-sm leading-snug">
         {STAGES.map((s) => (
           <li key={s} className="flex gap-2">
