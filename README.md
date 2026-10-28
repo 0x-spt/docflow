@@ -63,14 +63,62 @@ docker compose exec api docflow create-tenant "Лаборатория" --extract
 docker compose exec api docflow set-auto-ok <id> yes
 ```
 
+## Сайт и кабинет
+
+Сайт (`web/`, Next.js) — лендинг с формой заявки на аудит и кабинет клиента (очередь, проверка документов,
+загрузка, справочники, ключи и вебхуки). Браузер токена API не видит: сессия — httpOnly-cookie `df_session`,
+запросы к API идут с сервера сайта.
+
+Запуск вместе со всем стеком:
+
+```
+docker compose up -d --build        # сайт: http://localhost:3000, API: http://localhost:8000
+```
+
+Клиент и его пользователь (пароль не короче 10 символов; без `--password` будет сгенерирован и показан один раз):
+
+```
+docker compose exec api docflow create-tenant "Моя компания"        # → id и API-ключ
+docker compose exec api docflow create-user <tenant_id> boss@example.com --role owner --password '<пароль>'
+```
+
+Роли: `owner` (всё, включая ключи и вебхуки) и `operator` (очередь, проверка, загрузка). Вход — на `/login`.
+
+Заявки на аудит из формы на лендинге сохраняются в БД: `docker compose exec api docflow leads`. Мгновенное
+уведомление в Telegram включается переменными `DOCFLOW_LEADS_TG_TOKEN` (токен бота) и `DOCFLOW_LEADS_TG_CHAT`
+(id чата); без них заявки просто лежат в БД.
+
+В проде:
+
+- сайт и API за прокси с TLS; cookie получает флаг `Secure` в production-сборке. `COOKIE_SECURE=false` нужен
+  только для проверки по http и в проде не ставится;
+- прокси сам выставляет `X-Forwarded-For` (перезаписывая присланный клиентом): по нему сайт передаёт API адрес
+  посетителя для лимитов на заявки и вход. API верит этому адресу только с общим секретом
+  `DOCFLOW_INTERNAL_TOKEN` (одинаковый у сайта и API; смените значение по умолчанию);
+- загрузка документов идёт через сайт, поэтому лимит тела ~200 MB (`client_max_body_size 200m;`) ставьте только
+  на `location /app/upload`, на остальных адресах оставьте малый;
+- `DOCFLOW_API_URL` у сайта — внутренний адрес API, наружу порт 8000 в проде не публикуется.
+
+Сквозные тесты сайта (Playwright, против стека с fake-экстрактором; подробности — `web/README.md`):
+
+```
+docker compose -f docker-compose.yml -f docker-compose.e2e.yml up -d --build
+cd web && npm ci && npx playwright install chromium && npm run test:e2e
+docker compose up -d        # вернуть обычный воркер
+```
+
 ## Вебхуки
 
 ```
 curl -s -X POST http://localhost:8000/v1/webhooks -H "Authorization: Bearer $KEY" \
   -H "Content-Type: application/json" \
-  -d '{"url": "https://example.com/hook", "events": ["document.completed", "document.failed"]}'
+  -d '{"url": "https://example.com/hook", "events": ["document.completed", "document.failed", "document.reviewed"]}'
 # → {..., "secret": "..."}  — секрет показывается один раз
 ```
+
+События: `document.completed` — обработка закончилась (`ok` или `needs_review`), `document.failed` — не удалась
+или отклонена оператором, `document.reviewed` — документ подтверждён человеком после проверки в кабинете (приходит
+и подписчикам `document.completed`).
 
 Тело — JSON `{"event": ..., "document": {...}}`, подпись — HMAC-SHA256 от сырых байтов тела в заголовке
 `X-DocFlow-Signature: sha256=<hex>`. Проверка на Python:

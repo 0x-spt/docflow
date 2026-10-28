@@ -18,5 +18,14 @@
     "total": 4800,
     "vat": 800,
     "_uncertain": []
+  },
+  "e2e_order": {
+    "number": "НЗ-7",
+    "works": [
+      {"name": "Замена масла", "qty": 2, "price": 100},
+      {"name": "Фильтр", "qty": 1, "price": 50}
+    ],
+    "total": 999,
+    "_uncertain": []
   }
 }
