@@ -26,6 +26,41 @@ body {
   font-family: var(--font-sans);
 }
 
+/*
+ * Квадратный чекбокс сайта. Отмечено — не только цветом: белая галочка на чёрном.
+ * В режиме высокой контрастности (forced-colors) цвета берутся из системной палитры:
+ * отмечено — заливка Highlight и галочка, пусто — фон Canvas.
+ */
+@layer components {
+  .df-check {
+    appearance: none;
+    cursor: pointer;
+    border: 2px solid var(--color-ink);
+    background-color: var(--color-card);
+    background-position: center;
+    background-repeat: no-repeat;
+    background-size: 80%;
+  }
+
+  .df-check:checked {
+    background-color: var(--color-ink);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 8.5l3.2 3.2L13 4.8' fill='none' stroke='%23ffffff' stroke-width='2.4' stroke-linecap='square'/%3E%3C/svg%3E");
+  }
+
+  @media (forced-colors: active) {
+    .df-check {
+      forced-color-adjust: none;
+      border-color: CanvasText;
+      background-color: Canvas;
+    }
+
+    .df-check:checked {
+      border-color: Highlight;
+      background-color: Highlight;
+    }
+  }
+}
+
 /* видимый фокус для всего интерактивного */
 :focus-visible {
   outline: 3px solid var(--color-accent);

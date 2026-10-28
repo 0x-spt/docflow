@@ -123,7 +123,7 @@ export function AuditForm() {
                 name="targets"
                 value={t.value}
                 defaultChecked={checkedTargets.has(t.value)}
-                className="size-6 shrink-0 cursor-pointer appearance-none border-2 border-ink bg-card checked:bg-ink"
+                className="df-check size-6 shrink-0"
               />
               {t.label}
             </label>
@@ -167,7 +167,7 @@ export function AuditForm() {
             defaultChecked={v.consent === "on"}
             aria-invalid={e.consent ? true : undefined}
             aria-describedby={e.consent ? "f-consent-error" : undefined}
-            className="mt-0.5 size-6 shrink-0 cursor-pointer appearance-none border-2 border-ink bg-card checked:bg-ink aria-[invalid=true]:border-accent-text"
+            className="df-check mt-0.5 size-6 shrink-0 aria-[invalid=true]:border-accent-text"
           />
           <label htmlFor="f-consent" className="cursor-pointer text-base leading-snug">
             Согласен на обработку персональных данных по{" "}
