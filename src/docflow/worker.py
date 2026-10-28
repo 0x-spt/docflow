@@ -72,6 +72,7 @@ def _extractors(settings: Settings) -> dict[str, Extractor]:
 
 
 async def startup(ctx: dict) -> None:
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # URL с токеном бота не должны попадать в INFO-логи
     settings = get_settings()
     # экстракторы — первыми: запрет fake-режима должен сработать до открытия соединений
     extractors = _extractors(settings)

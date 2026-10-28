@@ -11,6 +11,7 @@ import ssl
 from email.message import EmailMessage
 from typing import Any
 
+from docflow.config import get_settings
 from docflow.connectors.base import REGISTRY, BaseConnector, ConnectorError, DestCtx, ExportDoc, FieldDef
 from docflow.connectors.notify_common import PURPOSES, doc_ref, notification_text
 from docflow.webhooks import check_host
@@ -21,11 +22,14 @@ SECURITY = ("starttls", "ssl", "none")
 _ADDR = re.compile(r"[^\s@<>,;\"']+@[^\s@<>,;\"']+\.[^\s@<>,;\"']+")
 _HOST = re.compile(r"[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\]")
 SUBJECTS = {"notify_review": "DocFlow: нужна проверка — ", "notify_new": "DocFlow: новый документ — "}
+NOT_SUPPORTED = "сервер не поддерживает нужную функцию (STARTTLS/AUTH/SMTPUTF8)"
 SIGN_OFF = "\n\n--\nDocFlow. Это автоматическое уведомление."
 
 
 def _addr(value: str, what: str) -> str:
     value = value.strip()
+    if not value.isascii():
+        raise ConnectorError(f"{what}: адрес «{value[:80]}» должен быть из латинских символов (без SMTPUTF8)")
     if not _ADDR.fullmatch(value):
         raise ConnectorError(f"{what}: «{value[:80]}» не похоже на адрес почты")
     return value
@@ -81,6 +85,10 @@ def _connect(config: dict[str, Any], secrets: dict[str, Any]) -> smtplib.SMTP:
     host, port, security = _server(config)
     username = str(secrets.get("username") or "")
     password = str(secrets.get("password") or "")
+    if password and not username:
+        raise ConnectorError("укажите логин или уберите пароль")
+    if username and security == "none" and not get_settings().webhook_allow_private:
+        raise ConnectorError("вход без шифрования запрещён — выберите starttls или ssl")
     client: smtplib.SMTP | None = None
     try:
         if security == "ssl":
@@ -95,6 +103,9 @@ def _connect(config: dict[str, Any], secrets: dict[str, Any]) -> smtplib.SMTP:
     except smtplib.SMTPAuthenticationError:
         _close(client)
         raise ConnectorError("сервер не принял логин или пароль") from None
+    except smtplib.SMTPNotSupportedError:
+        _close(client)
+        raise ConnectorError(NOT_SUPPORTED) from None
     except smtplib.SMTPResponseException as exc:
         _close(client)
         raise ConnectorError(
@@ -131,8 +142,10 @@ def _send(config: dict[str, Any], secrets: dict[str, Any], msg: EmailMessage, se
         raise
     except smtplib.SMTPRecipientsRefused as exc:
         raise _refused(exc.recipients) from None
-    except smtplib.SMTPSenderRefused:
-        raise ConnectorError(f"сервер не принял отправителя {sender}") from None
+    except smtplib.SMTPNotSupportedError:
+        raise ConnectorError(NOT_SUPPORTED) from None
+    except smtplib.SMTPSenderRefused as exc:
+        raise ConnectorError(f"сервер не принял отправителя {sender}", retryable=400 <= exc.smtp_code < 500) from None
     except smtplib.SMTPResponseException as exc:
         raise ConnectorError(
             f"почтовый сервер отклонил письмо (код {exc.smtp_code})", retryable=400 <= exc.smtp_code < 500
@@ -168,10 +181,7 @@ class Email(BaseConnector):
 
     def check_network(self, config: dict[str, Any], *, allow_private: bool = False) -> None:
         """Сохранение и отправка: форма адресов и публичность хоста. ConnectorError/ValueError при нарушении."""
-        try:
-            _validate(config)
-        except ConnectorError as exc:
-            raise ValueError(exc.message) from None
+        _validate(config)  # ConnectorError с понятным текстом
         host, port, _ = _server(config)
         check_host(host.strip("[]"), port, allow_private=allow_private)
 

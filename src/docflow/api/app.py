@@ -76,6 +76,8 @@ def create_app(
     blobs: BlobStore | None = None,
     enqueuer: Enqueuer | None = None,
 ) -> FastAPI:
+    # httpx на INFO пишет URL запросов целиком, а в Bot API токен бота лежит в пути
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     app = FastAPI(title="DocFlow API", version="0.1.0", description=DESCRIPTION, lifespan=_lifespan)
     app.state.settings = settings or get_settings()
     app.state.sessionmaker = sessionmaker

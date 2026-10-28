@@ -217,8 +217,8 @@ async def test_email_ssl_no_auth(http, smtp):
 
 
 async def test_email_security_none(http, smtp):
-    await REGISTRY["email"].notify(em_ctx(http, security="none"), make_doc(), "notify_new")
-    assert [x[0] for x in smtp.instances[0].calls] == ["login", "quit"]
+    await REGISTRY["email"].notify(em_ctx(http, secrets={}, security="none"), make_doc(), "notify_new")
+    assert [x[0] for x in smtp.instances[0].calls] == ["quit"]
 
 
 async def test_email_header_injection(http, smtp):
@@ -289,7 +289,7 @@ def test_email_check_network_ssrf():
     with pytest.raises(ValueError, match="не публичный"):
         em.check_network(cfg)
     em.check_network(cfg, allow_private=True)
-    with pytest.raises(ValueError):
+    with pytest.raises(ConnectorError):
         em.check_network({**cfg, "to_addrs": "bad"}, allow_private=True)
 
 
@@ -297,3 +297,91 @@ def test_email_module_does_not_shadow_stdlib():
     import email.message
 
     assert email.message.EmailMessage is email_mod.EmailMessage
+
+
+# ---------- Ревью: дополнения ----------
+
+
+@respx.mock
+async def test_review_reasons_skip_info_codes(http):
+    route = respx.post(f"{API}/sendMessage").mock(return_value=httpx.Response(200, json={"ok": True}))
+    issues = [
+        {"code": "corrected", "message": "поправили сумму"},
+        {"code": "inn_checksum", "message": "ИНН не сходится"},
+        {"code": "corrected", "message": "поправили дату"},
+    ]
+    await REGISTRY["telegram"].notify(tg_ctx(http), make_doc(issues=issues), "notify_review")
+    text = json.loads(route.calls[0].request.content)["text"]
+    assert "Причины: ИНН не сходится\n" in text
+    assert "поправили" not in text and "ещё" not in text
+
+
+async def test_email_plain_auth_refused(http, smtp):
+    with pytest.raises(ConnectorError) as ei:
+        await REGISTRY["email"].notify(em_ctx(http, security="none"), make_doc(), "notify_new")
+    assert not ei.value.retryable
+    assert ei.value.message == "вход без шифрования запрещён — выберите starttls или ssl"
+    assert not smtp.instances
+
+
+async def test_email_plain_auth_allowed_in_dev(http, smtp, monkeypatch):
+    from docflow import config
+
+    monkeypatch.setattr(email_mod, "get_settings", lambda: config.Settings(webhook_allow_private=True))
+    await REGISTRY["email"].notify(em_ctx(http, security="none"), make_doc(), "notify_new")
+    assert smtp.instances[0].sent
+
+
+async def test_email_not_supported_is_permanent(http, smtp):
+    smtp.fail_login = smtplib.SMTPNotSupportedError("STARTTLS extension not supported by server.")
+    with pytest.raises(ConnectorError) as ei:
+        await REGISTRY["email"].notify(em_ctx(http), make_doc(), "notify_new")
+    assert not ei.value.retryable
+    assert ei.value.message == "сервер не поддерживает нужную функцию (STARTTLS/AUTH/SMTPUTF8)"
+
+
+async def test_email_sender_refused_4xx_retryable(http, smtp, monkeypatch):
+    def boom(self, *a, **k):
+        raise smtplib.SMTPSenderRefused(452, b"try later", "df@example.com")
+
+    monkeypatch.setattr(smtp, "send_message", boom)
+    with pytest.raises(ConnectorError) as ei:
+        await REGISTRY["email"].notify(em_ctx(http), make_doc(), "notify_new")
+    assert ei.value.retryable
+
+    def hard(self, *a, **k):
+        raise smtplib.SMTPSenderRefused(553, b"no", "df@example.com")
+
+    monkeypatch.setattr(smtp, "send_message", hard)
+    with pytest.raises(ConnectorError) as ei:
+        await REGISTRY["email"].notify(em_ctx(http), make_doc(), "notify_new")
+    assert not ei.value.retryable
+
+
+async def test_email_non_ascii_address_rejected(http, smtp):
+    with pytest.raises(ConnectorError) as ei:
+        await REGISTRY["email"].notify(em_ctx(http, to_addrs="почта@пример.рф"), make_doc(), "notify_new")
+    assert not ei.value.retryable and not smtp.instances
+
+
+async def test_email_password_without_username(http, smtp):
+    with pytest.raises(ConnectorError) as ei:
+        await REGISTRY["email"].notify(em_ctx(http, secrets={"password": "p"}), make_doc(), "notify_new")
+    assert ei.value.message == "укажите логин или уберите пароль" and not ei.value.retryable
+
+
+def test_email_check_network_form_error_is_connector_error():
+    cfg = {"host": "smtp.example.com", "from_addr": "df@example.com", "to_addrs": "bad"}
+    with pytest.raises(ConnectorError):
+        REGISTRY["email"].check_network(cfg, allow_private=True)
+
+
+def test_httpx_logger_quiet_after_startup():
+    import logging
+
+    from docflow.api.app import create_app
+    from docflow.config import Settings
+
+    logging.getLogger("httpx").setLevel(logging.INFO)
+    create_app(Settings())
+    assert logging.getLogger("httpx").level == logging.WARNING

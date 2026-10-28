@@ -109,6 +109,8 @@ async def _check_config(config: dict[str, Any], connector: Connector, *, allow_p
     if check_network is not None:
         try:
             await asyncio.to_thread(check_network, config, allow_private=allow_private)
+        except ConnectorError as exc:
+            raise _unprocessable(f"настройки: {exc.message}") from None
         except ValueError as exc:
             raise _unprocessable(f"недопустимый адрес сервера: {exc}") from None
 

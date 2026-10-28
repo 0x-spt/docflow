@@ -1,7 +1,8 @@
 """Общее для уведомлений (Telegram, почта): заголовок документа, причины, текст сообщения."""
 
 from docflow.connectors.base import ExportDoc
-from docflow.connectors.crm_common import clean, counterparty_side, party, total_of
+from docflow.connectors.crm_common import clean, party, total_of
+from docflow.validation.engine import INFO_CODES
 
 TEXT_MAX = 4000  # у Telegram потолок 4096; тот же запас, что у уведомлений о заявках
 REASONS_SHOWN = 3
@@ -28,7 +29,7 @@ def money(value: float) -> str:
 
 
 def reasons(doc: ExportDoc) -> str:
-    messages = [m for i in doc.issues if (m := one_line(i.get("message")))]
+    messages = [m for i in doc.issues if i.get("code") not in INFO_CODES and (m := one_line(i.get("message")))]
     shown = "; ".join(messages[:REASONS_SHOWN])
     if len(messages) > REASONS_SHOWN:
         shown += f" и ещё {len(messages) - REASONS_SHOWN}"
@@ -46,8 +47,7 @@ def notification_text(doc: ExportDoc, purpose: str) -> str:
             lines.append(f"Причины: {why}")
     else:
         lines = [f"Новый документ: {doc_ref(doc)}"]
-        side = "supplier" if "supplier" in doc.data or "buyer" not in doc.data else "buyer"
-        name = party(doc, counterparty_side({"counterparty": side})).name
+        name = party(doc, "supplier").name or party(doc, "buyer").name
         total = total_of(doc)
         extra = ", ".join(x for x in (name, f"сумма {money(total)}" if total is not None else "") if x)
         if extra:
