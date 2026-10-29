@@ -385,3 +385,28 @@ def test_httpx_logger_quiet_after_startup():
     logging.getLogger("httpx").setLevel(logging.INFO)
     create_app(Settings())
     assert logging.getLogger("httpx").level == logging.WARNING
+
+
+def labeled_doc(labels, issues=None):
+    from docflow.labels import apply_labels
+
+    doc = make_doc(issues=issues)
+    doc.base_schema = doc.schema
+    doc.schema = apply_labels(doc.schema, labels)
+    return doc
+
+
+def test_notify_new_uses_total_label():
+    from docflow.connectors.notify_common import notification_text
+
+    text = notification_text(labeled_doc({"total": "К оплате"}), "notify_new")
+    assert text.splitlines()[1] == "ООО Ромашка, К оплате: 12 500,50 ₽"
+
+
+def test_notify_review_reason_prefixed_by_label():
+    from docflow.connectors.notify_common import notification_text
+
+    issues = [{"field": "vat", "code": "c", "message": "не сходится"}]
+    assert "Причины: Налог: не сходится" in notification_text(labeled_doc({"vat": "Налог"}, issues), "notify_review")
+    plain = notification_text(labeled_doc({}, issues), "notify_review")
+    assert "Причины: не сходится" in plain and "Налог" not in plain

@@ -630,3 +630,21 @@ async def test_digital_pdf_render_failure_is_422(digital_font, api, auth, monkey
     r = await api.client.get(f"/v1/documents/{doc_id}/digital.pdf", headers=auth)
     assert r.status_code == 422
     assert "слишком длинные значения" in r.json()["detail"]
+
+
+async def test_digital_pdf_uses_labels(digital_font, api, auth, monkeypatch):
+    seen = []
+
+    def spy(schema, *a, **k):
+        seen.append(schema)
+        return b"%PDF-fake"
+
+    monkeypatch.setattr("docflow.api.documents.render_digital_pdf", spy)
+    await api.client.put(
+        "/v1/schemas/invoice_ru/labels", headers=auth, json={"labels": {"vat": "Налог"}, "queue_fields": []}
+    )
+    doc_id = (await upload(api, auth)).json()["id"]
+    await set_status(api, doc_id, status="ok", data={"number": "1"}, finished_at=datetime.now(UTC))
+    r = await api.client.get(f"/v1/documents/{doc_id}/digital.pdf", headers=auth)
+    assert r.status_code == 200
+    assert next(f.title for f in seen[0].fields if f.name == "vat") == "Налог"

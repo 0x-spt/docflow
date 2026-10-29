@@ -166,3 +166,14 @@ async def test_bad_timezone_422(api, auth):
     assert r.status_code == 422 and "часовой пояс" in r.json()["detail"]
     r = await api.client.get(URL, headers=auth, params=params(tz="../../etc/passwd"))
     assert r.status_code == 422
+
+
+async def test_excel_headers_use_labels(api, auth):
+    await add_doc(api, auth, data=DATA, created_at=datetime(2026, 10, 5, 12, tzinfo=UTC))
+    plain = [c.value for c in book(await api.client.get(URL, headers=auth, params=params()))["Документы"][1]]
+    body = {"labels": {"vat": "Налог"}, "queue_fields": []}
+    r = await api.client.put("/v1/schemas/invoice_ru/labels", headers=auth, json=body)
+    assert r.status_code == 200, r.text
+    header = [c.value for c in book(await api.client.get(URL, headers=auth, params=params()))["Документы"][1]]
+    assert "Налог" in header and "Налог" not in plain
+    assert len(header) == len(plain)

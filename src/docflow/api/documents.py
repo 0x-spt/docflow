@@ -27,6 +27,7 @@ from docflow.api.deps import (
 from docflow.api.limits import request_limit_bytes
 from docflow.db.models import Document
 from docflow.imaging.load import UnsupportedFile, count_pages, detect_kind
+from docflow.labels import resolve_labeled
 from docflow.pdf.digital import render_digital_pdf
 from docflow.pipeline import SchemaNotFound, process_job_id
 from docflow.queue import PROCESS_DOCUMENT
@@ -371,7 +372,9 @@ async def get_document_digital_pdf(
     if document.status not in ("ok", "needs_review"):
         raise HTTPException(status.HTTP_409_CONFLICT, DIGITAL_CONFLICT)
     try:
-        schema = await schemas.resolve(session, document.tenant_id, document.schema_slug, document.schema_version)
+        schema = await resolve_labeled(
+            schemas, session, document.tenant_id, document.schema_slug, document.schema_version
+        )
     except SchemaNotFound as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from None
     try:

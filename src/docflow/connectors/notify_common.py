@@ -2,6 +2,7 @@
 
 from docflow.connectors.base import ExportDoc
 from docflow.connectors.crm_common import clean, party, total_of
+from docflow.labels import total_field
 from docflow.validation.engine import INFO_CODES
 
 TEXT_MAX = 4000  # у Telegram потолок 4096; тот же запас, что у уведомлений о заявках
@@ -28,8 +29,21 @@ def money(value: float) -> str:
     return f"{value:,.2f}".replace(",", " ").replace(".", ",") + " ₽"
 
 
+def field_title(doc: ExportDoc, key: str) -> str | None:
+    """Название компании для поля верхнего уровня: отличается от штатного — оно, иначе None."""
+    now = next((f.title for f in doc.schema.fields if f.name == key), None)
+    was = next((f.title for f in doc.default_schema.fields if f.name == key), None)
+    return now if now and now != was else None
+
+
+def _reason(doc: ExportDoc, issue: dict) -> str:
+    message = one_line(issue.get("message"))
+    label = field_title(doc, str(issue.get("field") or ""))
+    return f"{one_line(label)}: {message}" if message and label else message
+
+
 def reasons(doc: ExportDoc) -> str:
-    messages = [m for i in doc.issues if i.get("code") not in INFO_CODES and (m := one_line(i.get("message")))]
+    messages = [m for i in doc.issues if i.get("code") not in INFO_CODES and (m := _reason(doc, i))]
     shown = "; ".join(messages[:REASONS_SHOWN])
     if len(messages) > REASONS_SHOWN:
         shown += f" и ещё {len(messages) - REASONS_SHOWN}"
@@ -49,7 +63,10 @@ def notification_text(doc: ExportDoc, purpose: str) -> str:
         lines = [f"Новый документ: {doc_ref(doc)}"]
         name = party(doc, "supplier").name or party(doc, "buyer").name
         total = total_of(doc)
-        extra = ", ".join(x for x in (name, f"сумма {money(total)}" if total is not None else "") if x)
+        key = total_field(doc.default_schema)
+        title = field_title(doc, key) if key else None
+        amount = f"{title}: {money(total)}" if title else f"сумма {money(total)}"
+        extra = ", ".join(x for x in (name, amount if total is not None else "") if x)
         if extra:
             lines.append(extra)
     if doc.cabinet_url:

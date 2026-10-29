@@ -47,7 +47,7 @@ class ExportDoc:
 
     id: uuid.UUID
     tenant_id: uuid.UUID
-    schema: DocSchema
+    schema: DocSchema  # с названиями компании: то, что видит человек
     data: dict[str, Any]
     status: str
     created_at: datetime
@@ -61,6 +61,12 @@ class ExportDoc:
     issues: list[dict[str, Any]] = field(default_factory=list)
     digital_loader: Loader | None = field(default=None, repr=False)
     scan_loader: Loader | None = field(default=None, repr=False)
+    # схема без подписей компании (штатные названия); не задана — подписей нет, и это `schema`
+    base_schema: DocSchema | None = None
+
+    @property
+    def default_schema(self) -> DocSchema:
+        return self.base_schema or self.schema
 
     async def load_digital_pdf(self) -> bytes | None:
         return await self.digital_loader() if self.digital_loader else None
