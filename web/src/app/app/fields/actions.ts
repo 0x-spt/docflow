@@ -20,7 +20,8 @@ export async function saveLabels(slug: string, _prev: LabelsState, form: FormDat
     const text = String(value).trim();
     if (text) labels[name.slice("label:".length)] = text; // пустое — название по умолчанию
   }
-  const queue_fields = form.getAll("queue").map(String);
+  // сводка «умолчание» шлёт форма: пустой список = очередь по умолчанию, следует за схемой
+  const queue_fields = form.get("queue_default") ? [] : form.getAll("queue").map(String);
   try {
     await apiFetchAuthed<FieldLabels>(`/v1/schemas/${encodeURIComponent(slug)}/labels`, {
       method: "PUT",
@@ -29,7 +30,7 @@ export async function saveLabels(slug: string, _prev: LabelsState, form: FormDat
     });
   } catch (e) {
     unstable_rethrow(e);
-    if (e instanceof ApiError && (e.status === 422 || e.status === 404)) {
+    if (e instanceof ApiError && (e.status === 422 || e.status === 404 || e.status === 409)) {
       return { error: e.detail, fieldErrors: e.fieldErrors };
     }
     if (e instanceof ApiError && e.status === 403) return { error: "Названия меняет владелец аккаунта." };

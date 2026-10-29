@@ -20,19 +20,26 @@ export default async function FieldsPage({
   const wanted = typeof sp.schema === "string" ? sp.schema : undefined;
   const current = schemas.find((s) => s.slug === wanted) ?? schemas[0];
   const labels = current
-    ? await apiFetchAuthed<FieldLabels>(`/v1/schemas/${encodeURIComponent(current.slug)}/labels`)
+    ? await apiFetchAuthed<FieldLabels>(
+        `/v1/schemas/${encodeURIComponent(current.slug)}/labels`,
+      )
     : null;
 
   return (
     <div className="flex flex-col gap-8">
       <div>
-        <h1 className="text-4xl font-semibold tracking-tight">Поля документов</h1>
+        <h1 className="text-4xl font-semibold tracking-tight">
+          Поля документов
+        </h1>
         <p className="mt-1 max-w-3xl text-muted">
-          Названия появятся в очереди, карточке документа, цифровом PDF, таблицах, Excel и уведомлениях. Модель их не
-          видит: распознавание идёт по исходным полям. Пустое поле — название по умолчанию. Ничего не отмечено в «В
-          очереди» — показываем контрагента, сумму и дату.
+          Названия появятся в очереди, карточке документа, цифровом PDF,
+          таблицах, Excel и уведомлениях. Модель их не видит: распознавание идёт
+          по исходным полям. Пустое поле — название по умолчанию. Ничего не
+          отмечено в «В очереди» — показываем контрагента, сумму и дату.
         </p>
-        {isOwner ? null : <p className="mt-2 font-medium">Названия меняет владелец аккаунта.</p>}
+        {isOwner ? null : (
+          <p className="mt-2 font-medium">Названия меняет владелец аккаунта.</p>
+        )}
       </div>
 
       {schemas.length === 0 ? (
@@ -62,10 +69,19 @@ export default async function FieldsPage({
 
       {labels ? (
         <section aria-labelledby="labels-title" className="flex flex-col gap-3">
-          <h2 id="labels-title" className="text-2xl font-semibold tracking-tight">
+          <h2
+            id="labels-title"
+            className="text-2xl font-semibold tracking-tight"
+          >
             {labels.title}
           </h2>
-          <FieldLabelsForm key={labels.slug} slug={labels.slug} rows={labels.rows} readOnly={!isOwner} />
+          <FieldLabelsForm
+            key={labels.slug}
+            slug={labels.slug}
+            rows={labels.rows}
+            readOnly={!isOwner}
+            queueDefault={labels.queue_default}
+          />
         </section>
       ) : null}
     </div>
