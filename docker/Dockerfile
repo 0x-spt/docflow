@@ -1,6 +1,6 @@
 # Один Dockerfile, три цели:
 #   api    — FastAPI + миграции и CLI оператора (без OCR)
-#   worker — то же + tesseract (rus, eng) и ghostscript для текстового слоя
+#   worker — то же + tesseract (rus, eng), ghostscript для текстового слоя и шрифт для демо-фото
 #   test   — worker + dev-зависимости и tests/: интеграционные тесты OCR внутри контейнера
 # Сборка из корня репозитория: docker build -f docker/Dockerfile --target worker .
 
@@ -38,7 +38,7 @@ CMD ["uvicorn", "docflow.api.app:create_app", "--factory", "--host", "0.0.0.0", 
 FROM base AS worker
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng ghostscript pngquant \
+        tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng ghostscript pngquant fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 USER docflow
 CMD ["arq", "docflow.worker.WorkerSettings"]
