@@ -267,6 +267,7 @@ function MappingEditor({
                   disabled={sheets && !included}
                   placeholder={sheets ? `по умолчанию: ${r.label}` : free.placeholder}
                   list={remote ? DATALIST_ID : undefined}
+                  aria-describedby={suggested ? `${id}-sug` : undefined}
                   aria-label={sheets ? `Название колонки для «${r.label}»` : undefined}
                   onChange={(e) => onChange({ ...value, [r.key]: e.target.value })}
                   className={`${cell} disabled:opacity-50`}
@@ -275,6 +276,7 @@ function MappingEditor({
                 <select
                   id={id}
                   value={current}
+                  aria-describedby={suggested ? `${id}-sug` : undefined}
                   onChange={(e) => onChange({ ...value, [r.key]: e.target.value })}
                   className={cell}
                 >
@@ -287,7 +289,7 @@ function MappingEditor({
                 </select>
               )}
               {suggested ? (
-                <p className="font-mono text-xs text-accent-text sm:col-start-2">
+                <p id={`${id}-sug`} className="font-mono text-xs text-accent-text sm:col-start-2">
                   Подобрано автоматически: проверьте и сохраните.
                 </p>
               ) : null}
@@ -318,7 +320,9 @@ export function DestinationForm({
   const [loadingRemote, startRemote] = useTransition();
   // актуальное сопоставление и схема для подстановки после ответа сервера (пока шёл запрос, пользователь мог править)
   const latest = useRef({ mapping, slug });
-  latest.current = { mapping, slug };
+  useEffect(() => {
+    latest.current = { mapping, slug };
+  }, [mapping, slug]);
   const editing = Boolean(destination);
   const savedSecrets = Boolean(destination?.has_secrets);
 
@@ -366,19 +370,25 @@ export function DestinationForm({
       );
       const next = { ...cur.mapping };
       const values: Record<string, string> = {};
+      // коды, уже занятые в форме (в том числе несохранёнными правками) или выданные в этом проходе
+      const used = new Set(Object.values(next).map((v) => v.trim()).filter(Boolean));
+      // Таблицы без отмеченных строк = «выгружать всё»: подбор не должен сужать выгрузку, отмечаем все поля схемы
+      const widen = connector.kind === "google_sheets" && !rows.some((r) => Object.hasOwn(next, r.key));
+      if (widen) for (const r of rows) next[r.key] = "";
       for (const r of rows) {
         const code = res.suggested[r.key];
-        if (!code) continue;
+        if (!code || used.has(code.trim())) continue;
         // пустая строка: нет ключа, пустое значение или (Таблицы) поле отмечено без названия
         if (Object.hasOwn(next, r.key) && next[r.key].trim() !== "") continue;
         next[r.key] = code;
         values[r.key] = code;
+        used.add(code.trim());
       }
       const n = Object.keys(values).length;
       setMapping(next);
       setApplied({ slug: reqSlug, values, saveState: state });
       setRemoteMsg({
-        text: `Подобрано ${n} из ${rows.length}; полей в ${remoteLabel}: ${res.fields.length}.`,
+        text: `Подобрано ${n} из ${rows.length}; полей в ${remoteLabel}: ${res.fields.length}.${widen ? " Отмечены все поля схемы, чтобы не сузить выгрузку." : ""}`,
         error: false,
       });
     });
@@ -481,7 +491,10 @@ export function DestinationForm({
             connector={connector}
             schemas={schemas}
             slug={slug}
-            onSlug={setSlug}
+            onSlug={(v) => {
+              setSlug(v);
+              setRemoteMsg(null);
+            }}
             value={mapping}
             onChange={setMapping}
             remote={remote}
@@ -491,7 +504,7 @@ export function DestinationForm({
       ) : null}
 
       <div className="flex flex-wrap gap-3">
-        <Button type="submit" disabled={pending}>
+        <Button type="submit" disabled={pending || loadingRemote}>
           {pending ? "Сохраняем…" : editing ? "Сохранить" : "Подключить"}
         </Button>
         <Button href="/app/integrations" variant="ghost">
