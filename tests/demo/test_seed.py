@@ -1,6 +1,6 @@
 import uuid
 from collections import Counter
-from datetime import date, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 import pytest
 from cryptography.fernet import Fernet
@@ -121,6 +121,11 @@ async def test_dates_backdated(sm, blobs, settings):
         assert timedelta(0) <= d.finished_at - d.created_at < timedelta(hours=1)
         if d.reviewed_at is not None:
             assert d.reviewed_at > d.finished_at
+        # создание и проверка — в будни, в рабочие часы
+        for at in (d.created_at, d.reviewed_at):
+            if at is not None:
+                at = at.astimezone(MSK)
+                assert at.weekday() < 5 and time(9) <= at.time() <= time(18), (d.id, at)
     # даты разнесены, а не все в один день
     assert len({d.created_at.astimezone(MSK).date() for d in docs}) >= 10
 
@@ -208,16 +213,58 @@ async def test_optional_destinations(sm, blobs, settings):
 
 
 def test_timeline_clamps_future_and_keeps_order():
-    from datetime import datetime
-
     from docflow.demo.data import scenarios
 
     today = date(2026, 10, 29)
-    # самые свежие сценарии — 3 дня назад в 11 и 12 ч: «сейчас» раньше них, их надо прижать
-    now = datetime(2026, 10, 26, 11, 30, tzinfo=MSK)
-    line = seed_module._timeline(scenarios(today), today, now)
-    assert any(sc.days_ago == 3 and sc.hour == 12 for sc, _ in line)
+    # «сейчас» на неделю раньше today: более свежие сценарии надо прижать
+    now = datetime(2026, 10, 22, 11, 30, tzinfo=MSK)
+    items = scenarios(today)
+    assert any(sc.days_ago < 7 for sc in items)
+    line = seed_module._timeline(items, today, now)
     times = [at for _, at in line]
     assert len(line) == 24 and times == sorted(times)
     assert all(at < now for at in times)
     assert all(at.date() >= today - timedelta(days=21) for at in times)
+
+
+# понедельник, среда, пятница, суббота, воскресенье
+@pytest.mark.parametrize("today", [date(2026, 10, 26), date(2026, 10, 28), date(2026, 10, 30), date(2026, 10, 31),
+                                   date(2026, 11, 1)], ids=str)
+def test_timeline_and_reviews_on_workdays(today):
+    from docflow.demo.data import scenarios
+
+    now = datetime.combine(today, time(23, 59), MSK)
+    for sc, at in seed_module._timeline(scenarios(today), today, now):
+        assert at.weekday() < 5 and time(9) <= at.time() < time(18), (sc.key, at)
+        assert today - timedelta(days=21) <= at.date() < today
+        if sc.review:
+            for minutes in (120, 360):
+                rev = seed_module._work_shift(at, timedelta(minutes=minutes))
+                assert rev.weekday() < 5 and time(9) <= rev.time() <= time(18), (sc.key, rev)
+                assert at < rev < now and rev.date() < today, (sc.key, rev)
+
+
+def test_work_shift():
+    fri = datetime(2026, 10, 30, 16, 0, tzinfo=MSK)
+    assert seed_module._work_shift(fri, timedelta(hours=1)) == datetime(2026, 10, 30, 17, 0, tzinfo=MSK)
+    assert seed_module._work_shift(fri, timedelta(hours=2)) == datetime(2026, 10, 30, 18, 0, tzinfo=MSK)
+    # остаток после 18:00 — на понедельник с 9:00
+    assert seed_module._work_shift(fri, timedelta(hours=5)) == datetime(2026, 11, 2, 12, 0, tzinfo=MSK)
+
+
+async def test_taken_email_fails_before_reset(sm, blobs, settings):
+    first, _ = await _seed(sm, blobs, settings)
+    async with sm() as s:
+        other = Tenant(name="Ромашка", extractor="claude")
+        s.add(other)
+        await s.flush()
+        s.add(User(tenant_id=other.id, email="taken@example.test", password_hash="x", role="owner"))
+        await s.commit()
+    with pytest.raises(DemoError, match="taken@example.test"):
+        await _seed(sm, blobs, settings, reset=True, owner_email="taken@example.test")
+    # прежний демо-клиент не тронут
+    assert await _all(sm, Tenant, Tenant.id == first.tenant_id)
+    assert len(await _all(sm, Document, Document.tenant_id == first.tenant_id)) == 24
+    # своя почта демо-клиента сбросу не мешает
+    second, _ = await _seed(sm, blobs, settings, reset=True)
+    assert second.tenant_id != first.tenant_id

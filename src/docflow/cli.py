@@ -293,7 +293,8 @@ def cmd_seed_demo(args: argparse.Namespace) -> int:
     except DemoExists:
         raise UserError(f"демо-клиент «{DEMO_TENANT_NAME}» уже есть; пересоздать: docflow seed-demo --reset") from None
     except (DemoError, FontMissing) as e:
-        raise UserError(str(e)) from e
+        # сбой посреди прогона оставляет недостроенного демо-клиента
+        raise UserError(f"{e}; если демо-клиент успел создаться — после исправления: docflow seed-demo --reset") from e
     settings = get_settings()
     print(f"Демо-клиент «{DEMO_TENANT_NAME}» создан, id {result.tenant_id}.")
     print(f"Кабинет: {settings.public_site_url.rstrip('/')}/login")

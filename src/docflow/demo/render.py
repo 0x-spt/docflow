@@ -275,6 +275,14 @@ def _upd_page(page: _Page, a: dict, title: str, rng: random.Random) -> None:
                      a.get("supplier_inn") or "")
 
 
+def act_vat_line(a: dict) -> tuple[str, str]:
+    """ИП (ИНН из 12 цифр) — без НДС; ООО — НДС 20% в том числе, из итога."""
+    if len(a.get("contractor_inn") or "") == 12:
+        return ("Без НДС", "")
+    total = a.get("total")
+    return ("В т.ч. НДС 20%:", _num(round(total * 20 / 120, 2)) if isinstance(total, int | float) else "")
+
+
 def _act_page(page: _Page, a: dict, title: str, rng: random.Random) -> None:
     page.line(f"Акт № {a.get('number') or ''} от {_date(a.get('issued'))}", 32, True)
     page.line("об оказании услуг (выполнении работ)", 24)
@@ -288,9 +296,9 @@ def _act_page(page: _Page, a: dict, title: str, rng: random.Random) -> None:
             for i, r in enumerate(_items(a), 1)]
     page.table([50, 500, 100, 90, 140, 200], ["№", "Наименование работ", "Кол-во", "Ед.", "Цена", "Сумма"], rows,
                ["center", "left", "right", "center", "right", "right"], 20)
-    page.totals([("Итого:", _num(a.get("total")))])
+    page.totals([("Итого:", _num(a.get("total"))), act_vat_line(a)])
     page.line("Вышеперечисленные работы выполнены полностью и в срок. Заказчик претензий по объёму, качеству "
-              "и срокам оказания услуг не имеет. НДС не облагается.", 20)
+              "и срокам оказания услуг не имеет.", 20)
     _signature_block(page, rng, ["Исполнитель", "Заказчик"], a.get("contractor") or "",
                      a.get("contractor_inn") or "")
 

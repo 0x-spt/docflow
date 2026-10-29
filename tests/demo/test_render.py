@@ -52,3 +52,10 @@ def test_render_without_font_message(monkeypatch, tmp_path: Path):
     with pytest.raises(render.FontMissing, match="fonts-dejavu-core"):
         render.find_font()
     get_settings.cache_clear()
+
+
+def test_act_vat_line():
+    assert render.act_vat_line({"contractor_inn": "660012345678", "total": 1200}) == ("Без НДС", "")
+    assert render.act_vat_line({"contractor_inn": "6600123456", "total": 1200}) == ("В т.ч. НДС 20%:", "200,00")
+    acts = [s.answer for s in scenarios(date(2026, 10, 29)) if s.schema == "act_works"]
+    assert {render.act_vat_line(a)[0] for a in acts} == {"Без НДС", "В т.ч. НДС 20%:"}

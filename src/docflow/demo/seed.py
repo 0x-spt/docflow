@@ -59,6 +59,7 @@ MSK = timezone(timedelta(hours=3))  # без перехода на летнее 
 MAIL_FROM = "docflow@severnyput.example"
 MAIL_ACCOUNTING = "buh@severnyput.example"
 MAIL_OPERATOR = "operator@severnyput.example"
+WORK_START, WORK_END = time(9), time(18)
 
 
 class DemoExists(Exception):
@@ -191,6 +192,18 @@ def _timeline(items: list[Scenario], today: date, now: datetime) -> list[tuple[S
     return [(sc, min(at, now - timedelta(minutes=10 * (n - i)))) for i, (at, sc) in enumerate(natural)]
 
 
+def _work_shift(at: datetime, delta: timedelta) -> datetime:
+    """at + delta рабочего времени: что не уместилось до 18:00, переносится на 9:00 следующего буднего дня."""
+    end = datetime.combine(at.date(), WORK_END, at.tzinfo)
+    t = at + delta
+    if t <= end:
+        return t
+    day = at.date() + timedelta(days=1)
+    while day.weekday() >= 5:
+        day += timedelta(days=1)
+    return datetime.combine(day, WORK_START, at.tzinfo) + (t - max(at, end))
+
+
 async def _create_tenant(
     sm: async_sessionmaker, opts: SeedOptions, dests: list[tuple[_Dest, str | None]]
 ) -> tuple[SeedResult, uuid.UUID, DemoDestinations]:
@@ -278,8 +291,8 @@ async def _run_scenario(
         }
         if sc.review is not None:
             real = await session.scalar(select(Document.reviewed_at).where(Document.id == doc_id))
-            # проверка «через 2–6 ч», но не позже, чем она прошла на самом деле
-            values["reviewed_at"] = min(created + timedelta(minutes=rng.randint(120, 360)), real or now)
+            # проверка «через 2–6 рабочих часов», но не позже, чем она прошла на самом деле
+            values["reviewed_at"] = min(_work_shift(created, timedelta(minutes=rng.randint(120, 360))), real or now)
         await session.execute(update(Document).where(Document.id == doc_id).values(**values))
         await session.commit()
 
@@ -294,17 +307,21 @@ async def seed_demo(
 ) -> SeedResult:
     dests = await _prepare_destinations(opts, settings)
     async with sm() as session:
-        exists = bool(await _demo_ids(session))
-    if exists and not opts.reset:
-        raise DemoExists(DEMO_TENANT_NAME)
-    if exists:
-        await reset_demo(sm, blobs)
-    async with sm() as session:
+        demo = await _demo_ids(session)
+        # почта занята в чужом тенанте — до сброса: неудачный запуск ничего не трогает
         taken = (
-            await session.execute(select(User.email).where(User.email.in_([opts.owner_email, opts.operator_email])))
+            await session.execute(
+                select(User.email).where(
+                    User.email.in_([opts.owner_email, opts.operator_email]), User.tenant_id.not_in(demo)
+                )
+            )
         ).scalars().all()
+    if demo and not opts.reset:
+        raise DemoExists(DEMO_TENANT_NAME)
     if taken:
         raise DemoError(f"пользователь {', '.join(sorted(taken))} уже есть в другом тенанте")
+    if demo:
+        await reset_demo(sm, blobs)
 
     result, operator_id, _ = await _create_tenant(sm, opts, dests)
     principal = Principal(result.tenant_id, user_id=operator_id, role="operator")

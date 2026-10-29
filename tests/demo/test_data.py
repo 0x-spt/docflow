@@ -4,6 +4,7 @@ from datetime import date
 
 import pytest
 
+from docflow.demo.data import _ITEMS as ITEMS
 from docflow.demo.data import (
     ACT_SCHEMA,
     BUYER,
@@ -105,17 +106,53 @@ def test_reject_is_duplicate_of_earlier_invoice():
     assert dup.review_note == f"Дубль счёта № {dup.answer['number']}"
 
 
-@pytest.mark.parametrize("today", [date(2026, 3, 1), date(2026, 12, 31), date(2026, 11, 2)], ids=str)
+# 2026-10-26 — понедельник, 2026-11-01 и 2026-03-01 — воскресенья, 2026-10-31 — суббота
+DAYS = [date(2026, 3, 1), date(2026, 12, 31), date(2026, 11, 2), date(2026, 10, 26), date(2026, 11, 1),
+        date(2026, 10, 31), TODAY]
+
+
+@pytest.mark.parametrize("today", DAYS, ids=str)
 def test_scenarios_dates_in_window(today):
     for sc in scenarios(today):
-        assert 0 <= sc.days_ago <= 20
-        assert 9 <= sc.hour <= 18
+        assert 1 <= sc.days_ago <= 20, sc.key
+        assert 9 <= sc.hour <= 17, sc.key
+        created = date.fromordinal(today.toordinal() - sc.days_ago)
+        assert created.weekday() < 5, (sc.key, created)
         if sc.answer is None:
             continue
         issued = date.fromisoformat(sc.answer["issued"])
-        created = date.fromordinal(today.toordinal() - sc.days_ago)
-        assert issued <= today
-        assert 0 <= (created - issued).days <= 3, sc.key
+        assert issued <= created and issued.weekday() < 5, sc.key
+        assert 0 <= (created - issued).days <= 5, sc.key
+
+
+@pytest.mark.parametrize("today", DAYS, ids=str)
+def test_reviewed_far_enough(today):
+    """Проверка, перенесённая на следующий будний день, должна остаться в прошлом."""
+    for sc in scenarios(today):
+        if sc.review:
+            assert sc.days_ago >= 4, sc.key
+
+
+def test_geography():
+    """Покупатель в Екатеринбурге; издалека — не больше двух поставщиков и только товары."""
+    from docflow.demo.data import _OUTSIDER, _SUPPLIERS, BETON, KARPENKO, SAVELIEVA
+
+    assert BUYER.inn[:2] == "66" and "Екатеринбург" in BUYER.address
+    companies = [s.company for s in _SUPPLIERS] + [_OUTSIDER]
+    far = [c for c in companies if c.inn[:2] != "66"]
+    assert len(far) <= 2
+    for c in companies:
+        assert ("Свердловская" in c.address or "Екатеринбург" in c.address) == (c.inn[:2] == "66"), c.name
+    for local in (BETON, KARPENKO, SAVELIEVA):
+        assert local.company.inn[:2] == "66"
+    # всё, что делается на объекте, — местные подрядчики
+    on_site = {"concrete", "pump", "unloading", "excavator", "roof_work", "steel_work", "electro_work", "cleanup",
+               "waste", "base_work", "delivery"}
+    names = {ITEMS[k][0] for k in on_site}
+    for sc in scenarios(TODAY):
+        if sc.answer and any(r["name"] in names for r in sc.answer["items"]):
+            inn = sc.answer.get("supplier_inn") or sc.answer.get("contractor_inn")
+            assert inn[:2] == "66", sc.key
 
 
 def test_requisites_valid():
@@ -139,6 +176,7 @@ def test_requisites_valid():
     answers = [sc.answer for sc in scenarios(TODAY) if sc.answer]
     all_inns = {a.get("supplier_inn") or a.get("contractor_inn") for a in answers}
     assert "7707083893" not in all_inns and BUYER.inn not in all_inns
+    assert all(i[2:4] == "00" for i in all_inns | {BUYER.inn})
 
 
 def test_suppliers_dict():

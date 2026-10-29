@@ -18,15 +18,6 @@ DEMO_TENANT_NAME = "Демо — ООО «Северный Путь»"
 APPROVAL_LIMIT = 500_000
 VAT_RATE = 0.2
 
-_CITY = {
-    "77": "г. Москва",
-    "78": "г. Санкт-Петербург",
-    "50": "Московская обл., г. Мытищи",
-    "47": "Ленинградская обл., г. Гатчина",
-    "66": "г. Екатеринбург",
-}
-
-
 @dataclass(frozen=True)
 class Company:
     name: str
@@ -42,32 +33,45 @@ class _Supplier:
     aliases: tuple[str, ...]
 
 
-def _company(rng: random.Random, name: str, street: str, *, person: bool = False) -> Company:
-    inn = make_inn(rng, person=person)
-    return Company(name, inn, None if person else make_kpp(inn, rng), f"{_CITY[inn[:2]]}, {street}")
+def _company(rng: random.Random, name: str, region: str, city: str, street: str, *, person: bool = False) -> Company:
+    inn = make_inn(rng, region=region, person=person)
+    return Company(name, inn, None if person else make_kpp(inn, rng), f"{city}, {street}")
+
+
+_EKB = "г. Екатеринбург"
+_SVERDL = "Свердловская обл., "
 
 
 # реквизиты — из своего генератора: от today не зависят
 _RNG = random.Random(SEED)
-BUYER = _company(_RNG, "ООО «Северный Путь»", "ул. Полярная, д. 14, оф. 3")
+BUYER = _company(_RNG, "ООО «Северный Путь»", "66", _EKB, "ул. Полярная, д. 14, оф. 3")
 
+# покупатель в Екатеринбурге: поставщики в основном из Свердловской области; издалека везут только
+# металл (Челябинск) и лес (Архангельская обл.) — бетон, разгрузка, техника и монтаж всегда местные
 _SUPPLIER_SPECS = (
-    ("ООО «СтройКомплект-Север»", "Промышленный пр., д. 8", False, ("СтройКомплект-Север", "СтройКомплект Север")),
-    ("ООО «Северная Кровля»", "ул. Кровельщиков, д. 21", False, ("Северная Кровля",)),
-    ("ООО «Металлобаза Полярная»", "ш. Складское, д. 3, стр. 2", False, ("Металлобаза Полярная",)),
-    ("ООО «Бетонный узел Заречье»", "ул. Карьерная, д. 1", False, ("БУ Заречье", "Бетонный узел Заречье")),
-    ("ООО «Лесоторг Онежский»", "наб. Лесная, д. 5", False, ("Лесоторг Онежский",)),
-    ("ООО «Электроснаб Плюс»", "ул. Энергетиков, д. 40", False, ("Электроснаб Плюс", "Электроснаб+")),
-    ("ИП Карпенко Олег Витальевич", "ул. Садовая, д. 9, кв. 17", True, ("ИП Карпенко О. В.", "Карпенко О. В.")),
-    ("ИП Савельева Марина Андреевна", "пер. Тихий, д. 2", True, ("ИП Савельева М. А.", "Савельева М. А.")),
-)
+    ("ООО «СтройКомплект-Север»", "66", _EKB, "Промышленный пр., д. 8", False,
+     ("СтройКомплект-Север", "СтройКомплект Север")),
+    ("ООО «Северная Кровля»", "66", _SVERDL + "г. Берёзовский", "ул. Кровельщиков, д. 21", False,
+     ("Северная Кровля",)),
+    ("ООО «Металлобаза Полярная»", "74", "г. Челябинск", "ш. Складское, д. 3, стр. 2", False,
+     ("Металлобаза Полярная",)),
+    ("ООО «Бетонный узел Заречье»", "66", _SVERDL + "г. Заречный", "ул. Карьерная, д. 1", False,
+     ("БУ Заречье", "Бетонный узел Заречье")),
+    ("ООО «Лесоторг Онежский»", "29", "Архангельская обл., г. Онега", "наб. Лесная, д. 5", False,
+     ("Лесоторг Онежский",)),
+    ("ООО «Электроснаб Плюс»", "66", _EKB, "ул. Энергетиков, д. 40", False, ("Электроснаб Плюс", "Электроснаб+")),
+    ("ИП Карпенко Олег Витальевич", "66", _EKB, "ул. Садовая, д. 9, кв. 17", True,
+     ("ИП Карпенко О. В.", "Карпенко О. В.")),
+    ("ИП Савельева Марина Андреевна", "66", _SVERDL + "г. Верхняя Пышма", "пер. Тихий, д. 2", True,
+     ("ИП Савельева М. А.", "Савельева М. А.")),
+)  # fmt: skip
 _SUPPLIERS = [
-    _Supplier(_company(_RNG, name, street, person=person), make_account(DEMO_BANK.bik, _RNG), aliases)
-    for name, street, person, aliases in _SUPPLIER_SPECS
+    _Supplier(_company(_RNG, name, region, city, street, person=person), make_account(DEMO_BANK.bik, _RNG), aliases)
+    for name, region, city, street, person, aliases in _SUPPLIER_SPECS
 ]
 STROYKOMPLEKT, KROVLYA, METALL, BETON, LES, ELEKTRO, KARPENKO, SAVELIEVA = _SUPPLIERS
 # подрядчик акта, которого нет в справочнике поставщиков
-_OUTSIDER = _company(_RNG, "ООО «Гранит-Монолит»", "ул. Каменная, д. 12")
+_OUTSIDER = _company(_RNG, "ООО «Гранит-Монолит»", "66", _SVERDL + "г. Арамиль", "ул. Каменная, д. 12")
 
 SUPPLIERS_DICT: dict = {
     "title": "Поставщики",
@@ -245,14 +249,45 @@ class _When:
     issued: date = field(default=date.min)
 
 
-def _when(rng: random.Random, today: date, *, days: tuple[int, int] = (0, 20), gap: tuple[int, int] = (0, 3)) -> _When:
-    w = _When(rng.randint(*days), rng.randint(9, 18))
-    w.issued = today - timedelta(days=w.days_ago + rng.randint(*gap))
+def _workday_back(d: date) -> date:
+    """Суббота и воскресенье → предыдущая пятница."""
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
+def _workday_forward(d: date) -> date:
+    while d.weekday() >= 5:
+        d += timedelta(days=1)
+    return d
+
+
+def _workdays_before(d: date, n: int) -> date:
+    while n:
+        d -= timedelta(days=1)
+        n -= d.weekday() < 5
+    return d
+
+
+def _when(rng: random.Random, today: date, *, days: tuple[int, int] = (1, 20), gap: tuple[int, int] = (0, 3)) -> _When:
+    """Будний день в окне days (дней назад), час 9–17 МСК; дата документа — за gap рабочих дней до создания.
+
+    Сегодняшний день не берётся (days ≥ 1): иначе момент мог бы оказаться позже «сейчас».
+    """
+    created = _workday_back(today - timedelta(days=rng.randint(*days)))
+    if (today - created).days > days[1]:  # у края окна выходные — вперёд, на понедельник
+        created = _workday_forward(created + timedelta(days=1))
+    w = _When((today - created).days, rng.randint(9, 17))
+    w.issued = _workdays_before(created, rng.randint(*gap))
     return w
 
 
 def scenarios(today: date) -> list[Scenario]:
-    """24 сценария: 17 ok, 6 needs_review (три из них проверяет оператор), 1 failed."""
+    """24 сценария: 17 ok, 6 needs_review, 1 failed (фото не читается).
+
+    Три needs_review проверяет оператор: два одобряет, один (дубль) отклоняет — после проверок
+    19 ok, 3 needs_review, 2 failed. Создание — по будним дням в 9–17 ч, без сегодняшнего дня.
+    """
     rng = random.Random(SEED)
     out: list[Scenario] = []
 
@@ -277,17 +312,19 @@ def scenarios(today: date) -> list[Scenario]:
     add("inv_blocks", "invoice_ru",
         _invoice(STROYKOMPLEKT, "СК-1102", w.issued, [("gasblock", 24), ("brick", 2000)]), w)
 
-    # крупный счёт (681 900 ₽) — согласование; через день-два поставщик прислал его повторно
-    w = _when(rng, today, days=(3, 20), gap=(0, 1))
+    # крупный счёт (681 900 ₽) — согласование; на следующий рабочий день поставщик прислал его повторно.
+    # Проверенные — не ближе 4 дней: проверка, перенесённая на следующий рабочий день, всё равно в прошлом
+    w = _when(rng, today, days=(7, 20), gap=(0, 1))
     big = _invoice(METALL, "МП-2187", w.issued, [("rebar", 6.5), ("pipe", 300)])
     add("inv_metal_big", "invoice_ru", big, w, "needs_review", review="approve",
         review_note="Согласовано: арматура и труба под каркас склада")
-    dup = _When(w.days_ago - rng.randint(1, 2), rng.randint(9, 18), w.issued)
+    dup_day = _workday_forward(today - timedelta(days=w.days_ago - 1))
+    dup = _When((today - dup_day).days, rng.randint(9, 17), w.issued)
     add("inv_metal_big_dup", "invoice_ru", dict(big), dup, "needs_review", review="reject",
         review_note=f"Дубль счёта № {big['number']}")
 
     # модель прочла 58 000 как 85 000 в первой строке: строка и «Итого» не сходятся, оператор правит
-    w = _when(rng, today)
+    w = _when(rng, today, days=(4, 20))
     wool = _invoice(KROVLYA, "431", w.issued, [("wool", 40), ("membrane", 6), ("delivery", 1)])
     misread = [dict(r) for r in wool["items"]]
     misread[0]["amount"] = 85000

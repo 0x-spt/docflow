@@ -1,10 +1,17 @@
-"""Вымышленные реквизиты с верными контрольными суммами (не принадлежат реальным лицам)."""
+"""Вымышленные реквизиты с верными контрольными суммами, которые не могут принадлежать реальным лицам.
+
+ИНН: 1–2 цифры — регион, 3–4 — номер инспекции ФНС; инспекции с номером 00 нет ни в одном регионе, поэтому
+ИНН вида «РР00…» никогда не выдавался. БИК: 04 + код территории по ОКАТО (3–4 цифры) + …; территории
+с кодом 00 нет, поэтому БИК 0400… не принадлежит ни одному банку. Ничего не сверяется с внешними реестрами.
+"""
 import random
 from typing import NamedTuple
 
 from docflow.validation.checksums import _INN10, _INN12_1, _INN12_2, _inn_digit, valid_account
 
 _REGIONS = ("77", "78", "50", "47", "66")
+NO_INSPECTION = "00"  # цифры 3–4 ИНН: несуществующая инспекция
+NO_TERRITORY = "0400"  # первые 4 цифры БИК: Россия + несуществующая территория 00
 
 
 class Bank(NamedTuple):
@@ -13,21 +20,23 @@ class Bank(NamedTuple):
     corr: str
 
 
-# БИК вымышленный; корр. счёт — стандартная форма 30101810 + 000000000 + 3 последние цифры БИК
-DEMO_BANK = Bank(name="АО «Банк Северный Демо»", bik="044599731", corr="30101810" + "000000000" + "731")
+# корр. счёт — стандартная форма 30101810 + 000000000 + 3 последние цифры БИК
+_BIK = NO_TERRITORY + "00" + "731"
+DEMO_BANK = Bank(name="АО «Банк Северный Демо»", bik=_BIK, corr="30101810" + "000000000" + _BIK[-3:])
 
 
 def _rand_digits(rng: random.Random, n: int) -> str:
     return "".join(str(rng.randrange(10)) for _ in range(n))
 
 
-def make_inn(rng: random.Random, *, person: bool = False) -> str:
-    """10 цифр для юрлица, 12 для ИП."""
+def make_inn(rng: random.Random, *, region: str | None = None, person: bool = False) -> str:
+    """10 цифр для юрлица, 12 для ИП; region — две цифры (по умолчанию случайный)."""
+    head = (region or rng.choice(_REGIONS)) + NO_INSPECTION
     if person:
-        d = rng.choice(_REGIONS) + _rand_digits(rng, 8)
+        d = head + _rand_digits(rng, 6)
         d += str(_inn_digit(d, _INN12_1))
         return d + str(_inn_digit(d, _INN12_2))
-    d = rng.choice(_REGIONS) + _rand_digits(rng, 7)
+    d = head + _rand_digits(rng, 5)
     return d + str(_inn_digit(d, _INN10))
 
 

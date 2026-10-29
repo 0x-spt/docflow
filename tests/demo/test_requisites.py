@@ -1,6 +1,6 @@
 import random
 
-from docflow.demo.requisites import DEMO_BANK, make_account, make_inn, make_kpp
+from docflow.demo.requisites import DEMO_BANK, NO_TERRITORY, make_account, make_inn, make_kpp
 from docflow.validation.checksums import valid_account, valid_bik, valid_inn, valid_kpp
 
 
@@ -42,3 +42,19 @@ def test_not_known_real():
     rng = random.Random(4)
     assert all(make_inn(rng) != "7707083893" for _ in range(500))
     assert DEMO_BANK.bik != "044525225"
+
+
+def test_inn_under_missing_inspection():
+    """Цифры 3–4 ИНН — «00»: такой инспекции нет, значит ИНН не мог быть выдан."""
+    rng = random.Random(5)
+    inns = [make_inn(rng, person=p) for p in (False, True) for _ in range(300)]
+    inns += [make_inn(rng, region="66"), make_inn(rng, region="29", person=True)]
+    assert all(i[2:4] == "00" for i in inns)
+    assert inns[-2].startswith("6600") and inns[-1].startswith("2900")
+    assert make_kpp(inns[-2], rng).startswith("6600")
+
+
+def test_bik_in_missing_territory():
+    assert NO_TERRITORY == "0400"
+    assert DEMO_BANK.bik.startswith(NO_TERRITORY) and len(DEMO_BANK.bik) == 9
+    assert DEMO_BANK.corr == "30101810" + "000000000" + DEMO_BANK.bik[-3:]
