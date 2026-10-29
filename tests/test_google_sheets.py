@@ -18,7 +18,7 @@ from docflow.connectors import google_sheets
 from docflow.connectors.base import REGISTRY, ConnectorError, DestCtx, ExportDoc
 from docflow.labels import apply_labels
 from docflow.schemas.library import builtin_schemas
-from docflow.tabular import docs_header
+from docflow.tabular import docs_header, items_header
 
 SHEET = "SID123"
 API = f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET}"
@@ -112,6 +112,7 @@ class Sheet:
         self.created: list[str] = []
         self.formats: list[dict] = []
         self.props: list[dict] = []
+        self.fail_append: list[str] = []  # листы, чья следующая запись строк ответит 503
         router.get(API).mock(side_effect=lambda req: httpx.Response(200, json=meta(*self.titles)))
         router.post(f"{API}:batchUpdate").mock(side_effect=self._batch)
         router.get(url__regex=rf"{API}/values/.*").mock(side_effect=self._read)
@@ -147,7 +148,10 @@ class Sheet:
         rows = self.cells[sheet]
         col = re.search(r"!([A-Z]+):\1$", raw)
         if col:  # колонка «X:X»
-            i = ord(col.group(1)) - ord("A")  # в тестах колонок меньше 26
+            i = 0
+            for ch in col.group(1):  # A=0 … Z=25, AA=26
+                i = i * 26 + ord(ch) - ord("A") + 1
+            i -= 1
             shown = [[str(r[i]).removeprefix("'")] if len(r) > i else [] for r in rows]  # Таблицы не показывают «'»
             while shown and not shown[-1]:
                 shown.pop()
@@ -157,6 +161,9 @@ class Sheet:
 
     def _append(self, req):
         sheet = self._sheet_of(req.url.raw_path.decode())
+        if sheet in self.fail_append:
+            self.fail_append.remove(sheet)
+            return httpx.Response(503)
         values = json.loads(req.content)["values"]
         start = len(self.cells[sheet]) + 1
         self.cells[sheet].extend(values)
@@ -420,8 +427,9 @@ async def test_date_format_applied_when_header_already_exists(http):
     assert not sheet.puts  # чужую шапку не трогаем
     assert {f["range"]["startColumnIndex"] for f in sheet.formats if f["range"]["sheetId"] == 1} == {1}
     assert sheet.cells[DOCS][1] == ["", 46300]
-    assert sheet.cells[ITEMS][1:] == [["'11111111-1111-1111-1111-111111111111", "Болт"]] * 1 + [
-        ["'11111111-1111-1111-1111-111111111111", "Гайка"]
+    assert sheet.cells[ITEMS][1:] == [
+        ["'11111111-1111-1111-1111-111111111111", "Болт"],
+        ["'11111111-1111-1111-1111-111111111111", "Гайка"],
     ]
 
 
@@ -551,16 +559,112 @@ async def test_client_header_dedupe_by_id_column(http):
     assert {k: len(v) for k, v in sheet.cells.items()} == before
 
 
-async def test_client_header_without_id_column_does_not_repeat_items(http):
+async def test_client_items_without_id_written_before_doc_row(http):
     with respx.mock(assert_all_called=False) as router:
         mock_token(router)
-        sheet = Sheet(
-            router,
-            docs_col=[["Поставщик", "ID документа"], ["ООО Ромашка", "'11111111-1111-1111-1111-111111111111"]],
-            items_col=[["Наименование", "Цена"]],
-        )
+        sheet = Sheet(router, items_col=[["Наименование", "Цена"]])
+        c = google_sheets.GoogleSheets()
+        await c.export(make_ctx(http), make_doc())
+        before = {k: len(v) for k, v in sheet.cells.items()}
+        await c.export(make_ctx(http), make_doc())
+    assert [name for name, _ in sheet.appends] == [ITEMS, DOCS]  # позиции — раньше строки документа
+    assert sheet.cells[ITEMS][1:] == [["Болт", 100], ["Гайка", 50.5]]
+    # повтор: строка документа есть — значит, и позиции записаны; ничего не дописываем
+    assert {k: len(v) for k, v in sheet.cells.items()} == before
+
+
+async def test_client_items_without_id_retry_after_doc_failure_duplicates_not_loses(http):
+    with respx.mock(assert_all_called=False) as router:
+        mock_token(router)
+        sheet = Sheet(router, items_col=[["Наименование", "Цена"]])
+        sheet.fail_append.append(DOCS)
+        c = google_sheets.GoogleSheets()
+        with pytest.raises(ConnectorError) as e:
+            await c.export(make_ctx(http), make_doc())
+        assert e.value.retryable
+        await c.export(make_ctx(http), make_doc())
+    assert len(sheet.cells[DOCS]) == 2  # строка документа записана со второй попытки
+    # позиции без колонки ID не опознать: при повторе они видны дважды, но не потеряны
+    assert [r[0] for r in sheet.cells[ITEMS][1:]] == ["Болт", "Гайка", "Болт", "Гайка"]
+
+
+async def test_client_items_with_id_column_dedupe(http):
+    with respx.mock(assert_all_called=False) as router:
+        mock_token(router)
+        sheet = Sheet(router, items_col=[["Наименование", "ID документа"]])
+        c = google_sheets.GoogleSheets()
+        await c.export(make_ctx(http), make_doc())
+        sheet.cells[DOCS] = sheet.cells[DOCS][:1]  # строку документа удалили: позиции уже есть
+        await c.export(make_ctx(http), make_doc())
+    assert sheet.cells[ITEMS][1:] == [
+        ["Болт", "'11111111-1111-1111-1111-111111111111"],
+        ["Гайка", "'11111111-1111-1111-1111-111111111111"],
+    ]
+    assert len(sheet.cells[DOCS]) == 2
+
+
+async def test_items_without_known_columns_fail_before_any_write(http):
+    with respx.mock(assert_all_called=False) as router:
+        mock_token(router)
+        sheet = Sheet(router, items_col=[["Мусор"]])
+        with pytest.raises(ConnectorError) as e:
+            await google_sheets.GoogleSheets().export(make_ctx(http), make_doc())
+    assert e.value.message == google_sheets.NO_KNOWN_COLUMNS and not e.value.retryable
+    assert sheet.appends == [] and sheet.puts == []
+
+
+async def test_blank_a1_with_client_names_is_client_header(http):
+    with respx.mock(assert_all_called=False) as router:
+        mock_token(router)
+        sheet = Sheet(router, docs_col=[["", "Поставщик", "Номер"]])
+        await google_sheets.GoogleSheets().export(make_ctx(http), make_doc(items=None))
+    assert sheet.puts == []  # нашу шапку поверх названий клиента не пишем
+    assert sheet.appends == [(DOCS, [["", "ООО Ромашка", "'42"]])]
+
+
+async def test_id_column_beyond_z(http):
+    header = [f"Колонка {i}" for i in range(27)] + ["ID документа", "Поставщик"]
+    with respx.mock(assert_all_called=False) as router:
+        mock_token(router)
+        sheet = Sheet(router, docs_col=[header])
+        c = google_sheets.GoogleSheets()
+        await c.export(make_ctx(http), make_doc(items=None))
+        await c.export(make_ctx(http), make_doc(items=None))
+        reads = [str(call.request.url) for call in router.calls if "AB%3AAB" in str(call.request.url)]
+    assert len(reads) == 2 and len(sheet.appends) == 1
+    assert sheet.cells[DOCS][1][27:] == ["'11111111-1111-1111-1111-111111111111", "ООО Ромашка"]
+
+
+def test_column_letter():
+    assert [google_sheets.column_letter(i) for i in (0, 25, 26, 27, 701, 702)] == ["A", "Z", "AA", "AB", "ZZ", "AAA"]
+
+
+async def test_our_items_header_renamed_rewritten(http):
+    base = builtin_schemas()["invoice_ru"]
+    with respx.mock(assert_all_called=False) as router:
+        mock_token(router)
+        sheet = Sheet(router)
         await google_sheets.GoogleSheets().export(make_ctx(http), make_doc())
-    assert sheet.appends == []  # документ уже был: позиции без колонки ID не дублируем
+        second = make_doc()
+        second.id = uuid.UUID("33333333-3333-3333-3333-333333333333")
+        second.schema, second.base_schema = apply_labels(base, {"items.qty": "Штук"}), base
+        await google_sheets.GoogleSheets().export(make_ctx(http), second)
+    assert len(sheet.puts) == 3 and sheet.puts[-1][0] == ITEMS  # шапка документов не менялась
+    assert "Штук" in sheet.cells[ITEMS][0] and len(sheet.cells[ITEMS]) == 5
+
+
+async def test_our_items_header_not_rewritten_when_docs_header_is_clients(http):
+    base = builtin_schemas()["invoice_ru"]
+    with respx.mock(assert_all_called=False) as router:
+        mock_token(router)
+        sheet = Sheet(router, docs_col=[["Поставщик", "ID документа"]], items_col=[items_header(base)])
+        doc = make_doc()
+        doc.schema, doc.base_schema = apply_labels(base, {"items.qty": "Штук"}), base
+        with pytest.raises(ConnectorError) as e:
+            await google_sheets.GoogleSheets().export(make_ctx(http), doc)
+    # без нашего листа документов не проверить тип: подписи могли бы лечь на позиции другого типа
+    assert e.value.message == google_sheets.OTHER_COLUMNS
+    assert sheet.appends == [] and sheet.puts == []
 
 
 async def test_client_header_without_known_columns_fails(http):

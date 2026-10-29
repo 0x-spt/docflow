@@ -13,6 +13,7 @@ import hashlib
 import json
 import re
 import time
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
 
@@ -224,15 +225,6 @@ class _Session:
             json={"values": [header]},
         )
 
-    async def our_header(self, sheet: str, existing: list[str], ours: list[str], *, lead: int, tail: int) -> None:
-        """Шапка наша: та же — ничего; отличаются только подписи полей — переписываем; иначе строка встала бы
-        со сдвигом колонок — OTHER_COLUMNS."""
-        if existing == ours:
-            return
-        if not same_layout(existing, ours, lead=lead, tail=tail):
-            raise ConnectorError(OTHER_COLUMNS)
-        await self.write_header(sheet, ours)
-
     async def format_dates(self, sheet_id: int, date_columns: list[int]) -> None:
         """Формат ДД.ММ.ГГГГ колонкам с датами (даты уходят серийными числами). Идемпотентно: на каждой записи,
         чтобы формат был и при шапке клиента, и после сбоя между шапкой и форматом."""
@@ -281,9 +273,33 @@ def _blank(header: list[str]) -> bool:
 
 
 def _ours(header: list[str], mine: list[str], *, lead: int) -> bool:
-    """Шапки нет или она наша: служебные колонки в начале на своих местах. Шапка клиента, где «ID документа»
-    лишь одна из колонок (даже первая), — его: значения раскладываются по названиям."""
+    """Шапки нет или она наша: служебные колонки в начале на своих местах.
+
+    Решение: «наша» — по всем служебным колонкам в начале, а не только по A1 = «ID документа». Все наши шапки
+    всегда начинались так; шапка клиента, где «ID документа» лишь одна из колонок (даже первая), — его, и значения
+    раскладываются по названиям (сдвига быть не может). Пустая шапка — когда пуста вся строка 1, а не только A1:
+    иначе нашу шапку записали бы поверх названий клиента в B1…
+    """
     return _blank(header) or header[:lead] == mine[:lead]
+
+
+def _renamed_header(existing: list[str], mine: list[str], *, lead: int, tail: int) -> bool:
+    """Шапка наша и непустая: та же — False; отличаются только подписи полей — True (переписать);
+    иначе строка встала бы со сдвигом колонок — OTHER_COLUMNS."""
+    if existing == mine:
+        return False
+    if not same_layout(existing, mine, lead=lead, tail=tail):
+        raise ConnectorError(OTHER_COLUMNS)
+    return True
+
+
+@dataclass
+class _Write:
+    """Проверенная запись в лист: шапка для A1 (None — не трогаем), строки и колонки с датами."""
+
+    header: list[str] | None
+    rows: list[list[Cell]]
+    dates: list[int]
 
 
 def _api_message(resp: httpx.Response) -> str:
@@ -332,6 +348,12 @@ class GoogleSheets(BaseConnector):
         return f"Таблица «{title}» доступна для записи"
 
     async def export(self, ctx: DestCtx, doc: ExportDoc) -> str | None:
+        """Сначала читаем и проверяем шапки обоих листов, потом пишем: ошибка шапки — без частичной записи.
+
+        Позиции пишутся до строки документа. Если у листа позиций нет колонки «ID документа», дубли позиций
+        ловятся только так: строка документа уже есть — значит, позиции записаны раньше, пропускаем всё.
+        Сбой между позициями и строкой документа даст при повторе дубль позиций — заметно, но ничего не теряется.
+        """
         s = _Session(ctx)
         doc_id = str(doc.id)
         items = list(item_rows(doc, target="sheets"))
@@ -339,68 +361,91 @@ class GoogleSheets(BaseConnector):
 
         header = await s.read_header(s.docs_sheet)
         mine = docs_header(doc.schema, ctx.mapping)
-        ours = _ours(header, mine, lead=4)
-        id_col = 0 if ours else id_column(header)
+        docs_ours = _ours(header, mine, lead=4)
+        id_col = 0 if docs_ours else id_column(header)
         column = await s.column(s.docs_sheet, id_col) if id_col is not None else []
-        written = doc_id in column
-        if written:
-            row = column.index(doc_id) + 1
-        elif ours:
-            if _blank(header):
-                await s.write_header(s.docs_sheet, mine)
+        found = doc_id in column
+        # строку документа проверяем до записи позиций
+        docs_write = None if found else await self._docs_write(s, doc, ctx.mapping, header, mine, docs_ours)
+
+        items_write = None
+        if items:
+            items_header_row = await s.read_header(s.items_sheet)
+            items_mine = items_header(doc.schema)
+            items_ours = _ours(items_header_row, items_mine, lead=2)
+            items_id = 0 if items_ours else id_column(items_header_row)
+            if items_id is not None:
+                done = doc_id in await s.column(s.items_sheet, items_id)
             else:
-                if header != mine:
-                    await self._same_type(s, doc)
-                await s.our_header(s.docs_sheet, header, mine, lead=4, tail=3)
-            await s.format_dates(ids[s.docs_sheet], doc_date_columns(doc.schema, ctx.mapping))
-            row = await s.append(s.docs_sheet, [doc_row(doc, ctx.mapping, target="sheets")])
+                done = found  # позиции пишутся раньше документа: документ на месте — и позиции тоже
+            if not done:
+                if items_ours:
+                    rewrite = not _blank(items_header_row) and _renamed_header(
+                        items_header_row, items_mine, lead=2, tail=0
+                    )
+                    if rewrite:
+                        # у листа позиций нет колонки «Тип»: переписываем, только если лист документов наш
+                        # и в нём документы этого типа — иначе подписи легли бы на позиции другого типа
+                        if not docs_ours or _blank(header):
+                            raise ConnectorError(OTHER_COLUMNS)
+                        await self._same_type(s, doc)
+                    head = items_mine if _blank(items_header_row) or rewrite else None
+                    items_write = _Write(head, items, item_date_columns(doc.schema))
+                else:
+                    aligned = align_item_rows(doc, items_header_row, target="sheets")
+                    if aligned is None:
+                        raise ConnectorError(NO_KNOWN_COLUMNS)
+                    items_write = _Write(None, *aligned)
+
+        # все проверки позади — запись
+        if items_write:
+            await self._write(s, s.items_sheet, ids[s.items_sheet], items_write)
+        if docs_write:
+            row = await self._write(s, s.docs_sheet, ids[s.docs_sheet], docs_write)
         else:
-            aligned = align_doc_row(doc, header, ctx.mapping, target="sheets")
+            row = column.index(doc_id) + 1
+        return f"{s.docs_sheet}!A{row}"
+
+    async def _docs_write(
+        self,
+        s: _Session,
+        doc: ExportDoc,
+        mapping: dict[str, str],
+        header: list[str],
+        mine: list[str],
+        ours: bool,
+    ) -> _Write:
+        if not ours:
+            aligned = align_doc_row(doc, header, mapping, target="sheets")
             if aligned is None:
                 raise ConnectorError(NO_KNOWN_COLUMNS)
             # колонки ID нет — дублей не проверить: повтор после потерянного ответа может дописать строку
-            await s.format_dates(ids[s.docs_sheet], aligned[1])
-            row = await s.append(s.docs_sheet, [aligned[0]])
+            return _Write(None, [aligned[0]], aligned[1])
+        if _blank(header):
+            head: list[str] | None = mine
+        elif _renamed_header(header, mine, lead=4, tail=3):
+            await self._same_type(s, doc)
+            head = mine
+        else:
+            head = None
+        return _Write(head, [doc_row(doc, mapping, target="sheets")], doc_date_columns(doc.schema, mapping))
 
-        if items:
-            await self._export_items(s, doc, items, ids[s.items_sheet], doc_written_before=written)
-        return f"{s.docs_sheet}!A{row}"
+    @staticmethod
+    async def _write(s: _Session, sheet: str, sheet_id: int, w: _Write) -> int:
+        if w.header is not None:
+            await s.write_header(sheet, w.header)
+        await s.format_dates(sheet_id, w.dates)
+        return await s.append(sheet, w.rows)
 
     @staticmethod
     async def _same_type(s: _Session, doc: ExportDoc) -> None:
-        """Перед тем как переписать нашу шапку: в листе только документы этого типа (колонка «Тип»).
-        Иначе та же длина шапки у другой схемы сдвинула бы смысл колонок у прежних строк."""
+        """Перед тем как переписать нашу шапку: в листе документов только документы этого типа (колонка «Тип»).
+
+        Решение (сверх плана): та же длина шапки у другой схемы проходит same_layout, и подписи легли бы на
+        колонки прежних строк с другим смыслом. Лишний GET — только когда шапку переписываем."""
         title = clean_text(doc.title)
         if any(t.strip() and t != title for t in (await s.column(s.docs_sheet, 1))[1:]):
             raise ConnectorError(OTHER_COLUMNS)
-
-    @staticmethod
-    async def _export_items(
-        s: _Session, doc: ExportDoc, items: list[list[Cell]], sheet_id: int, *, doc_written_before: bool
-    ) -> None:
-        doc_id = str(doc.id)
-        header = await s.read_header(s.items_sheet)
-        mine = items_header(doc.schema)
-        ours = _ours(header, mine, lead=2)
-        id_col = 0 if ours else id_column(header)
-        if id_col is not None:
-            if doc_id in await s.column(s.items_sheet, id_col):
-                return  # повтор после сбоя дописывает только недостающее
-        elif doc_written_before:
-            return  # колонки ID нет: документ уже был в таблице — позиции не дублируем
-        if ours:
-            if _blank(header):
-                await s.write_header(s.items_sheet, mine)
-            else:
-                await s.our_header(s.items_sheet, header, mine, lead=2, tail=0)
-            await s.format_dates(sheet_id, item_date_columns(doc.schema))
-            await s.append(s.items_sheet, items)
-            return
-        aligned = align_item_rows(doc, header, target="sheets")
-        if aligned is None:
-            raise ConnectorError(NO_KNOWN_COLUMNS)
-        await s.format_dates(sheet_id, aligned[1])
-        await s.append(s.items_sheet, aligned[0])
 
 
 REGISTRY["google_sheets"] = GoogleSheets()
