@@ -542,9 +542,8 @@ async def test_list_item_shape(api, auth):
     item = items[doc_id]
     assert item["title"] == "15"
     assert item["summary"] == [
-        {"field": "supplier", "value": "ООО"},
-        {"field": "total", "value": 250},
-        {"field": "a", "value": "x"},
+        {"field": "supplier", "label": "Поставщик", "value": "ООО"},
+        {"field": "total", "label": "Всего к оплате", "value": 250},
     ]
     assert item["issue"] == "итог не сходится"
     assert item["schema"] == {"slug": "invoice_ru", "version": 1}
@@ -552,6 +551,42 @@ async def test_list_item_shape(api, auth):
     assert item["finished_at"] is None
     assert items[bare]["title"] == bare[:8]
     assert items[bare]["summary"] == [] and items[bare]["issue"] is None
+
+
+async def test_list_summary_uses_company_choice_and_labels(api, auth):
+    body = {"labels": {"total": "К оплате"}, "queue_fields": ["total", "vat"]}
+    r = await api.client.put("/v1/schemas/invoice_ru/labels", headers=auth, json=body)
+    assert r.status_code == 200, r.text
+    doc_id = await add_doc(api, auth, data={"supplier": "ООО", "total": 250, "vat": 41.67, "number": "1"})
+    items = {i["id"]: i for i in (await api.client.get("/v1/documents", headers=auth)).json()["items"]}
+    assert items[doc_id]["summary"] == [
+        {"field": "total", "label": "К оплате", "value": 250},
+        {"field": "vat", "label": "НДС", "value": 41.67},
+    ]
+
+
+async def test_list_issue_only_for_review_and_failed(api, auth):
+    issues = [{"field": "total", "code": "approval_required", "message": "нужно согласование"}]
+    ok = await add_doc(api, auth, status="ok", issues=issues)
+    review = await add_doc(api, auth, status="needs_review", issues=issues)
+    failed = await add_doc(api, auth, status="failed", issues=issues)
+    items = {i["id"]: i for i in (await api.client.get("/v1/documents", headers=auth)).json()["items"]}
+    assert items[ok]["issue"] is None
+    assert items[review]["issue"] == "нужно согласование"
+    assert items[failed]["issue"] == "нужно согласование"
+
+
+async def test_list_survives_unknown_schema(api, auth):
+    data = {"number": "1", "q": "x", "w": 2, "e": "y", "r": "z"}
+    doc_id = await add_doc(api, auth, schema_slug="gone", data=data)
+    r = await api.client.get("/v1/documents", headers=auth)
+    assert r.status_code == 200
+    item = next(i for i in r.json()["items"] if i["id"] == doc_id)
+    assert item["summary"] == [
+        {"field": "q", "label": "q", "value": "x"},
+        {"field": "w", "label": "w", "value": 2},
+        {"field": "e", "label": "e", "value": "y"},
+    ]
 
 
 async def test_list_bad_status_422(api, auth):
