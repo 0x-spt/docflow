@@ -292,6 +292,22 @@ class RoutingRules(Base):
     updated_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_now, onupdate=_now)
 
 
+class FieldLabels(Base):
+    """Свои названия полей схемы у тенанта и набор полей в очереди: один документ на (тенант, slug схемы)."""
+
+    __tablename__ = "field_labels"
+    __table_args__ = (UniqueConstraint("tenant_id", "schema_slug", name="tenant_slug"),)
+
+    id: Mapped[uuid.UUID] = _id()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"))
+    schema_slug: Mapped[str] = mapped_column(String)
+    # ключ поля («vat», «items.qty») -> название компании
+    labels: Mapped[dict] = mapped_column(JsonType, default=dict)
+    # поля верхнего уровня, показываемые в очереди; пусто — умолчание по схеме
+    queue_fields: Mapped[list] = mapped_column(JsonType, default=list)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_now, onupdate=_now)
+
+
 class Export(Base):
     """Доставка документа получателю (выгрузка или уведомление). История переживает удаление получателя."""
 
