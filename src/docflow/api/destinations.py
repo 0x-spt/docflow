@@ -4,7 +4,6 @@
 Секреты принимаются, шифруются и никогда не возвращаются — только признак has_secrets.
 """
 
-import asyncio
 import dataclasses
 from datetime import UTC, datetime
 from typing import Annotated, Any
@@ -15,10 +14,11 @@ from pydantic import BaseModel, Field, StrictStr
 from sqlalchemy import select
 
 from docflow.api.deps import Principal, SessionDep, SettingsDep, TenantDep, parse_id, require_owner_or_key
+from docflow.connectors import checks
 from docflow.connectors.base import REGISTRY, Connector, ConnectorError, DestCtx, FieldDef, supports
+from docflow.connectors.checks import InvalidSettings
 from docflow.db.models import Destination, RoutingRules
 from docflow.secrets import SecretsKeyMissing, decrypt_secrets, encrypt_secrets
-from docflow.webhooks import check_webhook_url
 
 router = APIRouter(prefix="/v1/destinations", tags=["destinations"])
 catalog_router = APIRouter(prefix="/v1/connectors", tags=["destinations"])
@@ -73,52 +73,38 @@ def _connector(kind: str) -> Connector:
 
 
 def _check_names(given: dict[str, Any], fields: list[FieldDef], what: str) -> None:
-    known = {f.name for f in fields}
-    unknown = sorted(set(given) - known)
-    if unknown:
-        raise _unprocessable(f"{what}: неизвестные поля {', '.join(unknown)}")
+    try:
+        checks.check_names(given, fields, what)
+    except InvalidSettings as exc:
+        raise _unprocessable(str(exc)) from None
 
 
 def _check_required(given: dict[str, Any], fields: list[FieldDef], what: str) -> None:
-    for f in fields:
-        if f.required and given.get(f.name) in (None, ""):
-            raise _unprocessable(f"{what}: заполните «{f.label}»")
+    try:
+        checks.check_required(given, fields, what)
+    except InvalidSettings as exc:
+        raise _unprocessable(str(exc)) from None
 
 
 async def _check_urls(values: dict[str, Any], fields: list[FieldDef], *, allow_private: bool) -> None:
-    """SSRF-проверка полей типа url (и в настройках, и в секретах: адрес вебхука Битрикс24 — секрет)."""
-    for f in fields:
-        value = values.get(f.name)
-        if f.type != "url" or value in (None, ""):
-            continue
-        try:
-            if not isinstance(value, str):
-                raise ValueError("адрес должен быть строкой")
-            # getaddrinfo блокирующий: в отдельном потоке, чтобы не держать цикл событий
-            await asyncio.to_thread(check_webhook_url, value, allow_private=allow_private)
-        except ValueError as exc:
-            raise _unprocessable(f"«{f.label}»: недопустимый адрес: {exc}") from None
+    try:
+        await checks.check_urls(values, fields, allow_private=allow_private)
+    except InvalidSettings as exc:
+        raise _unprocessable(str(exc)) from None
 
 
 async def _check_config(config: dict[str, Any], connector: Connector, *, allow_private: bool) -> None:
-    _check_names(config, connector.config_fields, "настройки")
-    _check_required(config, connector.config_fields, "настройки")
-    await _check_urls(config, connector.config_fields, allow_private=allow_private)
-    # коннекторам с хостом вместо URL (почта): своя сетевая проверка
-    check_network = getattr(connector, "check_network", None)
-    if check_network is not None:
-        try:
-            await asyncio.to_thread(check_network, config, allow_private=allow_private)
-        except ConnectorError as exc:
-            raise _unprocessable(f"настройки: {exc.message}") from None
-        except ValueError as exc:
-            raise _unprocessable(f"недопустимый адрес сервера: {exc}") from None
+    try:
+        await checks.check_config(config, connector, allow_private=allow_private)
+    except InvalidSettings as exc:
+        raise _unprocessable(str(exc)) from None
 
 
 async def _check_secrets(secrets: dict[str, Any], connector: Connector, *, allow_private: bool) -> None:
-    _check_names(secrets, connector.secret_fields, "секреты")
-    _check_required(secrets, connector.secret_fields, "секреты")
-    await _check_urls(secrets, connector.secret_fields, allow_private=allow_private)
+    try:
+        await checks.check_secrets(secrets, connector, allow_private=allow_private)
+    except InvalidSettings as exc:
+        raise _unprocessable(str(exc)) from None
 
 
 def _encrypt(secrets: dict[str, str], key: str) -> str:

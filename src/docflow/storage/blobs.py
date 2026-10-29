@@ -25,6 +25,9 @@ class BlobStore(Protocol):
 
     async def exists(self, key: str) -> bool: ...
 
+    async def delete(self, key: str) -> None:
+        """Отсутствующий ключ — не ошибка."""
+
 
 # --- ключи ---------------------------------------------------------------
 
@@ -109,6 +112,10 @@ class LocalBlobStore:
         path = self._path(key)
         return await asyncio.to_thread(path.is_file)
 
+    async def delete(self, key: str) -> None:
+        path = self._path(key)
+        await asyncio.to_thread(path.unlink, missing_ok=True)
+
 
 # --- S3 / MinIO ----------------------------------------------------------
 
@@ -184,6 +191,12 @@ class S3BlobStore:
             if e.response.get("Error", {}).get("Code") in _MISSING_CODES:
                 return False
             raise
+
+    async def delete(self, key: str) -> None:
+        # S3 на отсутствующий ключ отвечает успехом
+        validate_key(key)
+        await self._ensure_bucket()
+        await asyncio.to_thread(self._client.delete_object, Bucket=self._bucket, Key=key)
 
 
 def blob_store_from_settings(s: Settings) -> BlobStore:

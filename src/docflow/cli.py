@@ -3,6 +3,7 @@
     docflow eval evals/invoice_ru --extractor claude
     docflow create-tenant "Ромашка" --extractor claude
     docflow seed-schemas
+    docflow seed-demo --reset
 """
 import argparse
 import asyncio
@@ -236,6 +237,77 @@ def cmd_leads(args: argparse.Namespace) -> int:
     return 0
 
 
+def _read_google_key(path: Path | None) -> dict | None:
+    if path is None:
+        return None
+    try:
+        key = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as e:
+        raise UserError(f"ключ Google не прочитан: {path} ({e.strerror or e})") from e
+    except ValueError as e:
+        raise UserError(f"{path}: некорректный JSON ({e})") from e
+    if not isinstance(key, dict):
+        raise UserError(f"{path}: ожидается JSON-объект ключа сервисного аккаунта")
+    return key
+
+
+async def _seed_demo(opts):
+    # демо-модули тянут Pillow/OpenCV и шрифты: грузим только для этой команды
+    from arq import create_pool
+    from arq.connections import RedisSettings
+
+    from docflow.demo.seed import seed_demo
+    from docflow.pdf.build import OcrMyPdf
+    from docflow.queue import ArqEnqueuer
+    from docflow.storage.blobs import blob_store_from_settings
+
+    settings = get_settings()
+    engine = make_engine(settings.database_url)
+    pool = await create_pool(RedisSettings.from_dsn(settings.redis_url))
+    try:
+        return await seed_demo(
+            make_sessionmaker(engine), blob_store_from_settings(settings), OcrMyPdf(), ArqEnqueuer(pool), settings, opts
+        )
+    finally:
+        await pool.aclose()
+        await engine.dispose()
+
+
+def cmd_seed_demo(args: argparse.Namespace) -> int:
+    from docflow.demo.data import DEMO_TENANT_NAME
+    from docflow.demo.render import FontMissing
+    from docflow.demo.seed import DemoError, DemoExists, SeedOptions
+
+    opts = SeedOptions(
+        reset=args.reset,
+        smtp_host=args.smtp_host,
+        smtp_port=args.smtp_port,
+        google_key=_read_google_key(args.google_key),
+        google_sheet=args.google_sheet,
+        bitrix_webhook=args.bitrix_webhook,
+        telegram_token=args.telegram_token,
+        telegram_chat=args.telegram_chat,
+    )
+    try:
+        result = asyncio.run(_seed_demo(opts))
+    except DemoExists:
+        raise UserError(f"демо-клиент «{DEMO_TENANT_NAME}» уже есть; пересоздать: docflow seed-demo --reset") from None
+    except (DemoError, FontMissing) as e:
+        raise UserError(str(e)) from e
+    settings = get_settings()
+    print(f"Демо-клиент «{DEMO_TENANT_NAME}» создан, id {result.tenant_id}.")
+    print(f"Кабинет: {settings.public_site_url.rstrip('/')}/login")
+    print(f"Владелец: {result.owner_email} / {result.owner_password}")
+    print(f"Оператор: {result.operator_email} / {result.operator_password}")
+    print("ВНИМАНИЕ: пароль больше не будет показан. Сохраните его сейчас.")
+    print(f"API-ключ: {result.api_key}")
+    print("Документы: " + ", ".join(f"{status} — {n}" for status, n in sorted(result.counts.items())))
+    print("Это демо: данные синтетические, модель — заготовки (model=demo)")
+    if args.smtp_host == "mailpit":
+        print("Письма: http://localhost:8025 (Mailpit)")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="docflow", description="DocFlow: команды оператора")
     sub = parser.add_subparsers(dest="command", required=True, metavar="команда")
@@ -276,6 +348,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     ss = sub.add_parser("seed-schemas", help="загрузить встроенные схемы в БД (повторный запуск безопасен)")
     ss.set_defaults(func=cmd_seed_schemas)
+
+    sd = sub.add_parser("seed-demo", help="создать демо-клиента с документами (только для показа)")
+    sd.add_argument("--reset", action="store_true", help="удалить прежнего демо-клиента и создать заново")
+    sd.add_argument("--smtp-host", default="mailpit", help="SMTP для почтовых подключений (по умолчанию mailpit)")
+    sd.add_argument("--smtp-port", type=int, default=1025, help="порт SMTP (по умолчанию 1025)")
+    sd.add_argument("--google-key", type=Path, help="JSON-ключ сервисного аккаунта Google (вместе с --google-sheet)")
+    sd.add_argument("--google-sheet", help="ID или ссылка Google Таблицы")
+    sd.add_argument("--bitrix-webhook", help="входящий вебхук Битрикс24")
+    sd.add_argument("--telegram-token", help="токен бота Telegram (вместе с --telegram-chat)")
+    sd.add_argument("--telegram-chat", help="ID чата Telegram")
+    sd.set_defaults(func=cmd_seed_demo)
     return parser
 
 
