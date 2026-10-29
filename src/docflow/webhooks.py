@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from docflow.config import get_settings
 from docflow.db.models import Document, WebhookDelivery, WebhookEndpoint
 from docflow.queue import DELIVER_WEBHOOK, Enqueuer
-from docflow.serializers import document_payload
+from docflow.serializers import document_exports, document_payload
 
 RETRY_DELAYS = (10, 60, 300, 1800, 7200)
 TIMEOUT = 10.0
@@ -33,6 +33,10 @@ def sign(secret: str, body: bytes) -> str:
     return "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 
 
+class UnresolvableHost(ValueError):
+    """Хост не резолвится — сбой может быть временным (в отличие от частного адреса или не той схемы)."""
+
+
 def check_webhook_url(url: str, *, allow_private: bool = False) -> None:
     """Защита от SSRF: только http(s) и только публичные адреса. ValueError при нарушении."""
     parts = urlsplit(url)
@@ -41,12 +45,17 @@ def check_webhook_url(url: str, *, allow_private: bool = False) -> None:
     host = parts.hostname
     if not host:
         raise ValueError("в URL нет хоста")
+    check_host(host, parts.port or (443 if parts.scheme == "https" else 80), allow_private=allow_private)
+
+
+def check_host(host: str, port: int, *, allow_private: bool = False) -> None:
+    """Та же защита от SSRF для «хост:порт» без схемы (SMTP и т. п.). ValueError при нарушении."""
     if allow_private:
         return
     try:
-        infos = socket.getaddrinfo(host, parts.port or (443 if parts.scheme == "https" else 80))
+        infos = socket.getaddrinfo(host, port)
     except OSError as exc:
-        raise ValueError(f"хост не резолвится: {exc}") from exc
+        raise UnresolvableHost(f"хост не резолвится: {exc}") from exc
     for info in infos:
         ip = ipaddress.ip_address(info[4][0].split("%")[0])
         # is_global отсекает всё, что IANA не считает глобально маршрутизируемым: CGNAT 100.64/10,
@@ -179,7 +188,9 @@ async def deliver(
 
     payload = {
         "event": delivery.event,
-        "document": document_payload(document, get_settings().public_base_url),
+        "document": document_payload(
+            document, get_settings().public_base_url, await document_exports(session, document.id)
+        ),
     }
     # подписываем и отправляем ровно эти байты
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()

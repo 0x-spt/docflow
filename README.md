@@ -124,6 +124,23 @@ cd web && npm ci && npx playwright install chromium && npm run test:e2e
 docker compose up -d        # вернуть обычный воркер
 ```
 
+## Подключения к системам клиента
+
+Документы можно выгружать в Google Таблицы, Битрикс24, amoCRM, 1С (OData) и Excel-реестр, а операторов уведомлять
+в Telegram и по почте. Подключение (кабинет → Подключения) хранит адрес и секреты, правила (кабинет → Правила)
+решают, что куда уходит: без правил ничего не выгружается. Выгрузка идёт для готовых (`ok`) документов, в том числе
+подтверждённых оператором; при сбоях доставка повторяется (10 с, 1 мин, 5 мин, 30 мин, 2 ч), результат виден в блоке
+«Выгрузки» документа.
+
+Секреты подключений шифруются ключом `DOCFLOW_SECRETS_KEY` (Fernet); сгенерировать и положить в `.env`, не коммитить:
+
+```
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+Смена ключа требует заново ввести секреты подключений. Пошагово, где взять ключи и токены каждой системы, примеры
+правил и разбор типовых ошибок — в [docs/connectors.md](docs/connectors.md).
+
 ## Вебхуки
 
 ```
@@ -222,7 +239,11 @@ ANTHROPIC_API_KEY=sk-... uv run docflow eval evals/invoice_ru --extractor claude
 API: `uvicorn --factory docflow.api.app:create_app`. Размер тела `POST /v1/documents` ограничен в самом приложении
 (`DOCFLOW_MAX_REQUEST_MB`, по умолчанию 200), но лимит нужен и на прокси перед ним — иначе прокси сам буферизует
 гигабайты: в nginx `client_max_body_size 200m;` (не больше `DOCFLOW_MAX_REQUEST_MB`).
-Задайте `DOCFLOW_PUBLIC_BASE_URL` (попадает в `pdf_url`).
+Задайте `DOCFLOW_PUBLIC_BASE_URL` (внешний адрес API, попадает в `pdf_url` ответов и вебхуков) и
+`DOCFLOW_PUBLIC_SITE_URL` (внешний адрес кабинета, например `https://docflow.example.ru`): от него строятся ссылки на
+документ и PDF в CRM, Google Таблицах, Excel-реестре, Telegram и письмах. Эти ссылки открываются после входа в
+кабинет. Оставите `http://localhost:3000` — ссылки у клиентов не откроются; воркер при старте предупредит об этом в
+логе (если не включён `DOCFLOW_WEBHOOK_ALLOW_PRIVATE`). Подробнее — [docs/connectors.md](docs/connectors.md).
 
 Смените все три секрета: `DOCFLOW_PG_PASSWORD`, `DOCFLOW_REDIS_PASSWORD`, `DOCFLOW_S3_ACCESS_KEY` +
 `DOCFLOW_S3_SECRET_KEY` (пароль Postgres применяется только при создании тома `pgdata`; на живой базе — `ALTER

@@ -65,6 +65,70 @@ export interface DocumentPayload {
   review: { at: string | null; note: string | null } | null;
   pdf_url: string | null;
   digital_pdf_url: string | null;
+  exports?: ExportItem[];
+}
+
+/** skipped — доставка больше не нужна (уведомление устарело): не ошибка, «Повторить» нет */
+export type ExportStatus = "pending" | "done" | "failed" | "skipped";
+
+/** Выгрузка или уведомление по документу (поле `exports` в документе) */
+export interface ExportItem {
+  id: string;
+  destination_id: string | null;
+  destination_name: string | null;
+  kind: string | null;
+  purpose: "export" | "notify_review" | "notify_new";
+  status: ExportStatus;
+  external_id: string | null;
+  error: string | null;
+  updated_at: string | null;
+}
+
+/** GET /v1/exports: строка журнала (выгрузка + документ, номер попытки, время создания) */
+export interface ExportLogItem extends ExportItem {
+  document_id: string;
+  attempt: number;
+  next_attempt_at: string | null;
+  created_at: string | null;
+}
+
+/** GET /v1/exports/summary: ошибки и очередь по получателям; failed — все ошибки тенанта */
+export interface ExportsSummary {
+  items: { destination_id: string; failed: number; pending: number }[];
+  failed: number;
+}
+
+export type RuleOp =
+  | "eq"
+  | "ne"
+  | "gt"
+  | "ge"
+  | "lt"
+  | "le"
+  | "contains"
+  | "in_dictionary"
+  | "empty"
+  | "not_empty";
+
+export interface RuleCondition {
+  field: string;
+  op: RuleOp;
+  value?: string | number | null;
+}
+
+/** GET/PUT /v1/routing-rules */
+export interface RoutingRule {
+  name: string;
+  schema: string | null;
+  conditions: RuleCondition[];
+  export_to: string[];
+  require_approval: boolean;
+  notify: string[];
+}
+
+export interface RoutingRules {
+  rules: RoutingRule[];
+  updated_at: string | null;
 }
 
 /** POST /v1/documents/{id}/review; `data` — ПОЛНЫЙ объект, не дифф */
@@ -167,6 +231,7 @@ export type FieldType = ColumnType | "table";
 
 export interface SchemaColumn {
   name: string;
+  title?: string | null;
   type: ColumnType;
   description?: string;
   values?: string[] | null;
@@ -185,4 +250,54 @@ export interface DocSchema {
   title: string;
   description: string;
   fields: SchemaField[];
+}
+
+/** Поле формы подключения (GET /v1/connectors) */
+export interface FieldDef {
+  name: string;
+  label: string;
+  required: boolean;
+  help: string;
+  type: "text" | "url" | "number" | "textarea" | "select";
+  options?: string[] | null;
+  /** подписи вариантов select: значение → подпись */
+  option_labels?: Record<string, string> | null;
+  /** редко нужное поле: в форме — под «Дополнительно» */
+  advanced?: boolean;
+}
+
+export interface ConnectorInfo {
+  kind: string;
+  label: string;
+  description?: string;
+  can_export: boolean;
+  can_notify: boolean;
+  config_fields: FieldDef[];
+  secret_fields: FieldDef[];
+  target_fields: FieldDef[];
+}
+
+/** GET /v1/destinations: секреты не возвращаются, только признак has_secrets */
+export interface Destination {
+  id: string;
+  kind: string;
+  name: string;
+  config: Record<string, unknown>;
+  mapping: Record<string, string>;
+  has_secrets: boolean;
+  active: boolean;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface TestResult {
+  ok: boolean;
+  message: string;
+}
+
+/** Схема для сопоставления полей: строки «поле документа» (ключ маппинга) */
+export interface MappingSchema {
+  slug: string;
+  title: string;
+  rows: { key: string; label: string; group?: string }[];
 }

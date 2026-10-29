@@ -13,13 +13,15 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from docflow.config import get_settings
-from docflow.db.models import Dictionary, Document, SchemaRecord, Tenant
+from docflow.db.models import Document, SchemaRecord, Tenant
+from docflow.exports import enqueue_routed
 from docflow.extraction.base import ExtractionError, Extractor
 from docflow.extraction.normalize import normalize
 from docflow.imaging.load import UnsupportedFile
 from docflow.imaging.prepare import prepare_pages
 from docflow.pdf.build import NoOcr, OcrEngine, build_pdf
 from docflow.queue import PROCESS_DOCUMENT, Enqueuer
+from docflow.routing import RoutingDecision, evaluate_rules, fetch_dictionaries, load_rules
 from docflow.schemas.library import builtin_schemas
 from docflow.schemas.llm import UNCERTAIN
 from docflow.schemas.model import DocSchema
@@ -36,6 +38,7 @@ REVIEW_REQUIRED = Issue(
     "review_required",
     "модель этого клиента не подтверждена эталонным прогоном: результат — черновик, нужна проверка человеком",
 )
+APPROVAL_REQUIRED = "approval_required"
 TIMEOUT_ERROR = "обработка прервана: превышено время или воркер остановлен"
 REAPED_ERROR = "обработка прервана (воркер остановился)"
 
@@ -138,18 +141,15 @@ async def _render(deps: Deps, document_id: UUID, keys: list[str], mode: str) -> 
 async def load_dictionaries(session: AsyncSession, tenant_id: UUID, schema: DocSchema) -> dict[str, list[DictEntry]]:
     """Справочники, на которые ссылается схема. Незаведённого в ответе нет — resolve_dictionaries это отметит."""
     names = {r.params["name"] for f in schema.fields for r in f.rules if r.kind == "dictionary"}
-    if not names:
-        return {}
-    rows = await session.execute(
-        select(Dictionary.name, Dictionary.entries).where(Dictionary.tenant_id == tenant_id, Dictionary.name.in_(names))
-    )
-    return {
-        name: [DictEntry(e["value"], tuple(e.get("aliases") or ())) for e in entries] for name, entries in rows.all()
-    }
+    return await fetch_dictionaries(session, tenant_id, names)
 
 
-async def _run(deps: Deps, session: AsyncSession, document_id: UUID) -> bool:
-    """True, если результат записан (документ ещё был в processing)."""
+def approval_issues(decision: RoutingDecision) -> list[Issue]:
+    return [Issue(None, APPROVAL_REQUIRED, f"нужно согласование: {name}") for name in decision.approval]
+
+
+async def _run(deps: Deps, session: AsyncSession, document_id: UUID) -> tuple[bool, RoutingDecision, str]:
+    """(записан ли результат — документ ещё был в processing; решение маршрутизации; записанный статус)."""
     document = await session.get(Document, document_id)
     tenant = await session.get(Tenant, document.tenant_id)
     kind = tenant.extractor if tenant else None
@@ -159,6 +159,7 @@ async def _run(deps: Deps, session: AsyncSession, document_id: UUID) -> bool:
     schema = await deps.schemas.resolve(session, document.tenant_id, document.schema_slug, document.schema_version)
     dictionaries = await load_dictionaries(session, document.tenant_id, schema)
     auto_ok = tenant.auto_ok
+    rules, rule_dictionaries = await load_rules(session, document.tenant_id)
     keys, mode = list(document.files), document.mode
     # Закрываем читающую транзакцию: OCR и модель идут минутами, idle in transaction на Postgres не нужен
     await session.commit()
@@ -172,11 +173,16 @@ async def _run(deps: Deps, session: AsyncSession, document_id: UUID) -> bool:
     data.pop(UNCERTAIN, None)  # неуверенность уже стала issues с кодом uncertain
     if not auto_ok and decide_status(issues) == "ok":
         issues.append(REVIEW_REQUIRED)
+    decision = evaluate_rules(rules, schema, data, rule_dictionaries)
+    if decide_status(issues) == "ok":
+        # согласование — до записи статуса: и вебхук, и кабинет увидят needs_review, выгрузки не будет
+        issues += approval_issues(decision)
 
+    status = decide_status(issues)
     res = await session.execute(
         _finish(
             document_id,
-            status=decide_status(issues),
+            status=status,
             data=data,
             issues=[asdict(i) for i in issues],
             error=None,
@@ -187,7 +193,7 @@ async def _run(deps: Deps, session: AsyncSession, document_id: UUID) -> bool:
         )
     )
     await session.commit()
-    return res.rowcount == 1
+    return res.rowcount == 1, decision, status
 
 
 async def _mark_failed(session: AsyncSession, document_id: UUID, error: str) -> bool:
@@ -206,14 +212,34 @@ async def _enqueue_webhooks(session: AsyncSession, document_id: UUID, enqueuer: 
         logger.exception("не удалось поставить вебхуки документа %s", document_id)
 
 
+async def _enqueue_routed(
+    session: AsyncSession, document_id: UUID, decision: RoutingDecision, written: str, enqueuer: Enqueuer
+) -> None:
+    """Выгрузки по решению конвейера — только если документ всё ещё в записанном статусе.
+
+    Если оператор успел проверить документ, решение устарело: одобрение ставит выгрузки само.
+    """
+    try:
+        document = await session.get(Document, document_id, populate_existing=True)
+        if document is None or document.status != written:
+            logger.info("документ %s уже в другом статусе, выгрузки конвейера не ставятся", document_id)
+            return
+        await enqueue_routed(session, document, decision, enqueuer)
+    except Exception:
+        # документ уже в финальном статусе; закоммиченные выгрузки поднимет requeue_stale_exports
+        logger.exception("не удалось поставить выгрузки документа %s", document_id)
+
+
 async def process_document(deps: Deps, document_id: UUID) -> None:
     async with deps.sessionmaker() as session:
         if not await _claim(session, document_id):
             return
         error: str | None = None
         finished = False
+        decision: RoutingDecision | None = None
+        written = ""
         try:
-            finished = await _run(deps, session, document_id)
+            finished, decision, written = await _run(deps, session, document_id)
         except (UnsupportedFile, _Failure, SchemaNotFound) as exc:
             error = str(exc)
         except BlobNotFound as exc:
@@ -234,6 +260,8 @@ async def process_document(deps: Deps, document_id: UUID) -> None:
         # rowcount 0 — документ уже закрыл жнец (и поставил вебхуки сам)
         if finished:
             await _enqueue_webhooks(session, document_id, deps.enqueuer)
+            if decision is not None:
+                await _enqueue_routed(session, document_id, decision, written, deps.enqueuer)
 
 
 async def reap_stale_processing(

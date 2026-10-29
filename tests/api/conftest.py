@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import httpx
 import pytest
 from api_helpers import BASE_URL
+from cryptography.fernet import Fernet
 from sqlalchemy import event
 
 from docflow.api.app import create_app
@@ -41,6 +42,7 @@ async def api(tmp_path):
         max_file_mb=20,
         max_pages=30,
         webhook_allow_private=False,
+        secrets_key=Fernet.generate_key().decode(),
     )
     app = create_app(settings, sessionmaker=sm, blobs=blobs, enqueuer=enqueuer)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:

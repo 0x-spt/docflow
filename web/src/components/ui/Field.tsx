@@ -46,7 +46,7 @@ export function Field(props: InputProps | TextareaProps | SelectProps) {
       </label>
       {control}
       {hint ? (
-        <p id={hintId} className="text-sm text-muted">
+        <p id={hintId} className="break-words text-sm text-muted">
           {hint}
         </p>
       ) : null}

@@ -30,8 +30,8 @@ from docflow.imaging.load import UnsupportedFile, count_pages, detect_kind
 from docflow.pdf.digital import render_digital_pdf
 from docflow.pipeline import SchemaNotFound, process_job_id
 from docflow.queue import PROCESS_DOCUMENT
-from docflow.review import ReviewConflict, review_document
-from docflow.serializers import document_payload
+from docflow.review import ReviewConflict, review_document, route_approved
+from docflow.serializers import document_exports, document_payload
 from docflow.storage.blobs import BlobNotFound, original_key, page_key, scan_key
 from docflow.validation.engine import INFO_CODES
 from docflow.webhooks import EVENT_REVIEWED, enqueue_webhooks
@@ -312,7 +312,7 @@ async def list_documents(
 )
 async def get_document(document_id: str, tenant_id: TenantDep, session: SessionDep, settings: SettingsDep) -> dict:
     document = await _get_own(session, tenant_id, document_id)
-    return document_payload(document, settings.public_base_url)
+    return document_payload(document, settings.public_base_url, await document_exports(session, document.id))
 
 
 @router.get(
@@ -429,7 +429,8 @@ class ReviewIn(BaseModel):
         "(пропущенные поля станут пустыми), он проходит ту же "
         "нормализацию, справочники и проверки, что ответ модели (оставшиеся замечания сохраняются, статус всё "
         "равно `ok`). `reject` ставит `failed`. После успеха уходят вебхуки: `document.reviewed` для approve, "
-        "`document.failed` для reject. 409 — документ уже проверен "
+        "`document.failed` для reject; для approve по правилам маршрутизации ставятся выгрузки и уведомления "
+        "«новый документ» (согласование считается полученным). 409 — документ уже проверен "
         "другим оператором или ещё обрабатывается."
     ),
 )
@@ -465,4 +466,10 @@ async def review_document_endpoint(
     except Exception:
         # проверка уже записана; закоммиченные доставки поднимет requeue_stale
         logger.exception("не удалось поставить вебхуки документа %s", document.id)
-    return document_payload(document, settings.public_base_url)
+    if body.decision == "approve":
+        try:
+            await route_approved(session, document, schemas, enqueuer)
+        except Exception:
+            # проверка уже записана; закоммиченные выгрузки поднимет requeue_stale_exports
+            logger.exception("не удалось поставить выгрузки документа %s", document.id)
+    return document_payload(document, settings.public_base_url, await document_exports(session, document.id))

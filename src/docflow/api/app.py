@@ -13,7 +13,19 @@ from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from docflow.api import apikeys, auth, dictionaries, documents, leads, schemas, stats, webhooks
+from docflow.api import (
+    apikeys,
+    auth,
+    destinations,
+    dictionaries,
+    documents,
+    exports,
+    leads,
+    routing,
+    schemas,
+    stats,
+    webhooks,
+)
 from docflow.api.limits import RequestSizeLimit
 from docflow.api.ratelimit import SlidingWindowLimiter
 from docflow.config import Settings, get_settings
@@ -64,6 +76,8 @@ def create_app(
     blobs: BlobStore | None = None,
     enqueuer: Enqueuer | None = None,
 ) -> FastAPI:
+    # httpx на INFO пишет URL запросов целиком, а в Bot API токен бота лежит в пути
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     app = FastAPI(title="DocFlow API", version="0.1.0", description=DESCRIPTION, lifespan=_lifespan)
     app.state.settings = settings or get_settings()
     app.state.sessionmaker = sessionmaker
@@ -89,5 +103,9 @@ def create_app(
     app.include_router(stats.router)
     app.include_router(schemas.router)
     app.include_router(webhooks.router)
+    app.include_router(destinations.router)
+    app.include_router(destinations.catalog_router)
+    app.include_router(routing.router)
+    app.include_router(exports.router)
     app.include_router(dictionaries.router)
     return app

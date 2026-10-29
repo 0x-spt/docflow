@@ -10,7 +10,9 @@ const NAV = [
   { href: "/app", label: "Очередь" },
   { href: "/app/upload", label: "Загрузить" },
   { href: "/app/dictionaries", label: "Справочники" },
-  { href: "/app/settings", label: "Интеграции" },
+  { href: "/app/integrations", label: "Подключения" },
+  { href: "/app/rules", label: "Правила" },
+  { href: "/app/settings", label: "API и вебхуки" },
 ];
 
 function isCurrent(pathname: string, href: string): boolean {

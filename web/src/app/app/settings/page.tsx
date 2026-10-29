@@ -10,7 +10,7 @@ import type { ApiKey, Webhook } from "@/lib/types";
 
 import { deleteWebhook, revokeKey } from "./actions";
 
-export const metadata = { title: "Интеграции — DocFlow" };
+export const metadata = { title: "API и вебхуки — DocFlow" };
 
 const SMALL_BTN =
   "inline-flex min-h-11 items-center px-2 font-medium underline decoration-2 underline-offset-4 hover:text-accent-text";
@@ -60,7 +60,7 @@ export default async function SettingsPage({
   return (
     <div className="flex flex-col">
       <div className="mb-4">
-        <h1 className="text-4xl font-semibold tracking-tight">Интеграции</h1>
+        <h1 className="text-4xl font-semibold tracking-tight">API и вебхуки</h1>
         <p className="mt-1 text-muted">Ключи API и вебхуки: подключите DocFlow к своей учётной системе.</p>
       </div>
 

@@ -177,3 +177,11 @@ async def test_naive_datetime_rejected(session):
     session.add(ApiKey(tenant_id=t.id, prefix="p", key_hash="h3", revoked_at=datetime(2026, 1, 1)))
     with pytest.raises(Exception, match="naive"):
         await session.commit()
+
+
+def test_exports_tenant_created_index():
+    """Журнал выгрузок тенанта «новые сверху» — по индексу (tenant_id, created_at)."""
+    from docflow.db.models import Export
+
+    idx = {i.name: [c.name for c in i.columns] for i in Export.__table__.indexes}
+    assert idx.get("ix_exports_tenant_id_created_at") == ["tenant_id", "created_at"]

@@ -28,9 +28,15 @@ class Settings(BaseSettings):
 
     # внешний адрес API: попадает в pdf_url в ответах и вебхуках
     public_base_url: str = "http://localhost:8000"
+    # адрес кабинета (сайта): ссылка «открыть документ» в уведомлениях и выгрузках
+    public_site_url: str = "http://localhost:3000"
 
     # вебхуки на частные/loopback адреса: только для dev и e2e
     webhook_allow_private: bool = False
+
+    # ключ Fernet (base64, 32 байта) для секретов получателей выгрузки; без него секреты не сохраняются.
+    # Сгенерировать: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    secrets_key: str = ""
 
     # лимиты на входе: проверяем при загрузке, чтобы воркер не получал мусор
     max_file_mb: int = 20
