@@ -199,7 +199,7 @@ export default async function QueuePage({
                         <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5">
                           {d.summary.map((s) => (
                             <div key={s.field} className="contents">
-                              <dt className="font-mono text-xs leading-5 text-muted">{s.field}</dt>
+                              <dt className="text-xs leading-5 text-muted">{s.label}</dt>
                               <dd className="truncate" title={summaryValue(s.value)}>
                                 {summaryValue(s.value)}
                               </dd>

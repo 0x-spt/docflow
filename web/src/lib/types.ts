@@ -24,6 +24,8 @@ export interface Me {
 
 export interface SummaryItem {
   field: string;
+  /** Название поля для людей (своё у компании или наше). */
+  label: string;
   value: string | number;
 }
 
@@ -300,4 +302,24 @@ export interface MappingSchema {
   slug: string;
   title: string;
   rows: { key: string; label: string; group?: string }[];
+}
+
+/** Строка GET/PUT /v1/schemas/{slug}/labels */
+export interface FieldLabelRow {
+  key: string;
+  type: string;
+  /** Для колонок таблицы — имя таблицы, иначе null. */
+  group: string | null;
+  default: string;
+  label: string;
+  queue: boolean;
+}
+
+export interface FieldLabels {
+  slug: string;
+  title: string;
+  version: number;
+  rows: FieldLabelRow[];
+  queue_fields: string[];
+  queue_default: boolean;
 }

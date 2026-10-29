@@ -73,10 +73,12 @@ function descriptionHead(text: string): string {
 }
 
 /**
- * Подпись поля. Заголовков в схеме нет, есть имя и описание для модели («Клиника как написана.»):
- * берём начало описания; нет описания или вышло слишком длинно — имя поля.
+ * Подпись поля. Сначала непустое название (`title`: своё у компании или наше), иначе описание для модели
+ * («Клиника как написана.»): берём его начало; нет описания или вышло слишком длинно — имя поля.
  */
-export function fieldLabel(spec: Pick<SchemaColumn, "name" | "description">): string {
+export function fieldLabel(spec: Pick<SchemaColumn, "name" | "description" | "title">): string {
+  const title = (spec.title ?? "").trim();
+  if (title) return title;
   const head = descriptionHead((spec.description ?? "").trim()).trim();
   const text = head && head.length <= 40 ? head : spec.name.replace(/_/g, " ");
   return text.charAt(0).toUpperCase() + text.slice(1);
