@@ -1,4 +1,4 @@
-# Демо для показа клиенту: письма уходят в Mailpit, вебхуки разрешены на частные адреса.
+# Демо для показа клиенту: письма уходят в Mailpit, вебхуки разрешены на частные адреса (всем клиентам стека).
 #   docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d --build
 #   docker compose -f docker-compose.yml -f docker-compose.demo.yml run --rm worker docflow seed-demo
 # Письма: http://localhost:8025. ТОЛЬКО для показа и разработки: в проде оверлей не использовать.
