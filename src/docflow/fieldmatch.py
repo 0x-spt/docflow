@@ -25,6 +25,8 @@ SYNONYMS: dict[str, tuple[str, ...]] = {
 }
 SIMILARITY = 0.8
 
+# слово сразу после синонима, меняющее смысл: «Сумма без НДС» — не итог к оплате
+_QUALIFIERS = frozenset({"без", "до"})
 # синонимы от длинных к коротким: «сумма ндс» проверяется раньше «сумма»
 _BY_LENGTH = sorted(((s, g) for g, syns in SYNONYMS.items() for s in syns), key=lambda p: -len(p[0]))
 
@@ -45,8 +47,11 @@ def _variants(spec: "FieldSpec", base: "FieldSpec | None") -> set[str]:
 
 def _synonym_group(title: str) -> str | None:
     for syn, group in _BY_LENGTH:
-        if title == syn or title.startswith(syn + " "):
+        if title == syn:
             return group
+        if title.startswith(syn + " "):
+            rest = title[len(syn) + 1 :].split(" ", 1)[0]
+            return None if rest in _QUALIFIERS else group
     return None
 
 

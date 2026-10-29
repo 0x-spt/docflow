@@ -347,3 +347,57 @@ async def test_remote_fields_unknown_schema_404(api, auth, fake_connector):
     r = await api.client.post(remote_url(d, schema="nope_schema"), headers=auth)
     assert r.status_code == 404
     assert fake_connector.calls == []
+
+
+async def test_remote_fields_taken_code_not_suggested(api, auth, fake_connector):
+    # amount уже у supplier: «Сумма» не предлагается в total, хотя total свободен
+    d = (await create(api, auth, mapping={"supplier": "amount"})).json()
+    r = await api.client.post(remote_url(d), headers=auth)
+    assert r.status_code == 200, r.text
+    assert r.json()["suggested"] == {"vat": "tax"}
+
+
+async def test_remote_fields_own_suggestion_respects_saved_mapping(api, auth, fake_connector):
+    # как у 1С: свой подбор doc_field → роль; роль counterparty уже занята buyer, ключ buyer сопоставлен
+    fake_connector.suggest_mapping = lambda schema, config: {
+        "supplier": "counterparty",
+        "supplier_inn": "counterparty_inn",
+        "buyer": "item_name",
+    }
+    d = (await create(api, auth, mapping={"buyer": "counterparty"})).json()
+    r = await api.client.post(remote_url(d), headers=auth)
+    assert r.status_code == 200, r.text
+    assert r.json()["suggested"] == {"supplier_inn": "counterparty_inn"}
+    assert "counterparty" not in r.json()["suggested"].values()
+
+
+async def _set(api, d, **values):
+    async with api.sessionmaker() as s:
+        row = await s.get(Destination, uuid.UUID(d["id"]))
+        for k, v in values.items():
+            setattr(row, k, v)
+        await s.commit()
+
+
+async def test_remote_fields_unknown_kind_422(api, auth, fake_connector):
+    d = (await create(api, auth)).json()
+    await _set(api, d, kind="gone_kind")
+    r = await api.client.post(remote_url(d), headers=auth)
+    assert r.status_code == 422
+    assert r.json()["detail"] == "«gone_kind» не отдаёт список полей"
+
+
+async def test_remote_fields_private_url_422(api, auth, fake_connector):
+    d = (await create(api, auth)).json()
+    await _set(api, d, config={"endpoint": "http://127.0.0.1/x"})
+    assert (await api.client.post(remote_url(d), headers=auth)).status_code == 422
+    assert fake_connector.calls == []
+
+
+async def test_remote_fields_without_secrets_key_422(api, auth, fake_connector):
+    d = (await create(api, auth)).json()
+    api.settings.secrets_key = ""
+    r = await api.client.post(remote_url(d), headers=auth)
+    assert r.status_code == 422
+    assert "ключ шифрования" in r.json()["detail"]
+    assert fake_connector.calls == []

@@ -61,3 +61,24 @@ def test_one_to_one_and_skips():
 
 def test_tables_not_candidates():
     assert suggest(INV, INV, [RF("i", "Позиции"), RF("j", "items")]) == {}
+
+
+def test_taken_codes_not_suggested_elsewhere():
+    fields = [RF("amount", "Сумма")]
+    # контроль: без фильтра «Сумма» ушла бы в total
+    assert suggest(INV, INV, fields, skip_keys={"supplier"}) == {"total": "amount"}
+    assert suggest(INV, INV, fields, skip_keys={"supplier"}, taken_codes={"amount"}) == {}
+
+
+def test_synonym_qualifier_blocks_total():
+    # «Сумма без НДС» — не итог к оплате: синоним не срабатывает, похожих полей нет
+    assert suggest(INV, INV, [RF("x", "Сумма без НДС, руб")]) == {}
+    assert suggest(INV, INV, [RF("x", "Сумма до НДС")]) == {}
+    # точное название подытога — в подытог
+    assert suggest(INV, INV, [RF("y", "Итого без НДС")]) == {"subtotal": "y"}
+
+
+def test_vat_and_total_with_vat_ordering():
+    expected = {"total": "t", "vat": "v"}
+    assert suggest(INV, INV, [RF("t", "Сумма с НДС"), RF("v", "НДС")]) == expected
+    assert suggest(INV, INV, [RF("v", "НДС"), RF("t", "Сумма с НДС")]) == expected

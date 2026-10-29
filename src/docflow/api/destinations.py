@@ -5,6 +5,7 @@
 """
 
 import dataclasses
+import logging
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
@@ -37,6 +38,7 @@ NOT_FOUND = "получатель не найден"
 HTTP_TIMEOUT = 20.0
 
 ManagerDep = Annotated[Principal, Depends(require_owner_or_key)]
+logger = logging.getLogger(__name__)
 
 
 class DestinationIn(BaseModel):
@@ -358,16 +360,18 @@ async def remote_fields(
     except ConnectorError as exc:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, exc.message) from None
     except Exception as exc:
-        # текст исключения может содержать адрес с ключом или секрет: наружу — только тип
+        # текст исключения может содержать адрес с ключом или секрет: в лог и наружу — только тип
+        logger.warning("remote-fields: сбой получателя %s (%s)", dest.id, type(exc).__name__)
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY, f"не удалось получить поля системы ({type(exc).__name__})"
         ) from None
+    saved = {k: str(v).strip() for k, v in mapping.items() if str(v).strip()}
+    taken = frozenset(saved.values())
     own = getattr(connector, "suggest_mapping", None)
     if own is not None:
-        suggested = own(labeled, config)
+        # тот же фильтр, что у общего подбора: занятое поле системы (роль 1С) не предлагаем второму полю —
+        # иначе при выгрузке оно молча перебило бы сопоставление клиента
+        suggested = {k: v for k, v in own(labeled, config).items() if k not in saved and v not in taken}
     else:
-        saved = {k: str(v).strip() for k, v in mapping.items() if str(v).strip()}
-        suggested = fieldmatch.suggest(
-            labeled, base, fields, skip_keys=frozenset(saved), taken_codes=frozenset(saved.values())
-        )
+        suggested = fieldmatch.suggest(labeled, base, fields, skip_keys=frozenset(saved), taken_codes=taken)
     return {"fields": [{"code": f.code, "title": f.title} for f in fields], "suggested": suggested}
