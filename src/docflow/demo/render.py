@@ -5,6 +5,7 @@ import random
 from datetime import date
 from pathlib import Path
 
+import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
@@ -169,7 +170,7 @@ def _stamp(name: str, inn: str, fonts: _Fonts, rng: random.Random, size: int = 2
     for i, t in enumerate(("ИНН", inn)):
         d.text((c, c - 22 + i * 44), t, font=small, fill=ink, anchor="mm")
     # ровная печать выглядит фальшиво: чуть вращаем и «недожимаем» краску
-    im = im.rotate(rng.uniform(-18, 18), resample=Image.BICUBIC).resize((size, size), Image.LANCZOS)
+    im = im.rotate(rng.uniform(-7, 7), resample=Image.BICUBIC).resize((size, size), Image.LANCZOS)
     alpha = np.asarray(im.getchannel("A"), dtype=np.float32)
     grain = np.random.default_rng(rng.randrange(1 << 30)).uniform(0.55, 1.0, alpha.shape)
     im.putalpha(Image.fromarray((alpha * grain).astype(np.uint8)))
@@ -203,7 +204,7 @@ def _signature_block(page: _Page, rng: random.Random, labels: list[str], stamp_n
         sig = _signature(rng)
         page.img.paste(sig, (round(lx + 20), y - 8), sig)
     st = _stamp(stamp_name, stamp_inn, page.f, rng)
-    page.img.paste(st, (MARGIN + 150, y + 15), st)
+    page.img.paste(st, (MARGIN + 200, y + 50), st)
     page.y = y + 260
 
 
@@ -298,16 +299,6 @@ def _placeholder() -> dict:
     return _invoice(STROYKOMPLEKT, "СК-1000", date(2026, 1, 15), [("cement", 10), ("sand", 5)])
 
 
-def _homography(src: list[tuple[float, float]], dst: list[tuple[float, float]]) -> list[float]:
-    """Коэффициенты для Image.transform(PERSPECTIVE): из координат результата в исходные."""
-    rows, rhs = [], []
-    for (u, v), (x, y) in zip(src, dst, strict=True):
-        rows.append([x, y, 1, 0, 0, 0, -u * x, -u * y])
-        rows.append([0, 0, 0, x, y, 1, -v * x, -v * y])
-        rhs += [u, v]
-    return np.linalg.solve(np.array(rows, dtype=float), np.array(rhs, dtype=float)).tolist()
-
-
 def _photograph(sheet: Image.Image, rng: random.Random, blur: bool) -> Image.Image:
     np_rng = np.random.default_rng(rng.randrange(1 << 30))
     # стол: тёмно-серый с пятнами света и шумом
@@ -316,14 +307,15 @@ def _photograph(sheet: Image.Image, rng: random.Random, blur: bool) -> Image.Ima
     table = Image.fromarray(np.clip(np.stack([base, base * 0.97, base * 0.93], -1), 0, 255).astype(np.uint8))
 
     # лист: поворот ±3°, лёгкая перспектива
-    ang = math.radians(rng.uniform(-3, 3))
+    ang = math.radians(rng.uniform(-2, 2))
     cx, cy = TABLE_W / 2 + rng.uniform(-12, 12), TABLE_H / 2 + rng.uniform(-12, 12)
     quad = []
     for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1)):
         x, y = sx * SHEET_W / 2, sy * SHEET_H / 2
-        quad.append((cx + x * math.cos(ang) - y * math.sin(ang) + rng.uniform(-18, 18),
-                     cy + x * math.sin(ang) + y * math.cos(ang) + rng.uniform(-18, 18)))
-    coeffs = _homography([(0, 0), (SHEET_W, 0), (SHEET_W, SHEET_H), (0, SHEET_H)], quad)
+        quad.append((cx + x * math.cos(ang) - y * math.sin(ang) + rng.uniform(-7, 7),
+                     cy + x * math.sin(ang) + y * math.cos(ang) + rng.uniform(-7, 7)))
+    matrix = cv2.getPerspectiveTransform(
+        np.float32([(0, 0), (SHEET_W, 0), (SHEET_W, SHEET_H), (0, SHEET_H)]), np.float32(quad))
 
     # неравномерное освещение листа
     gx = np.linspace(0, 1, SHEET_W, dtype=np.float32)[None, :]
@@ -334,9 +326,9 @@ def _photograph(sheet: Image.Image, rng: random.Random, blur: bool) -> Image.Ima
     if blur:
         sheet = sheet.filter(ImageFilter.GaussianBlur(6))
 
-    warped = sheet.transform((TABLE_W, TABLE_H), Image.PERSPECTIVE, coeffs, Image.BICUBIC)
-    mask = Image.new("L", (SHEET_W, SHEET_H), 255).transform(
-        (TABLE_W, TABLE_H), Image.PERSPECTIVE, coeffs, Image.BILINEAR)
+    size = (TABLE_W, TABLE_H)
+    warped = Image.fromarray(cv2.warpPerspective(np.asarray(sheet), matrix, size, flags=cv2.INTER_CUBIC))
+    mask = Image.fromarray(cv2.warpPerspective(np.full((SHEET_H, SHEET_W), 255, np.uint8), matrix, size))
     shadow = mask.filter(ImageFilter.GaussianBlur(18)).point(lambda p: int(p * 0.55))
     table.paste(Image.new("RGB", table.size, (10, 10, 10)), (14, 20), shadow)
     table.paste(warped, (0, 0), mask)
