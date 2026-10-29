@@ -15,7 +15,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from docflow.connectors import google_sheets
-from docflow.connectors.base import REGISTRY, ConnectorError, DestCtx, ExportDoc
+from docflow.connectors.base import REGISTRY, ConnectorError, DestCtx, ExportDoc, RemoteField
 from docflow.labels import apply_labels
 from docflow.schemas.library import builtin_schemas
 from docflow.tabular import docs_header, items_header
@@ -676,3 +676,23 @@ async def test_client_header_without_known_columns_fails(http):
     assert e.value.message == google_sheets.NO_KNOWN_COLUMNS == "в таблице нет ни одной знакомой колонки"
     assert e.value.retryable is False
     assert sheet.appends == []
+
+
+async def test_sheets_remote_fields_reads_header(http):
+    with respx.mock(assert_all_called=False) as router:
+        mock_token(router)
+        sheet = Sheet(router, docs_col=[["Поставщик", " ИНН ", "", "Поставщик", "Сумма"], ["ООО", "1", "", "", "5"]])
+        fields = await google_sheets.GoogleSheets().remote_fields(make_ctx(http))
+    assert fields == [RemoteField("Поставщик", "Поставщик"), RemoteField("ИНН", "ИНН"), RemoteField("Сумма", "Сумма")]
+    assert sheet.created == [] and sheet.puts == [] and sheet.appends == []
+
+
+async def test_sheets_remote_fields_no_sheet_empty(http):
+    with respx.mock(assert_all_called=False) as router:
+        mock_token(router)
+        sheet = Sheet(router, titles=("Лист1",))
+        assert await google_sheets.GoogleSheets().remote_fields(make_ctx(http)) == []
+        # лист есть, а строка 1 пустая
+        sheet.titles.append(DOCS)
+        assert await google_sheets.GoogleSheets().remote_fields(make_ctx(http)) == []
+    assert sheet.created == []

@@ -20,7 +20,15 @@ from urllib.parse import quote
 import httpx
 import jwt
 
-from docflow.connectors.base import REGISTRY, BaseConnector, ConnectorError, DestCtx, ExportDoc, FieldDef
+from docflow.connectors.base import (
+    REGISTRY,
+    BaseConnector,
+    ConnectorError,
+    DestCtx,
+    ExportDoc,
+    FieldDef,
+    RemoteField,
+)
 from docflow.tabular import (
     DOCS_SHEET,
     ITEMS_SHEET,
@@ -346,6 +354,17 @@ class GoogleSheets(BaseConnector):
             forbidden=READ_ONLY.format(email=s.email),
         )
         return f"Таблица «{title}» доступна для записи"
+
+    async def remote_fields(self, ctx: DestCtx) -> list[RemoteField]:
+        """Непустые уникальные заголовки строки 1 листа документов (code = заголовок). Листы не создаются."""
+        s = _Session(ctx)
+        _, existing = await s.titles()
+        # название листа Google сравнивает без учёта регистра — читаем под тем, что в таблице
+        sheet = next((t for t in existing if t.casefold() == s.docs_sheet.casefold()), None)
+        if sheet is None:
+            return []
+        names = dict.fromkeys(h.strip() for h in await s.read_header(sheet))
+        return [RemoteField(h, h) for h in names if h]
 
     async def export(self, ctx: DestCtx, doc: ExportDoc) -> str | None:
         """Сначала читаем и проверяем шапки обоих листов, потом пишем: ошибка шапки — без частичной записи.

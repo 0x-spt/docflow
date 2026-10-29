@@ -38,6 +38,14 @@ class FieldDef:
     advanced: bool = False
 
 
+@dataclass(frozen=True)
+class RemoteField:
+    """Поле системы клиента для сопоставления: code — что пишется в mapping, title — что видит человек."""
+
+    code: str
+    title: str
+
+
 Loader = Callable[[], Awaitable[bytes | None]]
 
 
@@ -99,6 +107,10 @@ class Connector(Protocol):
 
     async def notify(self, ctx: DestCtx, doc: ExportDoc, purpose: str) -> None:
         """Уведомление (purpose: notify_review | notify_new)."""
+
+    # Необязательные методы (в BaseConnector их нет, наличие проверяется через getattr):
+    #   async remote_fields(ctx) -> list[RemoteField] — поля системы для сопоставления (без записи данных);
+    #   suggest_mapping(schema, config) -> dict[str, str] — свой подбор сопоставления вместо общего (1С).
 
 
 class BaseConnector:

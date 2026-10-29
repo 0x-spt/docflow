@@ -16,8 +16,17 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 
-from docflow.connectors.base import REGISTRY, BaseConnector, ConnectorError, DestCtx, ExportDoc, FieldDef
+from docflow.connectors.base import (
+    REGISTRY,
+    BaseConnector,
+    ConnectorError,
+    DestCtx,
+    ExportDoc,
+    FieldDef,
+    RemoteField,
+)
 from docflow.connectors.crm_common import Party, clean, marker, party_from, total_of
+from docflow.schemas.model import DocSchema
 from docflow.tabular import table_field
 
 ODATA_SUFFIX = "/odata/standard.odata"
@@ -412,6 +421,28 @@ class _Sources:
         return row.get(col) if col else None
 
 
+def default_mapping(schema: DocSchema, config: dict[str, Any]) -> dict[str, str]:
+    """Сопоставление по умолчанию для схемы: те же источники, что берёт выгрузка без сопоставления клиента.
+
+    Сторона — поставщик для поступления (по умолчанию), иначе покупатель. Только ключи, которые есть в схеме."""
+    side = "supplier" if str(config.get("document_kind") or "purchase").strip() == "purchase" else "buyer"
+    pairs = {
+        side: "counterparty",
+        f"{side}_inn": "counterparty_inn",
+        f"{side}_kpp": "counterparty_kpp",
+        "number": "incoming_number",
+        "issued": "incoming_date",
+    }
+    names = {f.name for f in schema.fields}
+    out = {key: role for key, role in pairs.items() if key in names}
+    table = table_field(schema)
+    columns = {c.name for c in table.columns or []} if table else set()
+    for role, col in ITEM_COLUMNS.items():
+        if col in columns:
+            out[f"{table.name}.{col}"] = role
+    return out
+
+
 class _Line:
     def __init__(self, name: str, qty: Decimal, price: Decimal, amount: Decimal, vat: Decimal | None):
         self.name, self.qty, self.price, self.amount, self.vat = name, qty, price, amount, vat
@@ -567,6 +598,13 @@ class OneCOData(BaseConnector):
     ]
     target_fields = [FieldDef(role, label) for role, label in ROLES.items()]
 
+    async def remote_fields(self, ctx: DestCtx) -> list[RemoteField]:
+        # поля 1С — фиксированные роли, сеть не нужна
+        return [RemoteField(role, label) for role, label in ROLES.items()]
+
+    def suggest_mapping(self, schema: DocSchema, config: dict[str, Any]) -> dict[str, str]:
+        return default_mapping(schema, config)
+
     async def test(self, ctx: DestCtx) -> str | None:
         st = _Settings(ctx.config)
         resp = await _Session(ctx).send("GET", "$metadata", accept="application/xml")
@@ -666,4 +704,4 @@ class OneCOData(BaseConnector):
 
 REGISTRY["onec_odata"] = OneCOData()
 
-__all__ = ["OneCOData"]
+__all__ = ["OneCOData", "default_mapping"]

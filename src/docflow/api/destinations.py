@@ -9,15 +9,25 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field, StrictStr
 from sqlalchemy import select
 
-from docflow.api.deps import Principal, SessionDep, SettingsDep, TenantDep, parse_id, require_owner_or_key
+from docflow import fieldmatch
+from docflow.api.deps import (
+    Principal,
+    ResolverDep,
+    SessionDep,
+    SettingsDep,
+    TenantDep,
+    parse_id,
+    require_owner_or_key,
+)
 from docflow.connectors import checks
 from docflow.connectors.base import REGISTRY, Connector, ConnectorError, DestCtx, FieldDef, supports
 from docflow.connectors.checks import InvalidSettings
 from docflow.db.models import Destination, RoutingRules
+from docflow.labels import apply_labels, get_label_set
 from docflow.secrets import SecretsKeyMissing, decrypt_secrets, encrypt_secrets
 
 router = APIRouter(prefix="/v1/destinations", tags=["destinations"])
@@ -304,3 +314,60 @@ async def test_destination(
         # текст исключения может содержать адрес с ключом или секрет: наружу — только тип
         return {"ok": False, "message": f"Не удалось проверить подключение ({type(exc).__name__})"}
     return {"ok": True, "message": message or "Подключение работает"}
+
+
+@router.post(
+    "/{destination_id}/remote-fields",
+    summary="Поля системы и подбор сопоставления",
+    description=(
+        "Читает поля из системы клиента (заголовки таблицы, пользовательские поля сделки, роли 1С) с сохранёнными "
+        "секретами и предлагает сопоставление для схемы `schema`: `{fields: [{code, title}], suggested: {ключ поля "
+        "документа: code}}`. Уже сопоставленные поля и занятые коды не предлагаются; сохранённое сопоставление не "
+        "меняется. 404 — нет получателя или схемы; 422 — система не отдаёт поля, настройки не проходят проверку или "
+        "не настроен ключ шифрования; 502 — система не ответила или отказала; 403 — сессия оператора."
+    ),
+)
+async def remote_fields(
+    destination_id: str,
+    manager: ManagerDep,
+    session: SessionDep,
+    settings: SettingsDep,
+    resolver: ResolverDep,
+    schema: Annotated[str, Query(min_length=1, max_length=100, description="Slug схемы документа")],
+) -> dict[str, Any]:
+    dest = await _owned(session, manager.tenant_id, destination_id)
+    connector = REGISTRY.get(dest.kind)
+    fetch = getattr(connector, "remote_fields", None)
+    if connector is None or fetch is None:
+        label = connector.label if connector is not None else dest.kind
+        raise _unprocessable(f"«{label}» не отдаёт список полей")
+    secrets = _decrypt(dest, settings.secrets_key)
+    config = dest.config or {}
+    await _check_config(config, connector, allow_private=settings.webhook_allow_private)
+    await _check_urls(secrets, connector.secret_fields, allow_private=settings.webhook_allow_private)
+    try:
+        base = await resolver.resolve(session, manager.tenant_id, schema, None)
+    except LookupError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from None
+    labeled = apply_labels(base, (await get_label_set(session, manager.tenant_id, schema)).labels)
+    mapping = dest.mapping or {}
+    try:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as http:
+            ctx = DestCtx(config=config, secrets=secrets, mapping=mapping, http=http)
+            fields = await fetch(ctx)
+    except ConnectorError as exc:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, exc.message) from None
+    except Exception as exc:
+        # текст исключения может содержать адрес с ключом или секрет: наружу — только тип
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY, f"не удалось получить поля системы ({type(exc).__name__})"
+        ) from None
+    own = getattr(connector, "suggest_mapping", None)
+    if own is not None:
+        suggested = own(labeled, config)
+    else:
+        saved = {k: str(v).strip() for k, v in mapping.items() if str(v).strip()}
+        suggested = fieldmatch.suggest(
+            labeled, base, fields, skip_keys=frozenset(saved), taken_codes=frozenset(saved.values())
+        )
+    return {"fields": [{"code": f.code, "title": f.title} for f in fields], "suggested": suggested}

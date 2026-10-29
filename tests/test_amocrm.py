@@ -8,7 +8,7 @@ import httpx
 import pytest
 import respx
 
-from docflow.connectors.base import REGISTRY, ConnectorError, DestCtx, ExportDoc
+from docflow.connectors.base import REGISTRY, ConnectorError, DestCtx, ExportDoc, RemoteField
 from docflow.schemas.library import builtin_schemas
 
 API = "https://company.amocrm.ru/api/v4"
@@ -382,3 +382,46 @@ async def test_missing_token(http):
     with pytest.raises(ConnectorError) as err:
         await REGISTRY["amocrm"].test(make_ctx(http, secrets={}))
     assert not err.value.retryable
+
+
+def _fields_page(ids, next_page=None):
+    body = {"_embedded": {"custom_fields": [{"id": i, "name": f"Поле {i}"} for i in ids]}, "_links": {}}
+    if next_page:
+        body["_links"]["next"] = {"href": f"{API}/leads/custom_fields?page={next_page}"}
+    return body
+
+
+async def test_amocrm_remote_fields_paginates(http):
+    pages = {"1": _fields_page([101, 102], next_page=2), "2": _fields_page([103])}
+    with respx.mock() as router:
+        route = router.get(f"{API}/leads/custom_fields").mock(
+            side_effect=lambda req: httpx.Response(200, json=pages[req.url.params["page"]])
+        )
+        fields = await REGISTRY["amocrm"].remote_fields(make_ctx(http))
+    assert fields == [RemoteField("101", "Поле 101"), RemoteField("102", "Поле 102"), RemoteField("103", "Поле 103")]
+    assert route.call_count == 2
+    assert all(c.request.url.params["limit"] == "250" for c in route.calls)
+
+
+async def test_amocrm_remote_fields_page_cap(http):
+    from docflow.connectors.amocrm import MAX_FIELD_PAGES
+
+    assert MAX_FIELD_PAGES == 20
+    with respx.mock() as router:
+        route = router.get(f"{API}/leads/custom_fields").mock(
+            side_effect=lambda req: httpx.Response(200, json=_fields_page([int(req.url.params["page"])], next_page=99))
+        )
+        fields = await REGISTRY["amocrm"].remote_fields(make_ctx(http))
+    assert route.call_count == 20
+    assert len(fields) == 20
+
+
+async def test_amocrm_remote_fields_empty_and_bad_token(http):
+    with respx.mock() as router:
+        router.get(f"{API}/leads/custom_fields").respond(204)
+        assert await REGISTRY["amocrm"].remote_fields(make_ctx(http)) == []
+    with respx.mock() as router:
+        router.get(f"{API}/leads/custom_fields").respond(401)
+        with pytest.raises(ConnectorError) as exc:
+            await REGISTRY["amocrm"].remote_fields(make_ctx(http))
+    assert "t0k3n" not in exc.value.message

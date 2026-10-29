@@ -3,6 +3,7 @@ import uuid
 from api_helpers import session_for
 from sqlalchemy import select
 
+from docflow.connectors import base as connectors_base
 from docflow.connectors.base import ConnectorError
 from docflow.db.models import Destination
 from docflow.secrets import decrypt_secrets
@@ -275,3 +276,74 @@ async def test_delete_prunes_routing_rules(api, auth, fake_connector):
     got = (await api.client.get("/v1/routing-rules", headers=auth)).json()["rules"]
     assert got[0]["export_to"] == [b] and got[0]["notify"] == []
     assert got[1]["export_to"] == [b]
+
+
+def remote_url(d, schema="invoice_ru"):
+    return f"/v1/destinations/{d['id']}/remote-fields?schema={schema}"
+
+
+async def test_remote_fields_returns_fields_and_suggestions(api, auth, fake_connector):
+    d = (await create(api, auth)).json()
+    r = await api.client.post(remote_url(d), headers=auth)
+    assert r.status_code == 200, r.text
+    assert r.json()["fields"] == [{"code": "amount", "title": "Сумма"}, {"code": "tax", "title": "НДС"}]
+    # total уже сопоставлен, amount занят
+    assert r.json()["suggested"] == {"vat": "tax"}
+    assert fake_connector.calls == [("remote_fields", {"endpoint": URL}, {"token": "SUPER-SECRET"})]
+    assert "SUPER-SECRET" not in r.text
+
+
+async def test_remote_fields_keeps_saved_mapping(api, auth, fake_connector):
+    d = (await create(api, auth)).json()
+    assert (await api.client.post(remote_url(d), headers=auth)).status_code == 200
+    got = await api.client.get(f"/v1/destinations/{d['id']}", headers=auth)
+    assert got.json()["mapping"] == {"total": "amount"}
+    assert got.json()["updated_at"] == d["updated_at"]
+
+
+async def test_remote_fields_uses_company_labels(api, auth, fake_connector):
+    put = await api.client.put("/v1/schemas/invoice_ru/labels", headers=auth, json={"labels": {"subtotal": "Налог"}})
+    assert put.status_code == 200, put.text
+    fake_connector.remote = [connectors_base.RemoteField("n1", "Налог")]
+    d = (await create(api, auth, mapping={})).json()
+    r = await api.client.post(remote_url(d), headers=auth)
+    assert r.json()["suggested"] == {"subtotal": "n1"}
+
+
+async def test_remote_fields_connector_error_502(api, auth, fake_connector):
+    d = (await create(api, auth)).json()
+    fake_connector.error = ConnectorError("Неверный токен")
+    r = await api.client.post(remote_url(d), headers=auth)
+    assert r.status_code == 502
+    assert r.json()["detail"] == "Неверный токен"
+
+
+async def test_remote_fields_unexpected_error_hides_secret(api, auth, fake_connector):
+    d = (await create(api, auth)).json()
+    fake_connector.error = RuntimeError("boom SUPER-SECRET")
+    r = await api.client.post(remote_url(d), headers=auth)
+    assert r.status_code == 502
+    assert "SUPER-SECRET" not in r.text and "RuntimeError" in r.json()["detail"]
+
+
+async def test_remote_fields_not_supported_422(api, auth, fake_notifier):
+    d = (await create(api, auth, kind="test_notifier", config={}, secrets={}, mapping={})).json()
+    r = await api.client.post(remote_url(d), headers=auth)
+    assert r.status_code == 422
+    assert r.json()["detail"] == "«Тестовые уведомления» не отдаёт список полей"
+
+
+async def test_remote_fields_operator_403_and_foreign_404(api, auth, make_tenant, fake_connector):
+    d = (await create(api, auth)).json()
+    op, _ = await session_for(api, auth, role="operator")
+    assert (await api.client.post(remote_url(d), headers=op)).status_code == 403
+    other = await make_tenant("Другой")
+    assert (await api.client.post(remote_url(d), headers=other)).status_code == 404
+    assert fake_connector.calls == []
+
+
+async def test_remote_fields_unknown_schema_404(api, auth, fake_connector):
+    d = (await create(api, auth)).json()
+    r = await api.client.post(remote_url(d, schema="nope_schema"), headers=auth)
+    assert r.status_code == 404
+    assert fake_connector.calls == []
