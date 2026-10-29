@@ -116,8 +116,12 @@ async def _resolve(resolver, session, tenant_id, slug: str, version: int | None)
 
 
 class LabelsIn(BaseModel):
-    labels: dict[str, str] = Field(default_factory=dict, description="Ключ поля («vat», «items.qty») -> название")
-    queue_fields: list[str] = Field(default_factory=list, description="Поля верхнего уровня для очереди, до 3")
+    labels: dict[str, str] = Field(
+        default_factory=dict, max_length=500, description="Ключ поля («vat», «items.qty») -> название"
+    )
+    queue_fields: list[str] = Field(
+        default_factory=list, max_length=50, description="Поля верхнего уровня для очереди, до 3"
+    )
 
 
 def _labels_view(schema: DocSchema, stored: LabelSet) -> dict[str, Any]:

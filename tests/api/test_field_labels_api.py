@@ -1,5 +1,8 @@
+import uuid
+
 from api_helpers import session_for
 
+from docflow.labels import get_label_set
 from docflow.schemas.library import builtin_schemas
 
 URL = "/v1/schemas/invoice_ru"
@@ -76,3 +79,21 @@ async def test_labels_unknown_schema_404(api, auth):
     assert (await api.client.get("/v1/schemas/nope/labels", headers=auth)).status_code == 404
     r = await api.client.put("/v1/schemas/nope/labels", headers=auth, json={"labels": {}, "queue_fields": []})
     assert r.status_code == 404
+
+
+async def test_get_label_set_returns_fresh_empty(api):
+    tenant = uuid.uuid4()
+    async with api.sessionmaker() as s:
+        first = await get_label_set(s, tenant, "invoice_ru")
+        first.labels["x"] = "y"
+        first.queue_fields.append("z")
+        second = await get_label_set(s, tenant, "invoice_ru")
+    assert second.labels == {} and second.queue_fields == []
+
+
+async def test_put_caps_body_size(api, auth):
+    r = await api.client.put(f"{URL}/labels", headers=auth, json={"labels": {}, "queue_fields": ["a"] * 51})
+    assert r.status_code == 422
+    big = {f"k{i}": "x" for i in range(501)}
+    r = await api.client.put(f"{URL}/labels", headers=auth, json={"labels": big, "queue_fields": []})
+    assert r.status_code == 422

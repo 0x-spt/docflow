@@ -7,6 +7,7 @@
 import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +15,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from docflow.db.models import FieldLabels
 from docflow.fieldmatch import normalize
 from docflow.schemas.model import DocSchema, FieldSpec
+
+if TYPE_CHECKING:  # pipeline тянет много лишнего: нужен только для типа
+    from docflow.pipeline import SchemaResolver
 
 LABEL_MAX = 80
 QUEUE_MAX = 3
@@ -40,7 +44,6 @@ class LabelSet:
     queue_fields: list[str]
 
 
-EMPTY_LABELS = LabelSet({}, [])
 
 
 class LabelsInvalid(ValueError):
@@ -89,6 +92,8 @@ def _label_error(label: str) -> str | None:
         return f"не длиннее {LABEL_MAX} символов"
     if any(ord(ch) < 32 or ord(ch) == 127 for ch in label):
         return "без управляющих символов"
+    if not normalize(label):
+        return "нужны буквы или цифры"
     if normalize(label) in _SERVICE_RESERVED:
         return "так называется служебная колонка таблиц"
     return None
@@ -229,10 +234,13 @@ async def get_label_sets(session: AsyncSession, tenant_id: uuid.UUID, slugs: Ite
 
 
 async def get_label_set(session: AsyncSession, tenant_id: uuid.UUID, slug: str) -> LabelSet:
-    return (await get_label_sets(session, tenant_id, [slug])).get(slug, EMPTY_LABELS)
+    # нет записи — новый пустой набор: словарь и список изменяемы, общий экземпляр протёк бы между вызовами
+    return (await get_label_sets(session, tenant_id, [slug])).get(slug) or LabelSet({}, [])
 
 
-async def resolve_labeled(resolver, session: AsyncSession, tenant_id: uuid.UUID, slug: str, version: int | None):
+async def resolve_labeled(
+    resolver: "SchemaResolver", session: AsyncSession, tenant_id: uuid.UUID, slug: str, version: int | None
+) -> DocSchema:
     """Схема нужной версии с названиями компании. `LookupError` (нет схемы) пробрасывается."""
     schema = await resolver.resolve(session, tenant_id, slug, version)
     return apply_labels(schema, (await get_label_set(session, tenant_id, slug)).labels)

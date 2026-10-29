@@ -103,3 +103,11 @@ def test_default_queue_fields():
 def test_queue_fields_for_falls_back():
     assert queue_fields_for(INV, ["gone"]) == default_queue_fields(INV)
     assert queue_fields_for(INV, ["vat", "gone"]) == ["vat"]
+
+
+@pytest.mark.parametrize("value", ["—", "*", "-", "«»"])
+def test_label_without_letters_rejected(value):
+    with pytest.raises(LabelsInvalid) as exc:
+        check_label_set(INV, {"vat": value}, [])
+    assert exc.value.errors == [(["labels", "vat"], "нужны буквы или цифры")]
+
