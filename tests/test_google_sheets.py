@@ -1,6 +1,7 @@
 """Google Таблицы: токен сервисного аккаунта, проверка, выгрузка без дублей, ошибки доступа и лимитов."""
 
 import json
+import re
 import uuid
 from collections import defaultdict
 from datetime import UTC, datetime
@@ -15,7 +16,9 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 
 from docflow.connectors import google_sheets
 from docflow.connectors.base import REGISTRY, ConnectorError, DestCtx, ExportDoc
+from docflow.labels import apply_labels
 from docflow.schemas.library import builtin_schemas
+from docflow.tabular import docs_header
 
 SHEET = "SID123"
 API = f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET}"
@@ -142,9 +145,14 @@ class Sheet:
         raw = unquote(req.url.path.split("/values/")[1])
         sheet = self._sheet_of(req.url.raw_path.decode())
         rows = self.cells[sheet]
-        if raw.endswith("A:A"):
-            shown = [[str(c).removeprefix("'") for c in r[:1]] for r in rows]  # Таблицы не показывают «'»
-            return httpx.Response(200, json={"values": shown} if rows else {})
+        col = re.search(r"!([A-Z]+):\1$", raw)
+        if col:  # колонка «X:X»
+            i = ord(col.group(1)) - ord("A")  # в тестах колонок меньше 26
+            shown = [[str(r[i]).removeprefix("'")] if len(r) > i else [] for r in rows]  # Таблицы не показывают «'»
+            while shown and not shown[-1]:
+                shown.pop()
+            return httpx.Response(200, json={"values": shown} if shown else {})
+        assert raw.endswith("!1:1"), raw
         return httpx.Response(200, json={"values": rows[:1]} if rows else {})
 
     def _append(self, req):
@@ -407,10 +415,14 @@ async def test_same_sheet_names_rejected(http):
 async def test_date_format_applied_when_header_already_exists(http):
     with respx.mock(assert_all_called=False) as router:
         mock_token(router)
-        sheet = Sheet(router, docs_col=[["Мои заголовки"]], items_col=[["ID"]])
+        sheet = Sheet(router, docs_col=[["Мои заголовки", "Дата"]], items_col=[["ID документа", "Наименование"]])
         await google_sheets.GoogleSheets().export(make_ctx(http), make_doc())
     assert not sheet.puts  # чужую шапку не трогаем
-    assert {f["range"]["startColumnIndex"] for f in sheet.formats} >= {3, 5}
+    assert {f["range"]["startColumnIndex"] for f in sheet.formats if f["range"]["sheetId"] == 1} == {1}
+    assert sheet.cells[DOCS][1] == ["", 46300]
+    assert sheet.cells[ITEMS][1:] == [["'11111111-1111-1111-1111-111111111111", "Болт"]] * 1 + [
+        ["'11111111-1111-1111-1111-111111111111", "Гайка"]
+    ]
 
 
 async def test_column_a_lookup_uses_formatted_values(http):
@@ -483,3 +495,80 @@ async def test_same_schema_header_accepted_on_next_document(http):
         second.id = uuid.UUID("33333333-3333-3333-3333-333333333333")
         await google_sheets.GoogleSheets().export(make_ctx(http), second)
     assert len(sheet.cells[DOCS]) == 3 and len(sheet.puts) == 2  # шапки записаны один раз
+
+
+async def test_our_header_renamed_fields_rewritten(http):
+    base = builtin_schemas()["invoice_ru"]
+    with respx.mock(assert_all_called=False) as router:
+        mock_token(router)
+        sheet = Sheet(router)
+        await google_sheets.GoogleSheets().export(make_ctx(http), make_doc(items=None))
+        second = make_doc(items=None)
+        second.id = uuid.UUID("33333333-3333-3333-3333-333333333333")
+        second.schema, second.base_schema = apply_labels(base, {"vat": "Налог"}), base
+        await google_sheets.GoogleSheets().export(make_ctx(http), second)
+    header = sheet.cells[DOCS][0]
+    assert len(sheet.puts) == 2 and "Налог" in header and "НДС" not in header
+    assert header == docs_header(second.schema)
+    assert len(sheet.cells[DOCS]) == 3
+    assert sheet.cells[DOCS][2][header.index("Налог")] == 250
+
+
+async def test_our_header_not_rewritten_over_other_document_type(http):
+    with respx.mock(assert_all_called=False) as router:
+        mock_token(router)
+        sheet = Sheet(router)
+        await google_sheets.GoogleSheets().export(make_ctx(http), make_doc(items=None))
+        other = make_doc(items=None)
+        other.id = uuid.UUID("33333333-3333-3333-3333-333333333333")
+        other.title = "Другой документ"  # та же длина шапки, но смысл колонок другой
+        other.schema = apply_labels(other.schema, {"vat": "Налог"})
+        with pytest.raises(ConnectorError) as e:
+            await google_sheets.GoogleSheets().export(make_ctx(http), other)
+    assert not e.value.retryable and e.value.message == google_sheets.OTHER_COLUMNS
+    assert len(sheet.puts) == 1 and len(sheet.cells[DOCS]) == 2
+
+
+async def test_client_header_row_aligned_by_names(http):
+    with respx.mock(assert_all_called=False) as router:
+        mock_token(router)
+        sheet = Sheet(router, docs_col=[["Поставщик", "ID документа", "Сумма"]])
+        ext = await google_sheets.GoogleSheets().export(make_ctx(http), make_doc(items=None))
+    assert sheet.appends == [(DOCS, [["ООО Ромашка", "'11111111-1111-1111-1111-111111111111", ""]])]
+    assert sheet.puts == []
+    assert ext == f"{DOCS}!A2"
+
+
+async def test_client_header_dedupe_by_id_column(http):
+    with respx.mock(assert_all_called=False) as router:
+        mock_token(router)
+        sheet = Sheet(router, docs_col=[["Поставщик", "ID документа", "Сумма"]])
+        c = google_sheets.GoogleSheets()
+        first = await c.export(make_ctx(http), make_doc())
+        before = {k: len(v) for k, v in sheet.cells.items()}
+        again = await c.export(make_ctx(http), make_doc())
+    assert again == first == f"{DOCS}!A2"
+    assert {k: len(v) for k, v in sheet.cells.items()} == before
+
+
+async def test_client_header_without_id_column_does_not_repeat_items(http):
+    with respx.mock(assert_all_called=False) as router:
+        mock_token(router)
+        sheet = Sheet(
+            router,
+            docs_col=[["Поставщик", "ID документа"], ["ООО Ромашка", "'11111111-1111-1111-1111-111111111111"]],
+            items_col=[["Наименование", "Цена"]],
+        )
+        await google_sheets.GoogleSheets().export(make_ctx(http), make_doc())
+    assert sheet.appends == []  # документ уже был: позиции без колонки ID не дублируем
+
+
+async def test_client_header_without_known_columns_fails(http):
+    with respx.mock(assert_all_called=False) as router:
+        mock_token(router)
+        sheet = Sheet(router, docs_col=[["Мои заголовки"]])
+        with pytest.raises(ConnectorError) as e:
+            await google_sheets.GoogleSheets().export(make_ctx(http), make_doc())
+    assert e.value.message == google_sheets.NO_KNOWN_COLUMNS == "в таблице нет ни одной знакомой колонки"
+    assert e.value.retryable is False
+    assert sheet.appends == []

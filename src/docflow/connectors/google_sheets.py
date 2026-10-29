@@ -1,8 +1,12 @@
 """Google Таблицы: выгрузка документов строками в таблицу клиента через сервисный аккаунт.
 
 Доступ: клиент создаёт сервисный аккаунт, открывает ему таблицу на редактирование и вставляет JSON-ключ.
-Идемпотентность: id документа ищется в колонке A листа «Документы» — найден, значит строку не дублируем.
-Позиции проверяются отдельно (колонка A листа «Позиции»), чтобы повтор после сбоя дописал только недостающее.
+Идемпотентность: id документа ищется в колонке «ID документа» листа «Документы» (в нашей шапке — A) — найден,
+значит строку не дублируем. Позиции проверяются отдельно (та же колонка листа «Позиции»), чтобы повтор после сбоя
+дописал только недостающее. В шапке клиента без колонки «ID документа» проверки дублей нет.
+
+Шапка: нет — пишем нашу; наша (служебные колонки в начале на местах) с другими подписями полей — переписываем;
+своя шапка клиента — не трогаем, значения раскладываются по названиям колонок (`tabular.align_*`).
 """
 
 import hashlib
@@ -18,15 +22,19 @@ import jwt
 from docflow.connectors.base import REGISTRY, BaseConnector, ConnectorError, DestCtx, ExportDoc, FieldDef
 from docflow.tabular import (
     DOCS_SHEET,
-    ID_HEADER,
     ITEMS_SHEET,
     Cell,
+    align_doc_row,
+    align_item_rows,
+    clean_text,
     doc_date_columns,
     doc_row,
     docs_header,
+    id_column,
     item_date_columns,
     item_rows,
     items_header,
+    same_layout,
 )
 
 TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -42,6 +50,7 @@ TOKENS: dict[tuple[str, str], tuple[str, float]] = {}
 OTHER_COLUMNS = (
     "в этой таблице уже другие колонки — для другого типа документа заведите отдельное подключение или другой лист"
 )
+NO_KNOWN_COLUMNS = "в таблице нет ни одной знакомой колонки"
 READ_ONLY = "у сервисного аккаунта только чтение — откройте доступ на редактирование для {email}"
 
 _SHEET_ID = re.compile(r"/spreadsheets/d/([A-Za-z0-9_-]+)")
@@ -189,33 +198,40 @@ class _Session:
         by_fold = {t.casefold(): i for t, i in existing.items()}
         return {w: by_fold[w.casefold()] for w in wanted if w.casefold() in by_fold}
 
-    async def column_a(self, sheet: str) -> list[str]:
+    async def column(self, sheet: str, index: int = 0) -> list[str]:
+        letter = column_letter(index)
         data = await self.call(
             "GET",
-            f"{self.base}/values/{range_path(sheet, 'A:A')}",
+            f"{self.base}/values/{range_path(sheet, f'{letter}:{letter}')}",
             params={"valueRenderOption": "FORMATTED_VALUE"},
         )
         return [(row[0] if row else "") for row in data.get("values", [])]
 
-    async def ensure_header(self, sheet: str, column: list[str], header: list[str]) -> None:
-        if column and column[0] != "":
-            if column[0] == ID_HEADER:
-                # шапка наша: колонки должны совпасть, иначе строка документа другой схемы встанет со сдвигом
-                data = await self.call(
-                    "GET",
-                    f"{self.base}/values/{range_path(sheet, '1:1')}",
-                    params={"valueRenderOption": "FORMATTED_VALUE"},
-                )
-                existing = [str(v) for v in (data.get("values") or [[]])[0]]
-                if existing != header:
-                    raise ConnectorError(OTHER_COLUMNS)
-            return  # шапка клиента — не трогаем
+    async def read_header(self, sheet: str) -> list[str]:
+        """Первая строка листа (пустые ячейки в конце Google не отдаёт)."""
+        data = await self.call(
+            "GET",
+            f"{self.base}/values/{range_path(sheet, '1:1')}",
+            params={"valueRenderOption": "FORMATTED_VALUE"},
+        )
+        return [str(v) for v in (data.get("values") or [[]])[0]]
+
+    async def write_header(self, sheet: str, header: list[str]) -> None:
         await self.call(
             "PUT",
             f"{self.base}/values/{range_path(sheet, 'A1')}",
             params={"valueInputOption": "RAW"},
             json={"values": [header]},
         )
+
+    async def our_header(self, sheet: str, existing: list[str], ours: list[str], *, lead: int, tail: int) -> None:
+        """Шапка наша: та же — ничего; отличаются только подписи полей — переписываем; иначе строка встала бы
+        со сдвигом колонок — OTHER_COLUMNS."""
+        if existing == ours:
+            return
+        if not same_layout(existing, ours, lead=lead, tail=tail):
+            raise ConnectorError(OTHER_COLUMNS)
+        await self.write_header(sheet, ours)
 
     async def format_dates(self, sheet_id: int, date_columns: list[int]) -> None:
         """Формат ДД.ММ.ГГГГ колонкам с датами (даты уходят серийными числами). Идемпотентно: на каждой записи,
@@ -248,6 +264,26 @@ class _Session:
             json={"values": [["" if v is None else v for v in row] for row in rows]},
         )
         return _row_of(data.get("updates", {}).get("updatedRange", ""))
+
+
+def column_letter(index: int) -> str:
+    """0 -> A, 25 -> Z, 26 -> AA."""
+    out = ""
+    index += 1
+    while index:
+        index, rest = divmod(index - 1, 26)
+        out = chr(65 + rest) + out
+    return out
+
+
+def _blank(header: list[str]) -> bool:
+    return not any(h.strip() for h in header)
+
+
+def _ours(header: list[str], mine: list[str], *, lead: int) -> bool:
+    """Шапки нет или она наша: служебные колонки в начале на своих местах. Шапка клиента, где «ID документа»
+    лишь одна из колонок (даже первая), — его: значения раскладываются по названиям."""
+    return _blank(header) or header[:lead] == mine[:lead]
 
 
 def _api_message(resp: httpx.Response) -> str:
@@ -301,23 +337,72 @@ class GoogleSheets(BaseConnector):
         items = list(item_rows(doc, target="sheets"))
         ids = await s.ensure_sheets(s.docs_sheet, *([s.items_sheet] if items else []))
 
-        column = await s.column_a(s.docs_sheet)
-        if doc_id in column:
+        header = await s.read_header(s.docs_sheet)
+        mine = docs_header(doc.schema, ctx.mapping)
+        ours = _ours(header, mine, lead=4)
+        id_col = 0 if ours else id_column(header)
+        column = await s.column(s.docs_sheet, id_col) if id_col is not None else []
+        written = doc_id in column
+        if written:
             row = column.index(doc_id) + 1
-        else:
-            await s.ensure_header(s.docs_sheet, column, docs_header(doc.schema, ctx.mapping))
+        elif ours:
+            if _blank(header):
+                await s.write_header(s.docs_sheet, mine)
+            else:
+                if header != mine:
+                    await self._same_type(s, doc)
+                await s.our_header(s.docs_sheet, header, mine, lead=4, tail=3)
             await s.format_dates(ids[s.docs_sheet], doc_date_columns(doc.schema, ctx.mapping))
             row = await s.append(s.docs_sheet, [doc_row(doc, ctx.mapping, target="sheets")])
+        else:
+            aligned = align_doc_row(doc, header, ctx.mapping, target="sheets")
+            if aligned is None:
+                raise ConnectorError(NO_KNOWN_COLUMNS)
+            # колонки ID нет — дублей не проверить: повтор после потерянного ответа может дописать строку
+            await s.format_dates(ids[s.docs_sheet], aligned[1])
+            row = await s.append(s.docs_sheet, [aligned[0]])
 
         if items:
-            items_col = await s.column_a(s.items_sheet)
-            if doc_id not in items_col:  # повтор после сбоя дописывает только недостающее
-                await s.ensure_header(s.items_sheet, items_col, items_header(doc.schema))
-                await s.format_dates(ids[s.items_sheet], item_date_columns(doc.schema))
-                await s.append(s.items_sheet, items)
+            await self._export_items(s, doc, items, ids[s.items_sheet], doc_written_before=written)
         return f"{s.docs_sheet}!A{row}"
+
+    @staticmethod
+    async def _same_type(s: _Session, doc: ExportDoc) -> None:
+        """Перед тем как переписать нашу шапку: в листе только документы этого типа (колонка «Тип»).
+        Иначе та же длина шапки у другой схемы сдвинула бы смысл колонок у прежних строк."""
+        title = clean_text(doc.title)
+        if any(t.strip() and t != title for t in (await s.column(s.docs_sheet, 1))[1:]):
+            raise ConnectorError(OTHER_COLUMNS)
+
+    @staticmethod
+    async def _export_items(
+        s: _Session, doc: ExportDoc, items: list[list[Cell]], sheet_id: int, *, doc_written_before: bool
+    ) -> None:
+        doc_id = str(doc.id)
+        header = await s.read_header(s.items_sheet)
+        mine = items_header(doc.schema)
+        ours = _ours(header, mine, lead=2)
+        id_col = 0 if ours else id_column(header)
+        if id_col is not None:
+            if doc_id in await s.column(s.items_sheet, id_col):
+                return  # повтор после сбоя дописывает только недостающее
+        elif doc_written_before:
+            return  # колонки ID нет: документ уже был в таблице — позиции не дублируем
+        if ours:
+            if _blank(header):
+                await s.write_header(s.items_sheet, mine)
+            else:
+                await s.our_header(s.items_sheet, header, mine, lead=2, tail=0)
+            await s.format_dates(sheet_id, item_date_columns(doc.schema))
+            await s.append(s.items_sheet, items)
+            return
+        aligned = align_item_rows(doc, header, target="sheets")
+        if aligned is None:
+            raise ConnectorError(NO_KNOWN_COLUMNS)
+        await s.format_dates(sheet_id, aligned[1])
+        await s.append(s.items_sheet, aligned[0])
 
 
 REGISTRY["google_sheets"] = GoogleSheets()
 
-__all__ = ["TOKENS", "GoogleSheets", "extract_spreadsheet_id", "parse_service_account"]
+__all__ = ["NO_KNOWN_COLUMNS", "TOKENS", "GoogleSheets", "extract_spreadsheet_id", "parse_service_account"]
