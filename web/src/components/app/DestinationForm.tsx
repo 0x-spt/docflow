@@ -373,7 +373,8 @@ export function DestinationForm({
       // коды, уже занятые в форме (в том числе несохранёнными правками) или выданные в этом проходе
       const used = new Set(Object.values(next).map((v) => v.trim()).filter(Boolean));
       // Таблицы без отмеченных строк = «выгружать всё»: подбор не должен сужать выгрузку, отмечаем все поля схемы
-      const widen = connector.kind === "google_sheets" && !rows.some((r) => Object.hasOwn(next, r.key));
+      const widen =
+        connector.kind === "google_sheets" && Object.keys(res.suggested).length > 0 && !rows.some((r) => Object.hasOwn(next, r.key));
       if (widen) for (const r of rows) next[r.key] = "";
       for (const r of rows) {
         const code = res.suggested[r.key];

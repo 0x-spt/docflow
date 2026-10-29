@@ -29,6 +29,8 @@ from docflow.connectors.base import (
     FieldDef,
     RemoteField,
 )
+from docflow.fieldmatch import normalize
+from docflow.labels import _SERVICE_RESERVED
 from docflow.tabular import (
     DOCS_SHEET,
     ITEMS_SHEET,
@@ -341,6 +343,8 @@ class GoogleSheets(BaseConnector):
         ),
     ]
     target_fields: list[FieldDef] = []
+    # code поля системы — заголовок колонки: совпадение с нашим названием поля сопоставлять не нужно
+    match_by_header = True
 
     async def test(self, ctx: DestCtx) -> str | None:
         s = _Session(ctx)
@@ -364,7 +368,8 @@ class GoogleSheets(BaseConnector):
         if sheet is None:
             return []
         names = dict.fromkeys(h.strip() for h in await s.read_header(sheet))
-        return [RemoteField(h, h) for h in names if h]
+        # наши служебные колонки полями документа не являются («Номер» и «Дата» — настоящие поля, их оставляем)
+        return [RemoteField(h, h) for h in names if h and normalize(h) not in _SERVICE_RESERVED]
 
     async def export(self, ctx: DestCtx, doc: ExportDoc) -> str | None:
         """Сначала читаем и проверяем шапки обоих листов, потом пишем: ошибка шапки — без частичной записи.

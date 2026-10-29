@@ -45,6 +45,15 @@ def _variants(spec: "FieldSpec", base: "FieldSpec | None") -> set[str]:
     return {v for v in (normalize(r) for r in raw) if v}
 
 
+def is_own_name(code: str, schema: "DocSchema", base: "DocSchema", key: str) -> bool:
+    """Код совпадает с одним из наших названий поля `key` (подпись, название по умолчанию, имя)."""
+    spec = next((f for f in schema.fields if f.name == key), None)
+    if spec is None:
+        return False
+    base_spec = next((f for f in base.fields if f.name == key), None)
+    return normalize(code) in _variants(spec, base_spec)
+
+
 def _synonym_group(title: str) -> str | None:
     for syn, group in _BY_LENGTH:
         if title == syn:

@@ -72,6 +72,7 @@ export default async function QueuePage({
       return null;
     }),
   ]);
+  const schemaTitles = new Map(schemas.map((s) => [s.slug, s.title]));
   const failedExports = exportsSummary?.failed ?? 0;
   const today = new Date();
   const monthStart = new Date(Date.UTC(today.getFullYear(), today.getMonth(), 1)).toISOString().slice(0, 10);
@@ -192,7 +193,7 @@ export default async function QueuePage({
                       >
                         {d.title}
                       </Link>
-                      <div className="font-mono text-xs text-muted">{d.schema.slug}</div>
+                      <div className="text-xs text-muted">{schemaTitles.get(d.schema.slug) ?? d.schema.slug}</div>
                     </td>
                     <td className="max-w-[22rem] px-3 py-2.5">
                       {d.summary.length ? (

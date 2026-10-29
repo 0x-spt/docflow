@@ -250,7 +250,7 @@ def _scalar(value: object) -> bool:
     return not (isinstance(value, str) and not value.strip())
 
 
-def _list_item(document: Document, schema: DocSchema | None, label_set: LabelSet) -> dict:
+def _list_item(document: Document, schema: DocSchema | None, label_set: LabelSet, titles: dict[str, str]) -> dict:
     data = document.data or {}
     number = data.get("number")
     has_number = isinstance(number, str | int | float) and not isinstance(number, bool) and str(number).strip()
@@ -258,7 +258,6 @@ def _list_item(document: Document, schema: DocSchema | None, label_set: LabelSet
     summary = []
     if schema is not None:
         # поля и подписи выбрала компания (или умолчание схемы); пустые значения пропускаем
-        titles = {f.name: f.title or f.name for f in apply_labels(schema, label_set.labels).fields}
         for field in queue_fields_for(schema, label_set.queue_fields):
             if _scalar(data.get(field)):
                 summary.append({"field": field, "label": titles.get(field, field), "value": data[field]})
@@ -327,8 +326,20 @@ async def list_documents(
                 schemas[key] = None
     label_sets = await get_label_sets(session, tenant_id, {d.schema_slug for d in page})
     empty = LabelSet({}, [])
+    # названия полей с подписями компании — один раз на (slug, версию), а не на каждую строку
+    titles: dict[tuple[str, int], dict[str, str]] = {}
+    for key, schema in schemas.items():
+        if schema is not None:
+            labeled = apply_labels(schema, label_sets.get(key[0], empty).labels)
+            titles[key] = {f.name: f.title or f.name for f in labeled.fields}
     items = [
-        _list_item(d, schemas[(d.schema_slug, d.schema_version)], label_sets.get(d.schema_slug, empty)) for d in page
+        _list_item(
+            d,
+            schemas[(d.schema_slug, d.schema_version)],
+            label_sets.get(d.schema_slug, empty),
+            titles.get((d.schema_slug, d.schema_version), {}),
+        )
+        for d in page
     ]
     return {"items": items, "next_before": next_before}
 

@@ -696,3 +696,12 @@ async def test_sheets_remote_fields_no_sheet_empty(http):
         sheet.titles.append(DOCS)
         assert await google_sheets.GoogleSheets().remote_fields(make_ctx(http)) == []
     assert sheet.created == []
+
+
+async def test_sheets_remote_fields_skips_service_columns(http):
+    header = ["ID документа", "Тип", "Номер", "Дата", "Поставщик", "Статус", "Цифровая версия (PDF)", "Кабинет"]
+    with respx.mock(assert_all_called=False) as router:
+        mock_token(router)
+        Sheet(router, docs_col=[header, ["x"] * len(header)])
+        fields = await google_sheets.GoogleSheets().remote_fields(make_ctx(http))
+    assert [f.code for f in fields] == ["Номер", "Дата", "Поставщик"]

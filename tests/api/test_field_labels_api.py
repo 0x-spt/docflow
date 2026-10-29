@@ -97,3 +97,11 @@ async def test_put_caps_body_size(api, auth):
     big = {f"k{i}": "x" for i in range(501)}
     r = await api.client.put(f"{URL}/labels", headers=auth, json={"labels": big, "queue_fields": []})
     assert r.status_code == 422
+
+
+async def test_get_schema_raw_skips_labels(api, auth):
+    base = (await api.client.get(f"{URL}?raw=true", headers=auth)).json()
+    await api.client.put(f"{URL}/labels", headers=auth, json={"labels": {"vat": "Налог"}})
+    assert _title((await api.client.get(URL, headers=auth)).json(), "vat") == "Налог"
+    raw = (await api.client.get(f"{URL}?raw=true", headers=auth)).json()
+    assert raw == base and _title(raw, "vat") != "Налог"

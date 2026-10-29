@@ -6,6 +6,7 @@ from sqlalchemy import select
 from docflow.connectors import base as connectors_base
 from docflow.connectors.base import ConnectorError
 from docflow.db.models import Destination
+from docflow.schemas.library import builtin_schemas
 from docflow.secrets import decrypt_secrets
 
 URL = "https://93.184.216.34/api"
@@ -401,3 +402,14 @@ async def test_remote_fields_without_secrets_key_422(api, auth, fake_connector):
     assert r.status_code == 422
     assert "ключ шифрования" in r.json()["detail"]
     assert fake_connector.calls == []
+
+
+async def test_remote_fields_own_names_not_suggested_for_header_match(api, auth, fake_connector):
+    # заголовок таблицы = наше название поля: находится и так, в сопоставление его не записываем
+    fake_connector.match_by_header = True
+    number = next(f.title for f in builtin_schemas()["invoice_ru"].fields if f.name == "number")
+    fake_connector.remote = [connectors_base.RemoteField(t, t) for t in (number, "Налог")]
+    await api.client.put("/v1/schemas/invoice_ru/labels", headers=auth, json={"labels": {"vat": "Налог"}})
+    d = (await create(api, auth, mapping={})).json()
+    r = await api.client.post(remote_url(d), headers=auth)
+    assert r.json()["suggested"] == {}

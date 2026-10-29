@@ -215,8 +215,9 @@ async def put_labels(
     "/{slug}",
     summary="Схема по slug",
     description=(
-        "Своя схема тенанта, иначе встроенная; названия полей (`title`) — свои у компании, если заданы. "
-        "Без `version` — последняя версия. Нет такой — 404."
+        "Своя схема тенанта, иначе встроенная. По умолчанию названия полей (`title`) — свои у компании, если "
+        "заданы. Клиенту, который правит схему и загружает её новой версией, нужен `raw=true`: без подписей "
+        "компании, иначе они попадут в саму схему. Без `version` — последняя версия. Нет такой — 404."
     ),
 )
 async def get_schema(
@@ -225,9 +226,13 @@ async def get_schema(
     session: SessionDep,
     resolver: ResolverDep,
     version: int | None = Query(None, description="Версия схемы"),
+    raw: bool = Query(False, description="Без подписей компании: схема, как она хранится"),
 ) -> dict[str, Any]:
     try:
-        schema = await resolve_labeled(resolver, session, tenant_id, slug, version)
+        if raw:
+            schema = await resolver.resolve(session, tenant_id, slug, version)
+        else:
+            schema = await resolve_labeled(resolver, session, tenant_id, slug, version)
     except LookupError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from None
     return schema.model_dump(mode="json")

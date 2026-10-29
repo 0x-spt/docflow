@@ -44,8 +44,6 @@ class LabelSet:
     queue_fields: list[str]
 
 
-
-
 class LabelsInvalid(ValueError):
     """Набор подписей не прошёл проверку: errors — пары (loc, сообщение)."""
 

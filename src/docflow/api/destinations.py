@@ -374,4 +374,8 @@ async def remote_fields(
         suggested = {k: v for k, v in own(labeled, config).items() if k not in saved and v not in taken}
     else:
         suggested = fieldmatch.suggest(labeled, base, fields, skip_keys=frozenset(saved), taken_codes=taken)
+        if getattr(connector, "match_by_header", False):
+            # заголовок, равный названию самого поля, и так находится без сопоставления; записав его, мы
+            # заморозили бы шапку: переименование в «Полях документов» перестало бы доходить до таблицы
+            suggested = {k: v for k, v in suggested.items() if not fieldmatch.is_own_name(v, labeled, base, k)}
     return {"fields": [{"code": f.code, "title": f.title} for f in fields], "suggested": suggested}
