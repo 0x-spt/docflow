@@ -297,6 +297,17 @@ export interface TestResult {
   message: string;
 }
 
+/** Поле системы получателя (колонка таблицы, пользовательское поле CRM, роль 1С). */
+export interface RemoteField {
+  code: string;
+  title: string;
+}
+
+/** Ответ «Подтянуть поля»: список полей системы и подбор «ключ поля документа -> code». */
+export type RemoteFieldsResult =
+  | { ok: true; fields: RemoteField[]; suggested: Record<string, string> }
+  | { ok: false; message: string };
+
 /** Схема для сопоставления полей: строки «поле документа» (ключ маппинга) */
 export interface MappingSchema {
   slug: string;
