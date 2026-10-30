@@ -116,7 +116,9 @@ async def run_channels(settings: Settings) -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)  # URL с токеном бота не должны попадать в INFO-логи
     engine = make_engine(settings.database_url)
     pool = await create_pool(RedisSettings.from_dsn(settings.redis_url))
-    http = httpx.AsyncClient(timeout=httpx.Timeout(45, connect=10))
+    # по long poll на бота: общий потолок соединений остановил бы опрос остальных ботов
+    limits = httpx.Limits(max_connections=None, max_keepalive_connections=20)
+    http = httpx.AsyncClient(timeout=httpx.Timeout(45, connect=10), limits=limits)
     try:
         intake = IntakeDeps(
             settings=settings,

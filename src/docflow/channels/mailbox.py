@@ -12,6 +12,7 @@ import imaplib
 import logging
 import re
 import ssl
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email import policy
@@ -43,6 +44,7 @@ MAX_LETTERS_PER_PASS = 20
 IMAP_TIMEOUT = 20
 MAX_ERROR = 500
 MAX_LETTER_ATTEMPTS = 3
+GIVE_UP_TTL = 3600.0  # секунд: письмо, на котором сдались, через час получает новые попытки
 
 AUTH_ERROR = "Почта не приняла логин или пароль"
 NETWORK_ERROR = "Не удалось подключиться к почте"
@@ -52,7 +54,7 @@ ACCEPT_FAILED = "не удалось принять документ, повто
 ACCEPT_GAVE_UP = "не удалось принять документ, письмо пропущено и осталось непрочитанным"
 LETTER_GAVE_UP = "Почта не отдаёт письмо: после нескольких попыток оно пропущено и осталось непрочитанным"
 PARSE_FAILED = "не удалось разобрать письмо, оно пропущено и осталось непрочитанным"
-# ошибки подключения: их снимает удачный вход, а ошибки писем остаются на виду, пока письмо не пройдёт
+# ошибки подключения: их снимает удачный вход, а ошибки писем — следующее принятое письмо (сдачу пишет ещё и лог)
 CONNECTION_ERRORS = (NETWORK_ERROR, HOST_REFUSED, SECRETS_ERROR)
 
 _SUBJECT_PREFIXES = re.compile(r"^(?:\s*(?:re|fwd?|ответ|пересл)\s*:)+\s*", re.IGNORECASE)
@@ -72,6 +74,12 @@ class MailboxLetterError(Exception):
 
 
 @dataclass(frozen=True)
+class LetterHeaders:
+    sender: str
+    subject: str
+
+
+@dataclass(frozen=True)
 class MailboxCreds:
     host: str
     port: int
@@ -83,7 +91,7 @@ class MailboxCreds:
 class MailSession(Protocol):
     def unseen_uids(self) -> list[str]: ...
     def size(self, uid: str) -> int: ...
-    def subject(self, uid: str) -> str: ...  # только заголовок: для письма, которое слишком велико, чтобы качать
+    def headers(self, uid: str) -> LetterHeaders: ...  # только заголовки: чужое письмо не качаем и не трогаем
     def fetch(self, uid: str) -> bytes: ...  # BODY.PEEK[]: прочитанным не помечает
     def mark_seen(self, uid: str) -> None: ...
     def close(self) -> None: ...
@@ -121,8 +129,8 @@ class _ImapSession:
                 return int(found[1])
         raise MailboxLetterError("нет данных")
 
-    def subject(self, uid: str) -> str:
-        return _parse_subject(self._literal(uid, "(BODY.PEEK[HEADER.FIELDS (SUBJECT)])"))
+    def headers(self, uid: str) -> LetterHeaders:
+        return _parse_headers(self._literal(uid, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)])"))
 
     def fetch(self, uid: str) -> bytes:
         return self._literal(uid, "(BODY.PEEK[])")
@@ -133,6 +141,12 @@ class _ImapSession:
     def close(self) -> None:
         with contextlib.suppress(Exception):
             self._conn.logout()
+
+
+def _is_temporary_refusal(exc: Exception) -> bool:
+    """Отказ во входе из-за сбоя сервера (RFC 5530), а не пароля. Текст только проверяем: в нём может быть пароль."""
+    text = str(exc).casefold()
+    return "[unavailable]" in text or "temporar" in text
 
 
 def open_imap(creds: MailboxCreds, *, factory=imaplib.IMAP4_SSL) -> MailSession:
@@ -149,8 +163,10 @@ def open_imap(creds: MailboxCreds, *, factory=imaplib.IMAP4_SSL) -> MailSession:
     except (imaplib.IMAP4.abort, OSError, EOFError) as exc:  # abort — наследник error, поэтому раньше него
         session.close()
         raise MailboxNetworkError(type(exc).__name__) from None
-    except (imaplib.IMAP4.error, UnicodeError):  # imaplib кодирует команду в ASCII: такой пароль сервер не получит
+    except (imaplib.IMAP4.error, UnicodeError) as exc:  # imaplib кодирует команду в ASCII: такой пароль не дойдёт
         session.close()
+        if _is_temporary_refusal(exc):
+            raise MailboxNetworkError(type(exc).__name__) from None
         raise MailboxAuthError(AUTH_ERROR) from None
     try:
         status, _ = conn.select(f'"{creds.folder}"')
@@ -194,6 +210,11 @@ def _header(msg: EmailMessage, name: str) -> str:
 
 def _parse_subject(raw: bytes) -> str:
     return _header(email.message_from_bytes(raw, policy=policy.default), "subject")
+
+
+def _parse_headers(raw: bytes) -> LetterHeaders:
+    msg = email.message_from_bytes(raw, policy=policy.default)
+    return LetterHeaders(_sender(msg), _header(msg, "subject"))
 
 
 def _sender(msg: EmailMessage) -> str:
@@ -278,14 +299,17 @@ def _settings_filter(box: Mailbox) -> tuple:
 
 
 class MailboxPoller:
-    def __init__(self, deps: ChannelDeps, connect=open_imap):
+    def __init__(self, deps: ChannelDeps, connect=open_imap, clock=time.monotonic):
         self._deps = deps
         self._connect = connect
+        self._clock = clock
         # письма, которые оставили непрочитанными: без памяти их пришлось бы качать каждую минуту
         self._skipped: dict[UUID, set[str]] = {}
         self._skipped_filter: dict[UUID, tuple] = {}
         # неудачные попытки по письму: письмо, которое не проходит раз за разом, не качаем каждую минуту вечно
         self._attempts: dict[UUID, dict[str, int]] = {}
+        # когда на письме сдались: через GIVE_UP_TTL оно снова получает попытки
+        self._gave_up: dict[UUID, dict[str, float]] = {}
 
     async def poll(self, mailbox_id: UUID) -> None:
         """Один проход. Сбои почты и отдельных писем не выбрасывает: пишет last_error."""
@@ -294,6 +318,7 @@ class MailboxPoller:
             self._skipped.pop(mailbox_id, None)
             self._skipped_filter.pop(mailbox_id, None)
             self._attempts.pop(mailbox_id, None)
+            self._gave_up.pop(mailbox_id, None)
             return
         if not box.active:
             return
@@ -368,7 +393,7 @@ class MailboxPoller:
             except Exception as exc:
                 # сервер не отдал письмо: возможно, временно, поэтому несколько попыток в следующих проходах
                 logger.warning("ящик %s: письмо %s не получено: %s", box.id, uid, type(exc).__name__)
-                if self._out_of_attempts(box.id, uid, skipped):
+                if self._out_of_attempts(box.id, uid, skipped, type(exc).__name__):
                     error = LETTER_GAVE_UP
                 continue
             accepted = accepted or letter_accepted
@@ -388,19 +413,26 @@ class MailboxPoller:
             self._skipped[box.id] = set()
             self._skipped_filter[box.id] = current
             self._attempts[box.id] = {}
-        skipped = self._skipped[box.id] & set(unseen)
+            self._gave_up[box.id] = {}
+        gave_up = self._gave_up.setdefault(box.id, {})
+        expired = {uid for uid, at in gave_up.items() if self._clock() - at >= GIVE_UP_TTL}
+        skipped = (self._skipped[box.id] - expired) & set(unseen)
         self._skipped[box.id] = skipped
+        self._gave_up[box.id] = {uid: at for uid, at in gave_up.items() if uid in skipped}
         attempts = self._attempts.setdefault(box.id, {})
-        self._attempts[box.id] = {uid: n for uid, n in attempts.items() if uid in unseen}
+        self._attempts[box.id] = {uid: n for uid, n in attempts.items() if uid in unseen and uid not in expired}
         return skipped
 
-    def _out_of_attempts(self, mailbox_id: UUID, uid: str, skipped: set[str]) -> bool:
-        """Считает неудачную попытку. True — попытки кончились, письмо больше не трогаем до перезапуска."""
+    def _out_of_attempts(self, mailbox_id: UUID, uid: str, skipped: set[str], reason: str) -> bool:
+        """Считает неудачную попытку. True — попытки кончились, письмо не трогаем GIVE_UP_TTL. reason — тип сбоя."""
         attempts = self._attempts[mailbox_id]
         attempts[uid] = attempts.get(uid, 0) + 1
         if attempts[uid] < MAX_LETTER_ATTEMPTS:
             return False
         skipped.add(uid)
+        self._gave_up.setdefault(mailbox_id, {})[uid] = self._clock()
+        # в last_error сдача видна до следующего принятого письма, поэтому след остаётся и в логе
+        logger.warning("ящик %s: письмо %s пропущено после %d попыток: %s", mailbox_id, uid, attempts[uid], reason)
         return True
 
     async def _process(
@@ -408,11 +440,15 @@ class MailboxPoller:
     ) -> tuple[bool, str | None]:
         """(письмо принято целиком, текст ошибки)."""
         settings = self._deps.settings
+        headers = await asyncio.to_thread(session.headers, uid)
+        # раньше размера: чужое письмо остаётся непрочитанным, каким бы большим оно ни было
+        if not sender_allowed(headers.sender, box.allowed_senders or []):
+            skipped.add(uid)
+            return False, None
         size = await asyncio.to_thread(session.size, uid)
         if size > request_limit_bytes(settings):
-            subject = await asyncio.to_thread(session.subject, uid)
             await asyncio.to_thread(session.mark_seen, uid)
-            return False, f"{_letter_name(subject)} больше {settings.max_request_mb} МБ"
+            return False, f"{_letter_name(headers.subject)} больше {settings.max_request_mb} МБ"
         raw = await asyncio.to_thread(session.fetch, uid)
         try:
             letter = await asyncio.to_thread(parse_letter, raw)
@@ -421,12 +457,12 @@ class MailboxPoller:
             logger.warning("ящик %s: письмо %s не разобрано: %s", box.id, uid, type(exc).__name__)
             skipped.add(uid)
             return False, _letter_error(_subject_if_known(raw), PARSE_FAILED)
-        if not sender_allowed(letter.sender, box.allowed_senders or []) or not (letter.pdfs or letter.images):
+        if not (letter.pdfs or letter.images):
             skipped.add(uid)
             return False, None
         digest = await asyncio.to_thread(_digest, letter, raw)
         error, retry, unexpected = await self._accept_letter(box, letter, digest)
-        if unexpected and self._out_of_attempts(box.id, uid, skipped):
+        if unexpected and self._out_of_attempts(box.id, uid, skipped, "accept_document"):
             return False, _letter_error(letter.subject, ACCEPT_GAVE_UP)
         if not retry:
             await asyncio.to_thread(session.mark_seen, uid)

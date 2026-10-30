@@ -18,11 +18,13 @@ from docflow.channels.deps import ChannelDeps  # noqa: E402
 from docflow.channels.mailbox import (  # noqa: E402
     ACCEPT_GAVE_UP,
     AUTH_ERROR,
+    GIVE_UP_TTL,
     LETTER_GAVE_UP,
     MAX_LETTER_ATTEMPTS,
     MAX_LETTERS_PER_PASS,
     NETWORK_ERROR,
     PARSE_FAILED,
+    LetterHeaders,
     MailboxAuthError,
     MailboxCreds,
     MailboxLetterError,
@@ -100,9 +102,10 @@ class FakeMail:
         self._step("size", uid)
         return self.sizes[uid]
 
-    def subject(self, uid: str) -> str:
-        self._step("subject", uid)
-        return parse_letter(self.letters[uid]).subject
+    def headers(self, uid: str) -> LetterHeaders:
+        self._step("headers", uid)
+        parsed = parse_letter(self.letters[uid])
+        return LetterHeaders(parsed.sender, parsed.subject)
 
     def fetch(self, uid: str) -> bytes:
         self._step("fetch", uid)
@@ -140,7 +143,8 @@ class Env:
         self.deps = ChannelDeps(sessionmaker=sm, intake=intake, settings=self.settings)
         self.tenant_id = None
         self.box_id = None
-        self.poller = MailboxPoller(self.deps, connect=self.connect)
+        self.now = 1000.0
+        self.poller = MailboxPoller(self.deps, connect=self.connect, clock=lambda: self.now)
 
     def connect(self, creds: MailboxCreds) -> FakeMail:
         self.connects += 1
@@ -284,7 +288,8 @@ async def test_foreign_sender_left_unread(env):
     await env.poll()
     assert await env.docs() == []
     assert env.mail.called("mark_seen") == []
-    assert env.mail.called("fetch") == ["1"]
+    assert env.mail.called("headers") == ["1"]
+    assert env.mail.called("fetch") == []
 
 
 async def test_allowed_domain_and_address(env):
@@ -526,14 +531,67 @@ async def test_letter_error_retried_then_given_up(env, method, caplog):
     assert env.mail.seen == set()
 
 
-async def test_oversized_subject_failure_counts_as_attempt(env):
+async def test_oversized_headers_failure_counts_as_attempt(env):
     limit = env.settings.max_request_mb * 1024 * 1024
     env.mail.add(letter(), size=limit + 1)
-    env.mail.fail[("subject", "1")] = MailboxLetterError("NO")
+    env.mail.fail[("headers", "1")] = MailboxLetterError("NO")
     for _ in range(MAX_LETTER_ATTEMPTS + 1):
         await env.poll()
-    assert env.mail.called("subject") == ["1"] * MAX_LETTER_ATTEMPTS
+    assert env.mail.called("headers") == ["1"] * MAX_LETTER_ATTEMPTS
     assert (await env.box()).last_error == LETTER_GAVE_UP
+
+
+async def test_given_up_letter_retried_after_an_hour(env, caplog):
+    env.mail.add(letter(subject="Секретная тема", pdfs=(pdf_bytes(1),)))
+    env.mail.fail[("fetch", "1")] = MailboxLetterError("NO")
+    with caplog.at_level(logging.WARNING, logger="docflow.channels.mailbox"):
+        for _ in range(MAX_LETTER_ATTEMPTS + 1):
+            await env.poll()
+    assert env.mail.called("fetch") == ["1"] * MAX_LETTER_ATTEMPTS
+    assert (await env.box()).last_error == LETTER_GAVE_UP
+    gave_up = [r.getMessage() for r in caplog.records if "пропущено после" in r.getMessage()]
+    assert len(gave_up) == 1 and "MailboxLetterError" in gave_up[0]
+    assert "Секретная тема" not in caplog.text and PASSWORD not in caplog.text
+
+    env.now += GIVE_UP_TTL - 1
+    await env.poll()
+    assert env.mail.called("fetch") == ["1"] * MAX_LETTER_ATTEMPTS  # час ещё не прошёл
+
+    env.now += 1
+    del env.mail.fail[("fetch", "1")]
+    await env.poll()
+    assert len(await env.docs()) == 1 and env.mail.seen == {"1"}
+    assert (await env.box()).last_error is None
+
+
+async def test_given_up_letter_gets_full_attempts_again(env):
+    env.mail.add(letter(pdfs=(pdf_bytes(1),)))
+    env.mail.fail[("fetch", "1")] = MailboxLetterError("NO")
+    for _ in range(MAX_LETTER_ATTEMPTS):
+        await env.poll()
+    env.now += GIVE_UP_TTL
+    for _ in range(MAX_LETTER_ATTEMPTS + 1):
+        await env.poll()
+    assert env.mail.called("fetch") == ["1"] * (2 * MAX_LETTER_ATTEMPTS)
+
+
+async def test_foreign_letter_not_expiring_like_given_up(env):
+    await env.set_box(allowed_senders=["@firma.example"])
+    env.mail.add(letter(sender="spam@evil.example", pdfs=(pdf_bytes(1),)))
+    await env.poll()
+    env.now += GIVE_UP_TTL
+    await env.poll()
+    assert env.mail.called("headers") == ["1"]
+
+
+async def test_foreign_oversized_letter_stays_untouched(env):
+    await env.set_box(allowed_senders=["@firma.example"])
+    limit = env.settings.max_request_mb * 1024 * 1024
+    env.mail.add(letter(sender="spam@evil.example"), size=limit + 1)
+    await env.poll()
+    assert env.mail.calls == [("headers", "1")]
+    assert env.mail.seen == set()
+    assert (await env.box()).last_error is None
 
 
 async def test_letter_error_recovers_within_attempts(env):
@@ -550,8 +608,8 @@ async def test_oversized_letter_not_fetched(env):
     limit = env.settings.max_request_mb * 1024 * 1024
     env.mail.add(letter(subject="Огромное письмо"), size=limit + 1)
     await env.poll()
-    # тему отдаёт отдельный запрос одного заголовка: тело письма не качается
-    assert env.mail.calls == [("size", "1"), ("subject", "1"), ("mark_seen", "1")]
+    # отправителя и тему отдаёт отдельный запрос заголовков: тело письма не качается
+    assert env.mail.calls == [("headers", "1"), ("size", "1"), ("mark_seen", "1")]
     assert (await env.box()).last_error == f"Письмо «Огромное письмо» больше {env.settings.max_request_mb} МБ"
 
 
@@ -776,9 +834,9 @@ async def test_broken_letter_does_not_stop_pass(env, monkeypatch):
 async def test_dead_connection_stops_pass(env):
     env.mail.add(letter(message_id="<a@x>", pdfs=(pdf_bytes(1),)))
     env.mail.add(letter(message_id="<b@x>", pdfs=(pdf_bytes(1),)))
-    env.mail.fail[("size", "1")] = MailboxNetworkError("abort")
+    env.mail.fail[("headers", "1")] = MailboxNetworkError("abort")
     await env.poll()
-    assert env.mail.calls == [("size", "1")]
+    assert env.mail.calls == [("headers", "1")]
     assert (await env.box()).last_error == NETWORK_ERROR
 
 
@@ -854,7 +912,8 @@ class StubImap:
         if "RFC822.SIZE" in args[-1]:
             return "OK", [b"5 (UID 7 RFC822.SIZE 4242)"]
         if "HEADER.FIELDS" in args[-1]:
-            return "OK", [(b"5 (UID 7 BODY[HEADER.FIELDS (SUBJECT)] {30}", "Subject: Тест\r\n\r\n".encode()), b")"]
+            raw = "From: buh@firma.example\r\nSubject: Тест\r\n\r\n".encode()
+            return "OK", [(b"5 (UID 7 BODY[HEADER.FIELDS (FROM SUBJECT)] {30}", raw), b")"]
         return "OK", [(b"5 (UID 7 BODY[] {5}", b"HELLO"), b")"]
 
     def logout(self):
@@ -888,13 +947,13 @@ def test_imap_session_uses_peek_and_uid(stub):
     session = open_imap(CREDS, factory=stub)
     assert session.unseen_uids() == ["7", "12", "30"]
     assert session.size("7") == 4242
-    assert session.subject("7") == "Тест"
+    assert session.headers("7") == LetterHeaders("buh@firma.example", "Тест")
     assert session.fetch("7") == b"HELLO"
     session.mark_seen("7")
     assert stub.last.commands == [
         ("SEARCH", None, "UNSEEN"),
         ("FETCH", "7", "(RFC822.SIZE)"),
-        ("FETCH", "7", "(BODY.PEEK[HEADER.FIELDS (SUBJECT)])"),
+        ("FETCH", "7", "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)])"),
         ("FETCH", "7", "(BODY.PEEK[])"),
         ("STORE", "7", "+FLAGS", "(\\Seen)"),
     ]
@@ -910,7 +969,7 @@ def test_imap_empty_search(stub, monkeypatch, empty):
 def test_imap_letter_gone_is_letter_error(stub, monkeypatch):
     session = open_imap(CREDS, factory=stub)
     monkeypatch.setattr(stub.last, "uid", lambda *a: ("OK", [None]))
-    for call in (session.size, session.fetch, session.subject):
+    for call in (session.size, session.fetch, session.headers):
         with pytest.raises(MailboxLetterError):
             call("7")
     monkeypatch.setattr(stub.last, "uid", lambda *a: ("NO", [b"nope"]))
@@ -942,6 +1001,10 @@ def test_imap_command_error_is_letter_error_without_text(stub):
     ("error", "expected"),
     [
         (imaplib.IMAP4.error(f"LOGIN {PASSWORD} rejected"), MailboxAuthError),
+        (imaplib.IMAP4.error(b"[AUTHENTICATIONFAILED] Invalid credentials"), MailboxAuthError),
+        (imaplib.IMAP4.error(b"[UNAVAILABLE] Server busy"), MailboxNetworkError),
+        (imaplib.IMAP4.error(b"Temporary authentication failure"), MailboxNetworkError),
+        (imaplib.IMAP4.error(f"LOGIN {PASSWORD} temporarily refused"), MailboxNetworkError),
         (imaplib.IMAP4.abort(f"LOGIN {PASSWORD} dropped"), MailboxNetworkError),
         (OSError(PASSWORD), MailboxNetworkError),
     ],
