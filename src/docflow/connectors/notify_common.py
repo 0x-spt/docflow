@@ -65,8 +65,9 @@ def notification_text(doc: ExportDoc, purpose: str) -> str:
         total = total_of(doc)
         key = total_field(doc.default_schema)
         title = field_title(doc, key) if key else None
-        amount = f"{title}: {money(total)}" if title else f"сумма {money(total)}"
-        extra = ", ".join(x for x in (name, amount if total is not None else "") if x)
+        # money(None) падал TypeError у типов без суммы: строку собираем только при наличии числа
+        amount = "" if total is None else (f"{title}: {money(total)}" if title else f"сумма {money(total)}")
+        extra = ", ".join(x for x in (name, amount) if x)
         if extra:
             lines.append(extra)
     if doc.cabinet_url:

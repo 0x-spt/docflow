@@ -410,3 +410,12 @@ def test_notify_review_reason_prefixed_by_label():
     assert "Причины: Налог: не сходится" in notification_text(labeled_doc({"vat": "Налог"}, issues), "notify_review")
     plain = notification_text(labeled_doc({}, issues), "notify_review")
     assert "Причины: не сходится" in plain and "Налог" not in plain
+
+
+def test_notify_new_without_total_does_not_crash():
+    """Тип без суммы (путевой лист из конструктора): уведомление идёт без «суммы», а не падает TypeError."""
+    from docflow.connectors.notify_common import notification_text
+
+    text = notification_text(make_doc(total=None), "notify_new")
+    assert text.splitlines()[1] == "ООО Ромашка"
+    assert "₽" not in text
