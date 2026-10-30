@@ -42,8 +42,16 @@ def _reason(doc: ExportDoc, issue: dict) -> str:
     return f"{one_line(label)}: {message}" if message and label else message
 
 
+def _reasons(doc: ExportDoc) -> list[str]:
+    return [m for i in doc.issues if i.get("code") not in INFO_CODES and (m := _reason(doc, i))]
+
+
+def first_reason(doc: ExportDoc) -> str:
+    return next(iter(_reasons(doc)), "")
+
+
 def reasons(doc: ExportDoc) -> str:
-    messages = [m for i in doc.issues if i.get("code") not in INFO_CODES and (m := _reason(doc, i))]
+    messages = _reasons(doc)
     shown = "; ".join(messages[:REASONS_SHOWN])
     if len(messages) > REASONS_SHOWN:
         shown += f" и ещё {len(messages) - REASONS_SHOWN}"

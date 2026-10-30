@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import re
 import uuid
 from datetime import UTC, datetime
 from typing import Annotated, Literal
@@ -24,6 +23,7 @@ from docflow.api.deps import (
     parse_id,
 )
 from docflow.db.models import Document
+from docflow.exports import enqueue_bot_messages
 from docflow.intake import (
     IntakeConflict,
     IntakeDeps,
@@ -43,7 +43,7 @@ from docflow.pdf.digital import render_digital_pdf
 from docflow.pipeline import SchemaNotFound
 from docflow.review import ReviewConflict, review_document, route_approved
 from docflow.schemas.model import DocSchema
-from docflow.serializers import document_exports, document_payload
+from docflow.serializers import digital_filename, document_exports, document_payload
 from docflow.storage.blobs import BlobNotFound, page_key, scan_key
 from docflow.validation.engine import INFO_CODES
 from docflow.webhooks import EVENT_REVIEWED, enqueue_webhooks
@@ -295,13 +295,6 @@ DIGITAL_FAILED = "не удалось сформировать цифровую 
 DIGITAL_CONFLICT = "цифровая версия доступна для документов в статусах ok и needs_review"
 
 
-def _digital_filename(document: Document) -> str:
-    """slug + номер документа латиницей (остальное вырезается) или первые 8 знаков id."""
-    number = document.data.get("number") if isinstance(document.data, dict) else None
-    clean = re.sub(r"[^A-Za-z0-9_-]", "", str(number or ""))[:40].strip("-_")
-    return f"{document.schema_slug}-{clean or str(document.id)[:8]}.pdf"
-
-
 @router.get(
     "/{document_id}/digital.pdf",
     summary="Цифровая версия документа в PDF",
@@ -342,7 +335,7 @@ async def get_document_digital_pdf(
     return Response(
         content=pdf,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'inline; filename="{_digital_filename(document)}"'},
+        headers={"Content-Disposition": f'inline; filename="{digital_filename(document)}"'},
     )
 
 
@@ -415,7 +408,8 @@ class ReviewIn(BaseModel):
         "нормализацию, справочники и проверки, что ответ модели (оставшиеся замечания сохраняются, статус всё "
         "равно `ok`). `reject` ставит `failed`. После успеха уходят вебхуки: `document.reviewed` для approve, "
         "`document.failed` для reject; для approve по правилам маршрутизации ставятся выгрузки и уведомления "
-        "«новый документ» (согласование считается полученным). 409 — документ уже проверен "
+        "«новый документ» (согласование считается полученным); подключённому Telegram-боту — сообщение о решении. "
+        "409 — документ уже проверен "
         "другим оператором или ещё обрабатывается."
     ),
 )
@@ -451,6 +445,11 @@ async def review_document_endpoint(
     except Exception:
         # проверка уже записана; закоммиченные доставки поднимет requeue_stale
         logger.exception("не удалось поставить вебхуки документа %s", document.id)
+    try:
+        await enqueue_bot_messages(session, document, "bot_reviewed", enqueuer)
+    except Exception:
+        # проверка уже записана; закоммиченные сообщения поднимет requeue_stale_exports
+        logger.exception("не удалось поставить сообщения бота о документе %s", document.id)
     if body.decision == "approve":
         try:
             await route_approved(session, document, schemas, enqueuer)

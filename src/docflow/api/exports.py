@@ -78,8 +78,9 @@ async def _one(session, tenant_id: uuid.UUID, export_id: uuid.UUID) -> dict[str,
         "Выгрузки и уведомления тенанта, новые сверху. Фильтры: `document_id`, `status` (pending, done, failed, "
         "skipped — доставка больше не нужна, например устаревшее уведомление); "
         "`limit` 1–200 (по умолчанию 50). `error` — причина последней неудачи; `external_id` — ID созданной "
-        "сущности во внешней системе. Удалённый получатель — `destination_id: null`. Фильтр `destination_id` — "
-        "выгрузки одного получателя."
+        "сущности во внешней системе. Удалённый получатель — `destination_id: null` и пустое имя. Сообщения "
+        "Telegram-бота (`purpose`: bot_ready, bot_reviewed) получателя не имеют: `destination_id: null`, "
+        "`destination_name`: «Telegram-бот», `kind`: tenant_bot. Фильтр `destination_id` — выгрузки одного получателя."
     ),
 )
 async def list_exports(
@@ -111,7 +112,7 @@ async def list_exports(
     description=(
         "Одним запросом: по каждому получателю, у которого есть неудавшиеся (`failed`) или ждущие (`pending`) "
         "выгрузки, — их число; `failed` на верхнем уровне — все неудавшиеся тенанта, включая удалённых "
-        "получателей. Пропущенные (`skipped`) не считаются."
+        "получателей и сообщения Telegram-бота. Пропущенные (`skipped`) не считаются."
     ),
 )
 async def exports_summary(tenant_id: TenantDep, session: SessionDep) -> dict[str, Any]:

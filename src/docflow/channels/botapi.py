@@ -13,6 +13,7 @@ TOKEN_RE = re.compile(r"^\d{3,20}:[A-Za-z0-9_-]{30,100}$", re.ASCII)
 MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
 DEFAULT_TIMEOUT = 20.0
 DOWNLOAD_CHUNK = 64 * 1024
+TOKEN_REVOKED = "токен больше не действует"
 
 
 class BotApiError(Exception):

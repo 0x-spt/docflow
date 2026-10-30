@@ -8,7 +8,7 @@ from sqlalchemy import select
 from test_documents import add_doc
 from test_review_api import add_review_doc, review
 
-from docflow.db.models import ApiKey, Destination, Export, RoutingRules, hash_key
+from docflow.db.models import ApiKey, BotChat, Destination, Export, RoutingRules, TenantBot, hash_key
 from docflow.exports import export_job_id
 from docflow.queue import DELIVER_EXPORT
 
@@ -268,3 +268,34 @@ async def test_retry_operator_forbidden_owner_allowed(api, auth, fake_connector)
     assert (await api.client.get("/v1/exports", headers=operator)).status_code == 200
     owner, _ = await session_for(api, auth, role="owner")
     assert (await api.client.post(f"/v1/exports/{e}/retry", headers=owner)).status_code == 200
+
+
+async def test_journal_labels_bot_export(api, auth):
+    doc_id = await add_doc(api, auth)
+    async with api.sessionmaker() as s:
+        bot = TenantBot(
+            tenant_id=await tenant_of(api, auth), token_enc="x", token_hash="h", username="acme_bot", invite_code="c"
+        )
+        s.add(bot)
+        await s.flush()
+        chat = BotChat(bot_id=bot.id, chat_id=500, title="Чат")
+        s.add(chat)
+        await s.commit()
+    e = await add_export(
+        api, auth, doc_id, None, bot_chat_id=chat.id, purpose="bot_ready", status="failed", attempt=1,
+        last_error="Telegram sendMessage: 403",
+    )
+
+    [item] = (await api.client.get("/v1/exports", headers=auth)).json()["items"]
+    assert item["destination_name"] == "Telegram-бот" and item["kind"] == "tenant_bot"
+    assert item["destination_id"] is None and item["purpose"] == "bot_ready"
+    [in_doc] = (await api.client.get(f"/v1/documents/{doc_id}", headers=auth)).json()["exports"]
+    assert in_doc["destination_name"] == "Telegram-бот"
+    assert (await api.client.get("/v1/exports/summary", headers=auth)).json() == {"items": [], "failed": 1}
+
+    r = await api.client.post(f"/v1/exports/{e}/retry", headers=auth)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "pending" and body["attempt"] == 0 and body["error"] is None
+    assert body["destination_name"] == "Telegram-бот"
+    assert api.enqueuer.calls[-1] == (DELIVER_EXPORT, (str(e), 0), None, export_job_id(e, 0))

@@ -8,7 +8,7 @@
 
 import asyncio
 import logging
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -18,13 +18,16 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from docflow.channels.bot_messages import send_bot_export
+from docflow.channels.botapi import TOKEN_REVOKED, BotApi, BotApiError, BotTokenRevoked
 from docflow.config import Settings
 from docflow.connectors.base import REGISTRY, Connector, ConnectorError, DestCtx, ExportDoc, supports
-from docflow.db.models import Destination, Document, Export
-from docflow.labels import apply_labels, get_label_set
+from docflow.db.models import BOT_PURPOSES, BotChat, Destination, Document, Export, TenantBot
+from docflow.labels import apply_labels, get_label_set, queue_fields_for
 from docflow.pdf.digital import render_digital_pdf
 from docflow.queue import DELIVER_EXPORT, Enqueuer
 from docflow.routing import RoutingDecision
+from docflow.schemas.catalog import AUTO_SLUG
 from docflow.schemas.model import DocSchema
 from docflow.secrets import SecretsKeyMissing, decrypt_secrets
 from docflow.storage.blobs import BlobNotFound, BlobStore, scan_key
@@ -49,6 +52,11 @@ NOT_APPROVED = "документ не подтверждён (статус {stat
 STALE_NOTIFICATION = "документ уже в другом статусе — уведомление не актуально"
 ATTEMPTS_EXHAUSTED = "превышено число попыток"
 TIMED_OUT = "внешняя система не ответила вовремя"
+
+BOT_CHAT_GONE = "чат отвязан"
+BOT_OFF = "бот отключён"
+# last_error бота общий с опросом: успешная отправка снимает только свои ошибки (см. POLL_ERROR_PREFIX у опроса)
+BOT_ERROR_PREFIX = "Отправка в Telegram: "
 
 PURPOSES = ("export", "notify_review", "notify_new")
 
@@ -114,6 +122,53 @@ async def enqueue_routed(
     if status == "needs_review":
         return await enqueue_exports(session, document, "notify_review", decision.notify, enqueuer)
     return 0
+
+
+def _own_source(document: Document, bot_id: UUID) -> dict | None:
+    """source_ref документа, если он прислан в этого бота; прислан в прежнего — как любой другой канал."""
+    ref = document.source_ref
+    if document.source == "telegram" and isinstance(ref, dict) and ref.get("bot_id") == str(bot_id):
+        return ref
+    return None
+
+
+async def enqueue_bot_messages(session: AsyncSession, document: Document, purpose: str, enqueuer: Enqueuer) -> int:
+    """Сообщения бота о документе: присланный в бота — только исходному чату, остальные — чатам с all_documents.
+
+    Нет активного бота или нужного чата — ничего не ставится. Уже существующие пропускает, возвращает число новых.
+    """
+    document_id, tenant_id = document.id, document.tenant_id
+    bot_id = (
+        await session.execute(select(TenantBot.id).where(TenantBot.tenant_id == tenant_id, TenantBot.active.is_(True)))
+    ).scalar_one_or_none()
+    if bot_id is None:
+        return 0
+    ref = _own_source(document, bot_id)
+    chats = select(BotChat.id).where(BotChat.bot_id == bot_id).order_by(BotChat.linked_at, BotChat.id)
+    chats = chats.where(BotChat.chat_id == ref.get("chat_id") if ref else BotChat.all_documents.is_(True))
+
+    created: list[UUID] = []
+    for chat_id in (await session.execute(chats)).scalars().all():
+        exists = (
+            await session.execute(
+                select(Export.id).where(
+                    Export.document_id == document_id, Export.bot_chat_id == chat_id, Export.purpose == purpose
+                )
+            )
+        ).first()
+        if exists:
+            continue
+        export = Export(tenant_id=tenant_id, document_id=document_id, bot_chat_id=chat_id, purpose=purpose)
+        try:
+            async with session.begin_nested():
+                session.add(export)
+        except IntegrityError:  # гонка с параллельной постановкой
+            continue
+        created.append(export.id)
+    await session.commit()
+    for export_id in created:  # после commit, чтобы воркер увидел строку; потерянное поднимет requeue_stale
+        await enqueuer.enqueue(DELIVER_EXPORT, str(export_id), 0, job_id=export_job_id(export_id, 0))
+    return len(created)
 
 
 async def requeue_stale_exports(
@@ -307,6 +362,8 @@ async def _attempt(
 
 def _stale(export: Export, document: Document) -> str | None:
     """Почему доставка уже не нужна: документ ушёл из статуса, для которого она ставилась."""
+    if export.purpose in BOT_PURPOSES and document.status in ("queued", "processing"):
+        return STALE_NOTIFICATION  # распознаётся заново: о результате сообщит новый прогон
     if export.purpose == "export" and document.status != "ok":
         # анти-цель: неподтверждённый документ не уходит в учётную систему клиента
         return NOT_APPROVED.format(status=document.status)
@@ -315,6 +372,162 @@ def _stale(export: Export, document: Document) -> str | None:
     if export.purpose == "notify_review" and document.status != "needs_review":
         return STALE_NOTIFICATION
     return None
+
+
+def _out_of_attempts(export: Export) -> str | None:
+    """Попытки кончились, а результата нет (задачу убил таймаут arq или остановка воркера): больше не шлём."""
+    if export.attempt <= len(RETRY_DELAYS):
+        return None
+    return ATTEMPTS_EXHAUSTED + (f": {export.last_error}" if export.last_error else "")
+
+
+async def _finish_attempt(
+    session: AsyncSession,
+    export: Export,
+    enqueuer: Enqueuer,
+    work: Callable[[], Awaitable[str | None]],
+    *,
+    kind: str,
+) -> tuple[bool, str | None]:
+    """Общий хвост попытки: занять, выполнить work (вернёт external_id), записать итог, назначить повтор.
+
+    Возвращает (наша ли попытка, ошибка); False — попытку занял другой воркер, work не вызывался.
+    """
+    if not await _claim(session, export.id, export.attempt):
+        return False, None
+    await session.refresh(export)
+
+    error: str | None = None
+    retryable = True
+    external_id: str | None = None
+    try:
+        external_id = await work()
+    except _Permanent as exc:
+        error, retryable = str(exc), False
+    except ConnectorError as exc:
+        error, retryable = exc.message, exc.retryable
+    except Exception as exc:
+        # текст исключения может содержать адрес с ключом или токен: ни в журнал, ни в лог — только тип
+        logger.warning("выгрузка %s: сбой %s (%s)", export.id, kind, type(exc).__name__)
+        error = f"сбой при обращении к системе ({type(exc).__name__})"
+        await session.rollback()  # транзакция могла сломаться (сбой БД); попытка уже закоммичена claim'ом
+        await session.refresh(export)
+
+    if error is None:
+        export.status = "done"
+        export.external_id = None if external_id is None else str(external_id)[:MAX_ERROR]
+        export.last_error = None
+        export.next_attempt_at = None
+        await session.commit()
+        return True, None
+
+    attempt = export.attempt  # уже увеличен claim'ом
+    if not retryable or attempt > len(RETRY_DELAYS):
+        await _fail(session, export, error)
+        return True, error
+    export.last_error = error[:MAX_ERROR]
+    delay = RETRY_DELAYS[attempt - 1]
+    export.next_attempt_at = datetime.now(UTC) + timedelta(seconds=delay)
+    await session.commit()  # до постановки в очередь
+    await enqueuer.enqueue(
+        DELIVER_EXPORT, str(export.id), attempt, defer_by=delay, job_id=export_job_id(export.id, attempt)
+    )
+    return True, error
+
+
+async def _bot_attempt(
+    export: Export,
+    document: Document,
+    bot: TenantBot,
+    chat: BotChat,
+    *,
+    session: AsyncSession,
+    http: httpx.AsyncClient,
+    blobs: BlobStore,
+    schemas,
+    settings: Settings,
+) -> None:
+    """Одна попытка — один вызов Bot API. Схемы нет (`auto` или удалена) — только текст."""
+    try:
+        token = decrypt_secrets(bot.token_enc, settings.secrets_key)["token"]
+    except SecretsKeyMissing as exc:
+        raise _Permanent(str(exc)) from None
+    doc: ExportDoc | None = None
+    queue_fields: list[str] = []
+    if document.schema_slug != AUTO_SLUG:
+        try:
+            schema = await schemas.resolve(session, document.tenant_id, document.schema_slug, document.schema_version)
+        except LookupError:
+            pass
+        else:
+            label_set = await get_label_set(session, document.tenant_id, document.schema_slug)
+            doc = build_export_doc(document, schema, settings, blobs, label_set.labels)
+            queue_fields = queue_fields_for(schema, label_set.queue_fields)
+    ref = _own_source(document, bot.id)
+    full = ref is not None and ref.get("chat_id") == chat.chat_id
+    reply_to = ref.get("message_id") if full else None
+    await session.commit()  # на время PDF и вызова Telegram транзакция закрыта
+    api = BotApi(http, token, settings.telegram_api_url)
+    try:
+        async with asyncio.timeout(CONNECTOR_DEADLINE):
+            await send_bot_export(
+                api, chat.chat_id, reply_to, doc, document, export.purpose, full=full, queue_fields=queue_fields
+            )
+    except TimeoutError:
+        raise ConnectorError(TIMED_OUT, retryable=True) from None
+    except BotTokenRevoked:
+        raise _Permanent(TOKEN_REVOKED) from None
+    except BotApiError as exc:
+        raise ConnectorError(exc.message, retryable=exc.retryable) from None
+
+
+async def _save_bot_status(session: AsyncSession, bot_id: UUID, error: str | None) -> None:
+    """Итог отправки в last_error бота. Запросом с условием: чужие ошибки опроса и отзыв токена не перетираем."""
+    query = update(TenantBot).where(TenantBot.id == bot_id).execution_options(synchronize_session=False)
+    if error is None:
+        query = query.where(TenantBot.last_error.startswith(BOT_ERROR_PREFIX, autoescape=True)).values(last_error=None)
+    elif error == TOKEN_REVOKED:
+        query = query.values(active=False, last_error=TOKEN_REVOKED)
+    else:
+        query = query.where(TenantBot.active.is_(True)).values(last_error=f"{BOT_ERROR_PREFIX}{error}"[:MAX_ERROR])
+    await session.execute(query)
+    await session.commit()
+
+
+async def _deliver_bot(
+    session: AsyncSession,
+    export: Export,
+    *,
+    http: httpx.AsyncClient,
+    enqueuer: Enqueuer,
+    blobs: BlobStore,
+    schemas,
+    settings: Settings,
+) -> None:
+    chat = await session.get(BotChat, export.bot_chat_id) if export.bot_chat_id else None
+    if chat is None:
+        return await _skip(session, export, BOT_CHAT_GONE)
+    bot = await session.get(TenantBot, chat.bot_id)
+    if bot is None or not bot.active or bot.tenant_id != export.tenant_id:
+        return await _skip(session, export, BOT_OFF)
+    document = await session.get(Document, export.document_id)
+    if document is None:
+        return await _fail(session, export, DOCUMENT_GONE)
+    if reason := _stale(export, document):
+        return await _skip(session, export, reason)
+    if reason := _out_of_attempts(export):
+        return await _fail(session, export, reason)
+
+    bot_id = bot.id  # после отката сессии объект бота уже не прочитать
+
+    async def work() -> None:
+        await _bot_attempt(
+            export, document, bot, chat, session=session, http=http, blobs=blobs, schemas=schemas, settings=settings
+        )
+
+    mine, error = await _finish_attempt(session, export, enqueuer, work, kind="tenant_bot")
+    if mine:
+        await _save_bot_status(session, bot_id, error)
 
 
 async def deliver_export(
@@ -341,6 +554,10 @@ async def deliver_export(
     ):
         # заблудившийся дубль: попытку уже заняла (или отложила) другая задача — второй отправки не будет
         return
+    if export.purpose in BOT_PURPOSES:
+        return await _deliver_bot(
+            session, export, http=http, enqueuer=enqueuer, blobs=blobs, schemas=schemas, settings=settings
+        )
     dest = await session.get(Destination, export.destination_id) if export.destination_id else None
     document = await session.get(Document, export.document_id)
     if dest is None or not dest.active or dest.tenant_id != export.tenant_id:
@@ -353,49 +570,13 @@ async def deliver_export(
     connector = REGISTRY.get(dest.kind)
     if connector is None:
         return await _fail(session, export, f"тип получателя «{dest.kind}» больше не поддерживается")
-    if export.attempt > len(RETRY_DELAYS):
-        # попытки кончились, а результата нет (задачу убил таймаут arq или остановка воркера): больше не шлём
-        last = f": {export.last_error}" if export.last_error else ""
-        return await _fail(session, export, ATTEMPTS_EXHAUSTED + last)
+    if reason := _out_of_attempts(export):
+        return await _fail(session, export, reason)
 
-    if not await _claim(session, export.id, export.attempt):
-        return  # попытку занял другой воркер
-    await session.refresh(export)
-
-    error: str | None = None
-    retryable = True
-    external_id: str | None = None
-    try:
-        external_id = await _attempt(
+    async def work() -> str | None:
+        return await _attempt(
             export, dest, document, connector,
             session=session, http=http, blobs=blobs, schemas=schemas, settings=settings,
         )
-    except _Permanent as exc:
-        error, retryable = str(exc), False
-    except ConnectorError as exc:
-        error, retryable = exc.message, exc.retryable
-    except Exception as exc:
-        # текст исключения может содержать адрес с ключом или токен: ни в журнал, ни в лог — только тип
-        logger.warning("выгрузка %s: сбой %s (%s)", export.id, dest.kind, type(exc).__name__)
-        error = f"сбой при обращении к системе ({type(exc).__name__})"
-        await session.rollback()  # транзакция могла сломаться (сбой БД); попытка уже закоммичена claim'ом
-        await session.refresh(export)
 
-    if error is None:
-        export.status = "done"
-        export.external_id = None if external_id is None else str(external_id)[:MAX_ERROR]
-        export.last_error = None
-        export.next_attempt_at = None
-        await session.commit()
-        return
-
-    attempt = export.attempt  # уже увеличен claim'ом
-    if not retryable or attempt > len(RETRY_DELAYS):
-        return await _fail(session, export, error)
-    export.last_error = error[:MAX_ERROR]
-    delay = RETRY_DELAYS[attempt - 1]
-    export.next_attempt_at = datetime.now(UTC) + timedelta(seconds=delay)
-    await session.commit()  # до постановки в очередь
-    await enqueuer.enqueue(
-        DELIVER_EXPORT, str(export.id), attempt, defer_by=delay, job_id=export_job_id(export.id, attempt)
-    )
+    await _finish_attempt(session, export, enqueuer, work, kind=dest.kind)

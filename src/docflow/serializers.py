@@ -1,11 +1,16 @@
 """Единое представление документа: и для GET /v1/documents/{id}, и для тела вебхука."""
 
+import re
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from docflow.db.models import Destination, Document, Export
+from docflow.db.models import BOT_PURPOSES, Destination, Document, Export
+
+# у сообщений бота нет получателя (destination_id пуст), и это не «получатель удалён»
+BOT_DESTINATION_NAME = "Telegram-бот"
+BOT_DESTINATION_KIND = "tenant_bot"
 
 
 def _iso(dt) -> str | None:
@@ -14,6 +19,8 @@ def _iso(dt) -> str | None:
 
 def export_item(export: Export, destination_name: str | None, kind: str | None) -> dict:
     """Выгрузка в ответе: получатель мог быть удалён — тогда destination_id/имя/тип пустые."""
+    if export.purpose in BOT_PURPOSES:
+        destination_name, kind = BOT_DESTINATION_NAME, BOT_DESTINATION_KIND
     return {
         "id": str(export.id),
         "destination_id": str(export.destination_id) if export.destination_id else None,
@@ -36,6 +43,13 @@ async def document_exports(session: AsyncSession, document_id: UUID) -> list[dic
         .order_by(Export.created_at, Export.id)
     )
     return [export_item(e, name, kind) for e, name, kind in rows.all()]
+
+
+def digital_filename(document: Document) -> str:
+    """slug + номер документа латиницей (остальное вырезается) или первые 8 знаков id."""
+    number = document.data.get("number") if isinstance(document.data, dict) else None
+    clean = re.sub(r"[^A-Za-z0-9_-]", "", str(number or ""))[:40].strip("-_")
+    return f"{document.schema_slug}-{clean or str(document.id)[:8]}.pdf"
 
 
 def document_payload(document: Document, base_url: str, exports: list[dict] | None = None) -> dict:

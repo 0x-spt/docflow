@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from docflow.channels.botapi import (
     MAX_DOWNLOAD_BYTES,
+    TOKEN_REVOKED,
     BotApi,
     BotApiError,
     BotConflict,
@@ -54,7 +55,6 @@ ALLOWED_MIME = {
 }
 ALLOWED_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff", ".heic", ".heif", ".pdf")
 
-TOKEN_REVOKED = "токен больше не действует"
 # last_error общий с отправкой ответов (задача 9): по этому началу опрос узнаёт свои ошибки и после перезапуска
 POLL_ERROR_PREFIX = "Опрос Telegram: "
 ASK_FOR_LINK = "Попросите ссылку у администратора кабинета"

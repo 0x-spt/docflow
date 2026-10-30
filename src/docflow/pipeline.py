@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from docflow.config import get_settings
 from docflow.db.models import Document, SchemaRecord, Tenant
-from docflow.exports import enqueue_routed
+from docflow.exports import enqueue_bot_messages, enqueue_routed
 from docflow.extraction.base import UNKNOWN, ExtractionError, Extractor
 from docflow.extraction.normalize import normalize
 from docflow.imaging.load import UnsupportedFile
@@ -258,6 +258,19 @@ async def _enqueue_webhooks(session: AsyncSession, document_id: UUID, enqueuer: 
         logger.exception("не удалось поставить вебхуки документа %s", document_id)
 
 
+async def _after_finish(session: AsyncSession, document_id: UUID, enqueuer: Enqueuer) -> None:
+    """Документ получил финальный статус: вебхуки и сообщения бота. Сбой одного не мешает другому и документу."""
+    await _enqueue_webhooks(session, document_id, enqueuer)
+    try:
+        document = await session.get(Document, document_id, populate_existing=True)
+        if document is not None:
+            await enqueue_bot_messages(session, document, "bot_ready", enqueuer)
+    except Exception:
+        # закоммиченные сообщения поднимет requeue_stale_exports
+        logger.exception("не удалось поставить сообщения бота о документе %s", document_id)
+        await session.rollback()  # дальше на этой сессии ставятся выгрузки
+
+
 async def _enqueue_routed(
     session: AsyncSession, document_id: UUID, decision: RoutingDecision, written: str, enqueuer: Enqueuer
 ) -> None:
@@ -296,7 +309,7 @@ async def process_document(deps: Deps, document_id: UUID) -> None:
             # job_timeout arq или остановка воркера: не оставляем документ в processing
             logger.warning("обработка документа %s прервана", document_id)
             if await _mark_failed(session, document_id, TIMEOUT_ERROR):
-                await _enqueue_webhooks(session, document_id, deps.enqueuer)
+                await _after_finish(session, document_id, deps.enqueuer)
             raise
         except Exception:
             logger.exception("ошибка обработки документа %s", document_id)
@@ -305,7 +318,7 @@ async def process_document(deps: Deps, document_id: UUID) -> None:
             finished = await _mark_failed(session, document_id, error)
         # rowcount 0 — документ уже закрыл жнец (и поставил вебхуки сам)
         if finished:
-            await _enqueue_webhooks(session, document_id, deps.enqueuer)
+            await _after_finish(session, document_id, deps.enqueuer)
             if decision is not None:
                 await _enqueue_routed(session, document_id, decision, written, deps.enqueuer)
 
@@ -332,7 +345,7 @@ async def reap_stale_processing(
         await session.commit()
         if res.rowcount == 1:
             reaped += 1
-            await _enqueue_webhooks(session, document_id, enqueuer)
+            await _after_finish(session, document_id, enqueuer)
     return reaped
 
 
