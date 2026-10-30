@@ -71,12 +71,12 @@ class BotApi:
             return body.get("result")
         raise self._error(method, resp.status_code, body)
 
-    def _error(self, method: str, status: int, body: object) -> BotApiError:
+    def _error(self, method: str, status: int, body: object, revoked: tuple[int, ...] = (401, 404)) -> BotApiError:
         description = body.get("description") if isinstance(body, dict) else None
         text = f"Telegram {method}: {status}"
         if isinstance(description, str) and description:
             text += f" {self._clean(description)[:200]}"
-        if status in (401, 404):
+        if status in revoked:
             return BotTokenRevoked(text)
         if status == 409:
             return BotConflict(text)
@@ -108,7 +108,8 @@ class BotApi:
         try:
             async with self._http.stream("GET", url, timeout=DEFAULT_TIMEOUT) as resp:
                 if resp.status_code != 200:
-                    raise self._error("download", resp.status_code, None)
+                    # 404 здесь — нет такого файла при живом токене, бота это не отключает
+                    raise self._error("download", resp.status_code, None, revoked=(401,))
                 async for chunk in resp.aiter_bytes(DOWNLOAD_CHUNK):
                     buf += chunk
                     if len(buf) > limit:

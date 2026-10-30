@@ -109,3 +109,15 @@ async def test_send_document_multipart(bot, tg):
     assert b'name="document"; filename="doc.pdf"' in raw and b"%PDF-1" in raw
     assert "Готово".encode() in raw
     assert b'"message_id": 9' in raw and b"allow_sending_without_reply" in raw
+
+
+async def test_download_404_is_not_revoked(bot, tg):
+    # getFile отвечает, а самого файла нет: токен жив
+    tg.report_size = False
+    with pytest.raises(BotApiError) as e:
+        await bot.download("absent", 1000)
+    assert not isinstance(e.value, BotTokenRevoked) and not e.value.retryable
+    assert_clean(e.value)
+    tg.fail_with["download"] = httpx.ConnectError("x")
+    with pytest.raises(BotApiError):
+        await bot.download("absent", 1000)

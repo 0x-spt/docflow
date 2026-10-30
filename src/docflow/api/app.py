@@ -81,9 +81,10 @@ async def _validation_error(request: Request, exc: RequestValidationError) -> JS
         cause = (err.get("ctx") or {}).get("error")
         if isinstance(cause, SchemaPathError):
             err = {**err, "loc": (*err["loc"], *cause.loc)}
-        if request.url.path.startswith("/v1/bot"):
-            # стандартный 422 возвращает принятое значение в input, а в теле запроса может быть токен бота
-            err = {k: v for k, v in err.items() if k not in ("input", "ctx")}
+        if request.url.path == "/v1/bot" or request.url.path.startswith("/v1/bot/"):
+            # стандартный 422 возвращает принятое значение в input, а лишний ключ тела попадает в loc:
+            # в теле запроса может быть токен бота, поэтому от пути оставляем только «body»/«query»
+            err = {**{k: v for k, v in err.items() if k not in ("input", "ctx")}, "loc": err["loc"][:1]}
         errors.append(err)
     return await request_validation_exception_handler(request, RequestValidationError(errors, body=exc.body))
 

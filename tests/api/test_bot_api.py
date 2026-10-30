@@ -159,6 +159,7 @@ async def test_422_does_not_echo_token(api, owner, tg):
     bodies = [
         {"token": TOKEN, "extra": TOKEN},  # лишнее поле
         {"token": [TOKEN]},  # токен не строкой
+        {TOKEN: "x"},  # токен в имени ключа
         {"token": 5, "other": TOKEN},
         [TOKEN],  # тело не объект
         TOKEN,

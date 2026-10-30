@@ -7,8 +7,11 @@ def make_engine(url: str) -> AsyncEngine:
     parsed = make_url(url)
     if parsed.get_backend_name() == "sqlite" and parsed.database in (None, "", ":memory:"):
         # in-memory SQLite живёт в одном соединении — иначе каждое соединение видит пустую базу
-        return create_async_engine(url, poolclass=StaticPool, connect_args={"check_same_thread": False})
-    return create_async_engine(url)
+        return create_async_engine(
+            url, poolclass=StaticPool, connect_args={"check_same_thread": False}, hide_parameters=True
+        )
+    # параметры запроса в тексте ошибки БД содержали бы зашифрованные токены и хеши
+    return create_async_engine(url, hide_parameters=True)
 
 
 def make_sessionmaker(engine: AsyncEngine) -> async_sessionmaker:
