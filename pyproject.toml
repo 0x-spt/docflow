@@ -32,6 +32,7 @@ dependencies = [
     "openpyxl>=3.1",
     "pyjwt[crypto]>=2.8",
     "tzdata>=2026.6",
+    "regex>=2026.9.29",
 ]
 
 [project.optional-dependencies]

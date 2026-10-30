@@ -154,6 +154,23 @@ def test_regex_rule():
     assert codes(evaluate(s, {"series": "45 15"}, today=TODAY)) == [("series", "pattern")]
 
 
+def test_regex_timeout_needs_review():
+    import time
+
+    s = schema([{"name": "f", "type": "string", "rules": [{"kind": "regex", "params": {"pattern": r"(a+)+$"}}]}])
+    started = time.monotonic()
+    issues = evaluate(s, {"f": "a" * 900 + "b"}, today=TODAY)
+    assert time.monotonic() - started < 1
+    assert codes(issues) == [("f", "pattern_timeout")]
+    assert decide_status(issues) == "needs_review"
+
+
+def test_regex_still_matches():
+    s = schema([{"name": "n", "type": "string", "rules": [{"kind": "regex", "params": {"pattern": r"\d{3}"}}]}])
+    assert evaluate(s, {"n": "123"}, today=TODAY) == []
+    assert codes(evaluate(s, {"n": "ab"}, today=TODAY)) == [("n", "pattern")]
+
+
 def test_date_not_future():
     s = schema([{"name": "d", "type": "date", "rules": [{"kind": "date_not_future"}]}])
     assert evaluate(s, {"d": "2026-10-27"}, today=TODAY) == []

@@ -1,7 +1,7 @@
 """Описание типа документа как данных (DocSchema). Правила названы здесь, реализуются в validation."""
-import re
 from typing import Any, Literal
 
+import regex
 from pydantic import BaseModel, Field, model_validator
 
 FieldType = Literal["string", "integer", "number", "date", "boolean", "enum", "table"]
@@ -127,8 +127,8 @@ def _check_field_rule(field: "FieldSpec", rule: RuleSpec) -> None:
         if len(pattern) > REGEX_PATTERN_MAX:
             raise ValueError(f"«{field.name}»: pattern длиннее {REGEX_PATTERN_MAX} символов")
         try:
-            re.compile(pattern)
-        except re.error as e:
+            regex.compile(pattern)
+        except regex.error as e:
             raise ValueError(f"«{field.name}»: pattern не компилируется: {e}") from e
 
 

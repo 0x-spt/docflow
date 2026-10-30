@@ -81,6 +81,11 @@ def test_regex_rule_needs_valid_pattern():
     assert _schema(FieldSpec(name="a", type="string", rules=[{"kind": "regex", "params": {"pattern": r"^\d+$"}}]))
 
 
+def test_pattern_checked_by_regex_package():
+    with pytest.raises(ValidationError, match="pattern не компилируется"):
+        _schema(FieldSpec(name="a", type="string", rules=[{"kind": "regex", "params": {"pattern": "("}}]))
+
+
 def test_total_consistent_params_cross_checked():
     total = FieldSpec(name="total", type="number")
     sub = FieldSpec(name="subtotal", type="number")

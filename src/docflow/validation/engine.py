@@ -4,11 +4,12 @@
 отсутствующее значение — None. Правило, которому не хватает входных данных, молча пропускается
 (кроме missing_required): отсутствие значения — не ошибка проверяемого реквизита.
 """
-import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, Literal
+
+import regex
 
 from docflow.schemas.llm import UNCERTAIN
 from docflow.schemas.model import DOC_RULES, FIELD_RULES, REGEX_VALUE_MAX, DocSchema, FieldSpec
@@ -17,6 +18,8 @@ from docflow.validation import checksums
 Status = Literal["ok", "needs_review", "failed"]
 
 _EPS = 1e-9
+# секунд на одно значение: дольше — считаем шаблон катастрофическим, решает человек
+REGEX_TIMEOUT = 0.1
 
 
 @dataclass(frozen=True)
@@ -57,7 +60,11 @@ def _checksum_rule(label: str, check: Callable[[str], bool]) -> FieldRule:
 
 def _regex_rule(name: str, value: Any, params: dict[str, Any], today: date) -> list[Issue]:
     # значение режем: на длинной строке катастрофический шаблон держал бы воркер
-    if re.search(params["pattern"], str(value)[:REGEX_VALUE_MAX]):
+    try:
+        matched = regex.search(params["pattern"], str(value)[:REGEX_VALUE_MAX], timeout=REGEX_TIMEOUT)
+    except TimeoutError:
+        return [Issue(name, "pattern_timeout", "проверка по шаблону не уложилась во время")]
+    if matched:
         return []
     return [Issue(name, "pattern", f"значение «{value}» не соответствует формату {params['pattern']}")]
 
