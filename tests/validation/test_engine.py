@@ -165,6 +165,16 @@ def test_regex_timeout_needs_review():
     assert decide_status(issues) == "needs_review"
 
 
+def test_regex_invalid_stored_pattern_needs_review():
+    s = schema([{"name": "f", "type": "string", "rules": [{"kind": "regex", "params": {"pattern": r"\d"}}]}])
+    # схема при сохранении такой шаблон не пропустит: кладём его так, как он лежит в старой версии
+    s.fields[0].rules[0].params["pattern"] = "("
+    issues = evaluate(s, {"f": "x"}, today=TODAY)
+    assert codes(issues) == [("f", "pattern_invalid")]
+    assert "(" not in issues[0].message
+    assert decide_status(issues) == "needs_review"
+
+
 def test_regex_still_matches():
     s = schema([{"name": "n", "type": "string", "rules": [{"kind": "regex", "params": {"pattern": r"\d{3}"}}]}])
     assert evaluate(s, {"n": "123"}, today=TODAY) == []

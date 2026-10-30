@@ -207,6 +207,34 @@ async def test_refusal_failed(sm, tmp_path):
     assert len(webhook_calls(deps)) == 1
 
 
+async def test_extraction_error_keeps_model(sm, tmp_path):
+    deps = make_deps(sm, tmp_path, extractor=Raising(ExtractionError("api_error")))
+    doc_id = await make_doc(deps)
+    await process_document(deps, doc_id)
+    doc = await load(deps, doc_id)
+    assert doc.status == "failed" and doc.model == "raising"
+
+
+async def test_extraction_crash_keeps_model(sm, tmp_path):
+    deps = make_deps(sm, tmp_path, extractor=Raising(RuntimeError("boom")))
+    doc_id = await make_doc(deps)
+    await process_document(deps, doc_id)
+    doc = await load(deps, doc_id)
+    assert doc.error == "внутренняя ошибка обработки" and doc.model == "raising"
+
+
+async def test_crash_after_extraction_keeps_model(sm, tmp_path, monkeypatch):
+    def boom(*_a, **_k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("docflow.pipeline.normalize", boom)
+    deps = make_deps(sm, tmp_path)
+    doc_id = await make_doc(deps)
+    await process_document(deps, doc_id)
+    doc = await load(deps, doc_id)
+    assert doc.status == "failed" and doc.model == "fake"
+
+
 async def test_garbage_failed(sm, tmp_path):
     deps = make_deps(sm, tmp_path)
     doc_id = await make_doc(deps, [(b"hello", "x.pdf")])
@@ -295,6 +323,7 @@ async def test_timeout_marks_failed(sm, tmp_path):
     doc = await load(deps, doc_id)
     assert doc.status == "failed"
     assert doc.finished_at is not None
+    assert doc.model == Slow.model
     assert len(webhook_calls(deps)) == 1
 
 

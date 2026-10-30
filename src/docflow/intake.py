@@ -308,7 +308,14 @@ async def retype_document(
         res = await session.execute(
             update(Document)
             .where(Document.id == document_id, Document.status == "queued")
-            .values(status="failed", error=ENQUEUE_ERROR, finished_at=datetime.now(UTC))
+            # тип снова не выбран: иначе «Распознать заново» больше не примет этот документ
+            .values(
+                status="failed",
+                schema_slug=AUTO_SLUG,
+                schema_version=0,
+                error=ENQUEUE_ERROR,
+                finished_at=datetime.now(UTC),
+            )
             .execution_options(synchronize_session=False)
         )
         await session.commit()

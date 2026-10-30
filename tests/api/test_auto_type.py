@@ -202,6 +202,13 @@ async def test_retype_enqueue_failure_503_back_to_failed(api, auth, monkeypatch)
     doc = await get_doc(api, doc_id)
     assert (doc.status, doc.error) == ("failed", ENQUEUE_ERROR)
     assert doc.finished_at is not None
+    assert (doc.schema_slug, doc.schema_version) == ("auto", 0)
+
+    monkeypatch.undo()
+    r = await retype(api, auth, doc_id)
+    assert r.status_code == 202, r.text
+    doc = await get_doc(api, doc_id)
+    assert (doc.status, doc.schema_slug) == ("queued", "invoice_ru")
 
 
 async def test_retype_enqueue_failure_after_worker_claimed_keeps_processing(api, auth, monkeypatch):

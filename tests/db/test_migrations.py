@@ -1,4 +1,5 @@
 import asyncio
+import os
 from pathlib import Path
 
 import pytest
@@ -10,7 +11,6 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from docflow.config import Settings
 from docflow.db.models import Base
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -79,7 +79,10 @@ async def _ensure_database(url: str) -> None:
 
 @pytest.mark.integration
 def test_migration_upgrade():
-    base_url = Settings().database_url
+    # только явно заданный адрес: адрес по умолчанию из настроек указывает на чужой Postgres на этой машине
+    base_url = os.environ.get("DOCFLOW_DATABASE_URL")
+    if not base_url:
+        pytest.skip("задайте DOCFLOW_DATABASE_URL (compose: postgresql+asyncpg://…@127.0.0.1:55432/docflow)")
     if not base_url.startswith("postgresql") or not _postgres_reachable(base_url):
         pytest.skip("Postgres недоступен (docker compose up -d postgres)")
     asyncio.run(_ensure_database(base_url))
@@ -98,6 +101,16 @@ def test_migration_upgrade():
         return diff
 
     assert asyncio.run(check()) == []
+
+
+def test_integration_skips_without_explicit_url(monkeypatch):
+    def must_not_connect(url):
+        raise AssertionError("без явного адреса подключения быть не должно")
+
+    monkeypatch.delenv("DOCFLOW_DATABASE_URL", raising=False)
+    monkeypatch.setitem(globals(), "_postgres_reachable", must_not_connect)
+    with pytest.raises(pytest.skip.Exception):
+        test_migration_upgrade()
 
 
 def _sqlite_engine(tmp_path, name):

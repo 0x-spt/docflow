@@ -21,7 +21,7 @@ def month_bounds(now: datetime) -> tuple[datetime, datetime]:
 
 
 async def pages_used(session: AsyncSession, tenant_id: uuid.UUID, now: datetime | None = None) -> int:
-    """Страницы документов месяца. Упавшие до обращения к модели (failed без model) не считаются."""
+    """Страницы документов месяца. Упавшие до извлечения (failed без model, определение типа бесплатно) не считаются."""
     start, end = month_bounds(now or datetime.now(UTC))
     total = await session.scalar(
         select(func.coalesce(func.sum(Document.pages), 0)).where(

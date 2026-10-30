@@ -64,6 +64,8 @@ def _regex_rule(name: str, value: Any, params: dict[str, Any], today: date) -> l
         matched = regex.search(params["pattern"], str(value)[:REGEX_VALUE_MAX], timeout=REGEX_TIMEOUT)
     except TimeoutError:
         return [Issue(name, "pattern_timeout", "проверка по шаблону не уложилась во время")]
+    except regex.error:  # шаблон старой версии схемы, сохранённый до перехода на пакет regex
+        return [Issue(name, "pattern_invalid", "шаблон проверки не работает: проверьте значение вручную")]
     if matched:
         return []
     return [Issue(name, "pattern", f"значение «{value}» не соответствует формату {params['pattern']}")]

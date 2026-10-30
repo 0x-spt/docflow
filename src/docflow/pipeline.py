@@ -211,6 +211,14 @@ async def _run(deps: Deps, session: AsyncSession, document_id: UUID) -> tuple[bo
         schema = await _detect_schema(deps, session, document_id, tenant_id, extractor, images[0])
         dictionaries, rules, rule_dictionaries = await _load_context(session, tenant_id, schema)
         await session.commit()
+    # с этого момента страницы считаются, чем бы ни кончилось: запись до вызова переживёт и таймаут, и смерть воркера
+    await session.execute(
+        update(Document)
+        .where(Document.id == document_id, Document.status == "processing")
+        .values(model=extractor.model)
+        .execution_options(synchronize_session=False)
+    )
+    await session.commit()
     extraction = await asyncio.to_thread(extractor.extract, schema, images)
     del images
     data, issues = normalize(schema, extraction.raw)

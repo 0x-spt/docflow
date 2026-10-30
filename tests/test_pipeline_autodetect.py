@@ -18,6 +18,7 @@ from docflow.pipeline import AUTODETECT_FAILED, Deps, SchemaResolver, process_do
 from docflow.queue import DELIVER_EXPORT, DELIVER_WEBHOOK, ListEnqueuer
 from docflow.secrets import encrypt_secrets
 from docflow.storage.blobs import LocalBlobStore
+from docflow.usage import pages_used
 
 sys.path.insert(0, str(Path(__file__).parent / "channels"))
 from fake_telegram import FakeTelegram  # noqa: E402
@@ -86,6 +87,38 @@ async def test_auto_classify_error_fails(sm, tmp_path, exc):
     doc = await load(deps, doc_id)
     assert doc.status == "failed" and doc.error == AUTODETECT_FAILED
     assert doc.finished_at is not None
+
+
+async def _pages_of_failed(deps, doc_id) -> int:
+    async with deps.sessionmaker() as s:
+        doc = await s.get(Document, doc_id)
+        doc.pages = 3
+        tenant_id = doc.tenant_id
+        await s.commit()
+    await process_document(deps, doc_id)
+    assert (await load(deps, doc_id)).status == "failed"
+    async with deps.sessionmaker() as s:
+        return await pages_used(s, tenant_id)
+
+
+async def test_classify_failure_pages_not_counted(sm, tmp_path):
+    deps = make_deps(sm, tmp_path, extractor=ClassifyRaises(ExtractionError("api_error")))
+    assert await _pages_of_failed(deps, await auto_doc(deps)) == 0
+
+
+async def test_extraction_error_pages_counted(sm, tmp_path):
+    deps = make_deps(sm, tmp_path, extractor=FailsOnExtract())
+    assert await _pages_of_failed(deps, await auto_doc(deps)) == 3
+
+
+class FailsOnExtract:
+    model = "fails"
+
+    def classify(self, types, image):
+        return "invoice_ru"
+
+    def extract(self, schema, images):
+        raise ExtractionError("api_error")
 
 
 class SpyRaises:
