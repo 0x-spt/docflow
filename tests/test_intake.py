@@ -14,12 +14,14 @@ from docflow.intake import (  # noqa: E402
     IntakeEnqueueFailed,
     IntakeFile,
     IntakeInvalid,
+    IntakeLimitExceeded,
     IntakeStorageFailed,
     IntakeTooLarge,
     IntakeUnsupported,
     accept_document,
 )
 from docflow.pipeline import SchemaResolver  # noqa: E402
+from docflow.plans import apply_plan  # noqa: E402
 from docflow.queue import PROCESS_DOCUMENT, ListEnqueuer  # noqa: E402
 from docflow.storage.blobs import LocalBlobStore  # noqa: E402
 
@@ -142,3 +144,65 @@ async def test_storage_failure_leaves_no_document(sm, deps, tenant_id):
             await accept_document(s, deps, tenant_id=tenant_id, schema_slug="invoice_ru", files=[png()])
     assert await doc_count(sm) == 0
     assert deps.enqueuer.calls == []
+
+
+async def fill_pages(sm, tenant_id, pages):
+    async with sm() as s:
+        s.add(
+            Document(
+                tenant_id=tenant_id, schema_slug="invoice_ru", schema_version=1, status="ok", files=[], mode="gray",
+                pages=pages,
+            )
+        )
+        await s.commit()
+
+
+async def test_limit_blocks_at_limit(sm, deps, tenant_id):
+    await fill_pages(sm, tenant_id, 50)
+
+    async def boom(limit):
+        raise AssertionError("файл не должен читаться")
+
+    async with sm() as s:
+        with pytest.raises(IntakeLimitExceeded) as exc:
+            await accept_document(
+                s, deps, tenant_id=tenant_id, schema_slug="invoice_ru", files=[IntakeFile("a.png", boom)]
+            )
+    assert exc.value.message == "Лимит страниц на месяц исчерпан (50 из 50)"
+
+
+async def test_document_started_within_limit_accepted_whole(sm, deps, tenant_id):
+    await fill_pages(sm, tenant_id, 49)
+    async with sm() as s:
+        result = await accept_document(
+            s, deps, tenant_id=tenant_id, schema_slug="invoice_ru", files=[IntakeFile.of("a.pdf", pdf_bytes(5))]
+        )
+    assert result.created is True
+    async with sm() as s:
+        with pytest.raises(IntakeLimitExceeded) as exc:
+            await accept_document(s, deps, tenant_id=tenant_id, schema_slug="invoice_ru", files=[png()])
+    assert exc.value.message == "Лимит страниц на месяц исчерпан (54 из 50)"
+
+
+async def test_unlimited_plan_never_blocks(sm, deps, tenant_id):
+    async with sm() as s:
+        apply_plan(await s.get(Tenant, tenant_id), "unlimited")
+        await s.commit()
+    await fill_pages(sm, tenant_id, 100000)
+    async with sm() as s:
+        result = await accept_document(s, deps, tenant_id=tenant_id, schema_slug="invoice_ru", files=[png()])
+    assert result.created is True
+
+
+async def test_replay_over_limit_returns_existing(sm, deps, tenant_id):
+    async with sm() as s:
+        first = await accept_document(
+            s, deps, tenant_id=tenant_id, schema_slug="invoice_ru", files=[png()], idempotency_key="k"
+        )
+    await fill_pages(sm, tenant_id, 100)
+    async with sm() as s:
+        second = await accept_document(
+            s, deps, tenant_id=tenant_id, schema_slug="invoice_ru", files=[png()], idempotency_key="k"
+        )
+    assert second.created is False
+    assert second.document.id == first.document.id

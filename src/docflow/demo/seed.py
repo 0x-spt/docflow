@@ -47,6 +47,7 @@ from docflow.demo.data import (
 from docflow.demo.render import render_photo
 from docflow.pdf.build import OcrEngine
 from docflow.pipeline import Deps, SchemaResolver, process_document
+from docflow.plans import apply_plan
 from docflow.queue import Enqueuer
 from docflow.review import review_document, route_approved
 from docflow.routing_model import RulesIn
@@ -211,6 +212,7 @@ async def _create_tenant(
     plain, prefix, key_hash = generate_api_key()
     async with sm() as session:
         tenant = Tenant(name=DEMO_TENANT_NAME, extractor="ollama", auto_ok=True)
+        apply_plan(tenant, "business")  # на демо видна полоска тарифа
         session.add(tenant)
         await session.flush()
         tid = tenant.id

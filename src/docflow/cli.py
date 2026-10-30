@@ -24,6 +24,7 @@ from docflow.db.models import ApiKey, Lead, SchemaRecord, Tenant, User, generate
 from docflow.db.session import make_engine, make_sessionmaker
 from docflow.evaluation import format_report, run_eval
 from docflow.extraction.base import Extractor
+from docflow.plans import DEFAULT_PLAN, PLANS, apply_plan
 from docflow.schemas.library import builtin_schemas
 from docflow.targets import targets_text
 
@@ -72,12 +73,13 @@ def cmd_eval(args: argparse.Namespace) -> int:
     return 0
 
 
-async def _create_tenant(name: str, extractor: str, auto_ok: bool) -> tuple[uuid.UUID, str]:
+async def _create_tenant(name: str, extractor: str, auto_ok: bool, plan: str) -> tuple[uuid.UUID, str]:
     engine = make_engine(get_settings().database_url)
     try:
         plain, prefix, key_hash = generate_api_key()
         async with make_sessionmaker(engine)() as session:
             tenant = Tenant(name=name, extractor=extractor, auto_ok=auto_ok)
+            apply_plan(tenant, plan)
             session.add(tenant)
             await session.flush()
             session.add(ApiKey(tenant_id=tenant.id, prefix=prefix, key_hash=key_hash))
@@ -102,9 +104,10 @@ def cmd_create_tenant(args: argparse.Namespace) -> int:
         raise UserError("имя клиента не может быть пустым")
     # локальная модель уверенно ошибается в фамилиях и названиях, пока её точность не измерена
     auto_ok = args.extractor == "claude" if args.auto_ok is None else args.auto_ok == "yes"
-    tenant_id, key = asyncio.run(_create_tenant(name, args.extractor, auto_ok))
+    tenant_id, key = asyncio.run(_create_tenant(name, args.extractor, auto_ok, args.plan))
     print(f"Клиент «{name}» создан, id {tenant_id}.")
     print(_auto_ok_line(auto_ok))
+    print(_plan_line(args.plan))
     print(f"API-ключ: {key}")
     print("ВНИМАНИЕ: ключ больше не будет показан. Сохраните его сейчас.")
     return 0
@@ -133,6 +136,38 @@ def cmd_set_auto_ok(args: argparse.Namespace) -> int:
     if not asyncio.run(_set_auto_ok(tenant_id, auto_ok)):
         raise UserError(f"клиент {tenant_id} не найден")
     print(_auto_ok_line(auto_ok))
+    return 0
+
+
+def _plan_line(code: str) -> str:
+    plan = PLANS[code]
+    if plan.pages_limit is None:
+        return f"Тариф: {plan.title}"
+    return f"Тариф: {plan.title}, {plan.pages_limit} страниц в месяц"
+
+
+async def _set_plan(tenant_id: uuid.UUID, plan: str) -> bool:
+    engine = make_engine(get_settings().database_url)
+    try:
+        async with make_sessionmaker(engine)() as session:
+            tenant = await session.get(Tenant, tenant_id)
+            if tenant is None:
+                return False
+            apply_plan(tenant, plan)
+            await session.commit()
+            return True
+    finally:
+        await engine.dispose()
+
+
+def cmd_tenant_plan(args: argparse.Namespace) -> int:
+    try:
+        tenant_id = uuid.UUID(args.tenant_id)
+    except ValueError:
+        raise UserError(f"«{args.tenant_id}» — не id клиента") from None
+    if not asyncio.run(_set_plan(tenant_id, args.plan)):
+        raise UserError(f"клиент {tenant_id} не найден")
+    print(_plan_line(args.plan))
     return 0
 
 
@@ -329,12 +364,18 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["yes", "no"],
         help="ставить ok без человека (по умолчанию: да для claude, нет для ollama)",
     )
+    ct.add_argument("--plan", choices=list(PLANS), default=DEFAULT_PLAN, help="тариф (по умолчанию trial)")
     ct.set_defaults(func=cmd_create_tenant)
 
     sa = sub.add_parser("set-auto-ok", help="разрешить или запретить клиенту автоматический ok")
     sa.add_argument("tenant_id", help="id клиента (печатается при create-tenant)")
     sa.add_argument("value", choices=["yes", "no"])
     sa.set_defaults(func=cmd_set_auto_ok)
+
+    tp = sub.add_parser("tenant-plan", help="сменить тариф клиента")
+    tp.add_argument("tenant_id", help="id клиента (печатается при create-tenant)")
+    tp.add_argument("plan", choices=list(PLANS))
+    tp.set_defaults(func=cmd_tenant_plan)
 
     cu = sub.add_parser("create-user", help="создать пользователя кабинета для клиента")
     cu.add_argument("tenant_id", help="id клиента (печатается при create-tenant)")

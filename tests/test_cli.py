@@ -329,3 +329,33 @@ def test_cli_seed_demo_bad_google_key_exit_1(tmp_path, capsys):
     bad.write_text("[1]", encoding="utf-8")
     assert main(["seed-demo", "--google-key", str(bad), "--google-sheet", "x"]) == 1
     assert "ключ" in capsys.readouterr().err
+
+
+def test_tenant_plan_sets_plan_and_limit(db_url, capsys):
+    main(["create-tenant", "Ромашка"])
+    tid = _query(db_url, lambda s: s.scalar(select(Tenant.id)))
+    assert main(["tenant-plan", str(tid), "start"]) == 0
+    assert "Тариф: Старт, 500 страниц в месяц" in capsys.readouterr().out
+    tenant = _query(db_url, lambda s: s.get(Tenant, tid))
+    assert (tenant.plan, tenant.pages_limit) == ("start", 500)
+    assert main(["tenant-plan", str(tid), "unlimited"]) == 0
+    assert "Тариф: Без лимита" in capsys.readouterr().out
+    tenant = _query(db_url, lambda s: s.get(Tenant, tid))
+    assert (tenant.plan, tenant.pages_limit) == ("unlimited", None)
+
+
+def test_tenant_plan_unknown_tenant(db_url, capsys):
+    assert main(["tenant-plan", "00000000-0000-0000-0000-000000000000", "start"]) != 0
+    assert "не найден" in capsys.readouterr().err
+
+
+def test_create_tenant_defaults_to_trial(db_url):
+    main(["create-tenant", "Ромашка"])
+    tenant = _query(db_url, lambda s: s.scalar(select(Tenant)))
+    assert (tenant.plan, tenant.pages_limit) == ("trial", 50)
+
+
+def test_create_tenant_with_plan(db_url):
+    main(["create-tenant", "Ромашка", "--plan", "business"])
+    tenant = _query(db_url, lambda s: s.scalar(select(Tenant)))
+    assert (tenant.plan, tenant.pages_limit) == ("business", 3000)

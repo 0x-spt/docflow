@@ -26,6 +26,7 @@ from docflow.api import (
     routing,
     schemas,
     stats,
+    usage,
     webhooks,
 )
 from docflow.api.limits import RequestSizeLimit
@@ -116,6 +117,7 @@ def create_app(
     app.include_router(apikeys.router)
     app.include_router(documents.router)
     app.include_router(stats.router)
+    app.include_router(usage.router)
     app.include_router(schemas.router)
     app.include_router(webhooks.router)
     app.include_router(destinations.router)

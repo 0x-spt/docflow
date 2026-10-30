@@ -12,11 +12,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from docflow.config import Settings
-from docflow.db.models import Document
+from docflow.db.models import Document, Tenant
 from docflow.imaging.load import UnsupportedFile, count_pages, detect_kind
 from docflow.pipeline import SchemaResolver, process_job_id
 from docflow.queue import PROCESS_DOCUMENT, Enqueuer
 from docflow.storage.blobs import BlobStore, original_key
+from docflow.usage import limit_message, pages_used
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,16 @@ async def find_by_idempotency_key(session: AsyncSession, tenant_id: uuid.UUID, k
     ).scalar_one_or_none()
 
 
+async def check_limit(session: AsyncSession, tenant_id: uuid.UUID) -> None:
+    """Отказ, если страницы месяца уже исчерпаны. Документ, начатый в лимите, принимается целиком."""
+    limit = await session.scalar(select(Tenant.pages_limit).where(Tenant.id == tenant_id))
+    if limit is None:
+        return
+    used = await pages_used(session, tenant_id)
+    if used >= limit:
+        raise IntakeLimitExceeded(limit_message(used, limit))
+
+
 async def accept_document(
     session: AsyncSession,
     deps: IntakeDeps,
@@ -135,6 +146,7 @@ async def accept_document(
         existing = await find_by_idempotency_key(session, tenant_id, idempotency_key)
         if existing is not None:
             return IntakeResult(existing, created=False)
+    await check_limit(session, tenant_id)
 
     # в каждом файле минимум страница: лишние файлы отсекаем, не читая ни одного
     if len(files) > settings.max_pages:
