@@ -1,10 +1,12 @@
 "use server";
 
-import { unstable_rethrow } from "next/navigation";
+import { revalidatePath } from "next/cache";
+import { redirect, unstable_rethrow } from "next/navigation";
 
 import { ApiError } from "@/lib/api";
+import { errorTargets } from "@/lib/field-builder/errors";
 import { apiFetchAuthed } from "@/lib/session";
-import type { FieldLabels } from "@/lib/types";
+import type { DocSchema, FieldLabels } from "@/lib/types";
 
 export type LabelsState = { saved?: boolean; error?: string; fieldErrors?: Record<string, string> };
 
@@ -39,4 +41,39 @@ export async function saveLabels(slug: string, _prev: LabelsState, form: FormDat
   }
   // без revalidatePath: форма уже показывает сохранённое, перемонтирование стёрло бы сообщение
   return { saved: true };
+}
+
+export type SchemaSaveState = { error?: string; errors?: Record<string, string> };
+
+const SCHEMA_SLUG_RE = /^[a-z0-9_]{2,40}$/;
+
+/** Сохранить тип документа новой версией. `expectedVersion` — версия, с которой начал редактор (0 — новый тип). */
+export async function saveSchema(schema: DocSchema, expectedVersion: number): Promise<SchemaSaveState> {
+  if (!schema || typeof schema.slug !== "string" || !SCHEMA_SLUG_RE.test(schema.slug)) {
+    return { error: "Некорректное служебное имя типа документа" };
+  }
+  if (!Array.isArray(schema.fields)) return { error: "Не удалось прочитать поля. Обновите страницу." };
+  if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
+    return { error: "Не удалось прочитать версию типа. Обновите страницу." };
+  }
+  let saved: DocSchema;
+  try {
+    saved = await apiFetchAuthed<DocSchema>(`/v1/schemas?expected_version=${expectedVersion}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(schema),
+    });
+  } catch (e) {
+    unstable_rethrow(e);
+    if (e instanceof ApiError && e.status === 422) {
+      const errors = errorTargets(e.errors, schema);
+      return { error: errors.general ?? "Сервер не принял схему: исправьте отмеченное.", errors };
+    }
+    if (e instanceof ApiError && (e.status === 409 || e.status === 404)) return { error: e.detail };
+    if (e instanceof ApiError && e.status === 403) return { error: "Поля меняет владелец аккаунта." };
+    console.error("схема не сохранена", schema.slug, e);
+    return { error: "Не удалось сохранить: сервис недоступен. Попробуйте ещё раз." };
+  }
+  revalidatePath("/app/fields");
+  redirect(`/app/fields?schema=${encodeURIComponent(saved.slug)}&saved=${saved.version}`);
 }

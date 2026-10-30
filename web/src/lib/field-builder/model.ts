@@ -35,6 +35,8 @@ export interface EditorDoc {
   fields: EditorField[];
   rules: RuleSpec[];
   seq: number; // счётчик uid новых строк
+  // имена сохранённых полей («поле») и колонок («таблица.колонка»), удалённых в этой правке: новым строкам не даём
+  reserved: string[];
 }
 
 export const TYPE_OPTIONS: { value: FieldType; label: string }[] = [
@@ -125,6 +127,7 @@ export function fromSchema(schema: DocSchema): EditorDoc {
     fields: schema.fields.map(fieldFromSchema),
     rules: schema.rules ?? [],
     seq: 0,
+    reserved: [],
   };
 }
 
@@ -166,7 +169,17 @@ export function newDoc(): EditorDoc {
     required: true,
     notFuture: true,
   };
-  return { slug: "", isNew: true, title: "", description: "", version: 0, fields: [number, issued], rules: [], seq: 0 };
+  return {
+    slug: "",
+    isNew: true,
+    title: "",
+    description: "",
+    version: 0,
+    fields: [number, issued],
+    rules: [],
+    seq: 0,
+    reserved: [],
+  };
 }
 
 /** Новое поле с uid `n<seq>`; в список его вставляет вызывающий. */
@@ -193,8 +206,9 @@ export function newColumn(doc: EditorDoc): [EditorDoc, EditorColumn] {
 function assignNames<T extends { name: string; isNew: boolean; title: string }>(
   rows: readonly T[],
   renamed: Map<string, string>,
+  reserved: readonly string[],
 ): T[] {
-  const taken = new Set(rows.filter((r) => !r.isNew).map((r) => r.name));
+  const taken = new Set([...reserved, ...rows.filter((r) => !r.isNew).map((r) => r.name)]);
   return rows.map((r) => {
     if (!r.isNew) return r;
     const name = uniqueName(toIdentifier(r.title), taken);
@@ -229,9 +243,12 @@ export function withNames(doc: EditorDoc): EditorDoc {
   const fieldRenamed = new Map<string, string>();
   // колонки — по прежнему имени таблицы: так на них ссылаются правила до переписывания
   const colRenamed = new Map<string, Map<string, string>>();
-  const fields = assignNames(doc.fields, fieldRenamed).map((f, i) => {
+  const reservedFields = doc.reserved.filter((k) => !k.includes("."));
+  const fields = assignNames(doc.fields, fieldRenamed, reservedFields).map((f, i) => {
     const renamed = new Map<string, string>();
-    const columns = assignNames(f.columns, renamed);
+    const prefix = `${f.name}.`;
+    const reservedCols = doc.reserved.filter((k) => k.startsWith(prefix)).map((k) => k.slice(prefix.length));
+    const columns = assignNames(f.columns, renamed, reservedCols);
     if (renamed.size) colRenamed.set(doc.fields[i].name, renamed);
     return columns === f.columns || columns.every((c, j) => c === f.columns[j]) ? f : { ...f, columns };
   });
@@ -398,6 +415,31 @@ export function deleteBlockers(doc: EditorDoc, fieldIndex: number, columnIndex?:
   }
   const titleOf = titleResolver(d, {});
   return rulesUsing(d.rules, key).map((i) => rulePhrase(d.rules[i], titleOf));
+}
+
+/** Удалить поле; имя сохранённого поля остаётся занятым до конца правки. */
+export function removeField(doc: EditorDoc, index: number): EditorDoc {
+  const f = doc.fields[index];
+  if (!f) return doc;
+  return {
+    ...doc,
+    fields: doc.fields.filter((_, i) => i !== index),
+    reserved: f.base ? [...doc.reserved, f.name] : doc.reserved,
+  };
+}
+
+/** Удалить колонку таблицы; имя сохранённой колонки остаётся занятым в этой таблице. */
+export function removeColumn(doc: EditorDoc, fieldIndex: number, columnIndex: number): EditorDoc {
+  const f = doc.fields[fieldIndex];
+  const c = f?.columns[columnIndex];
+  if (!c) return doc;
+  return {
+    ...doc,
+    fields: doc.fields.map((x, i) =>
+      i === fieldIndex ? { ...x, columns: x.columns.filter((_, j) => j !== columnIndex) } : x,
+    ),
+    reserved: c.base ? [...doc.reserved, `${f.name}.${c.name}`] : doc.reserved,
+  };
 }
 
 /** Сдвиг элемента на одну позицию; на краю списка — копия без изменений. */

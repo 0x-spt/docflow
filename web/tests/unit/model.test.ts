@@ -9,6 +9,8 @@ import {
   newColumn,
   newDoc,
   newField,
+  removeColumn,
+  removeField,
   toSchema,
   validateDoc,
   withNames,
@@ -210,4 +212,27 @@ test("move at list edges leaves list unchanged", () => {
   assert.deepEqual(move([1, 2, 3], 2, 1), [1, 2, 3]);
   assert.deepEqual(move([1, 2, 3], 0, 1), [2, 1, 3]);
   assert.deepEqual(move([1, 2, 3], 2, -1), [1, 3, 2]);
+});
+
+test("names of existing rows deleted in the session stay reserved", () => {
+  let doc = invoice();
+  doc = removeField(doc, doc.fields.findIndex((f) => f.name === "buyer"));
+  assert.ok(!doc.fields.some((f) => f.name === "buyer"));
+  doc = withNames(addField(doc, { title: "Buyer" }));
+  assert.equal(doc.fields.at(-1)!.name, "buyer_2");
+
+  const t = doc.fields.findIndex((f) => f.name === "items");
+  doc = removeColumn(doc, t, doc.fields[t].columns.findIndex((c) => c.name === "unit"));
+  const [next, c] = newColumn(doc);
+  doc = withNames({
+    ...next,
+    fields: next.fields.map((f, k) => (k === t ? { ...f, columns: [...f.columns, { ...c, title: "Unit" }] } : f)),
+  });
+  assert.equal(doc.fields[t].columns.at(-1)!.name, "unit_2");
+
+  // новые строки, удалённые до сохранения, имя не держат
+  doc = withNames(addField(doc, { title: "Temp" }));
+  doc = removeField(doc, doc.fields.length - 1);
+  doc = withNames(addField(doc, { title: "Temp" }));
+  assert.equal(doc.fields.at(-1)!.name, "temp");
 });

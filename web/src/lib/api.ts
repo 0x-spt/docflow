@@ -3,6 +3,7 @@ import "server-only";
 import { headers } from "next/headers";
 
 import { getSessionToken } from "./session";
+import type { ValidationItem } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -10,6 +11,8 @@ export class ApiError extends Error {
     public readonly detail: string,
     /** Ошибки по полям формы: ключ поля («vat», «items.qty») или «queue_fields» -> текст. */
     public readonly fieldErrors: Record<string, string> = {},
+    /** Ошибки валидации FastAPI как есть (`loc` и `msg`); строковый `detail` — пусто. */
+    public readonly errors: ValidationItem[] = [],
   ) {
     super(detail);
     this.name = "ApiError";
@@ -83,6 +86,23 @@ function fieldErrorsOf(body: unknown): Record<string, string> {
   return out;
 }
 
+/** Элементы `detail[]` с путём `loc` и текстом `msg`; строковый `detail` — пусто. */
+function validationItemsOf(body: unknown): ValidationItem[] {
+  const detail = (body as { detail?: unknown } | null)?.detail;
+  if (!Array.isArray(detail)) return [];
+  const out: ValidationItem[] = [];
+  for (const d of detail) {
+    if (!d || typeof d !== "object") continue;
+    const { loc, msg } = d as { loc?: unknown; msg?: unknown };
+    if (typeof msg !== "string") continue;
+    const path = Array.isArray(loc)
+      ? loc.filter((x): x is string | number => typeof x === "string" || typeof x === "number")
+      : [];
+    out.push({ loc: path, msg });
+  }
+  return out;
+}
+
 /** JSON-запрос: 204 → undefined, не-2xx → ApiError с `detail` из тела. */
 export async function apiFetch<T>(path: string, init: FetchInit = {}): Promise<T> {
   const res = await apiFetchRaw(path, init);
@@ -94,7 +114,12 @@ export async function apiFetch<T>(path: string, init: FetchInit = {}): Promise<T
     } catch {
       // тело не JSON — остаётся статусный текст
     }
-    throw new ApiError(res.status, detailOf(body, res.statusText || `ошибка ${res.status}`), fieldErrorsOf(body));
+    throw new ApiError(
+      res.status,
+      detailOf(body, res.statusText || `ошибка ${res.status}`),
+      fieldErrorsOf(body),
+      validationItemsOf(body),
+    );
   }
   return (await res.json()) as T;
 }
