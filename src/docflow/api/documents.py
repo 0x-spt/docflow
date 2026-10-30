@@ -10,8 +10,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, File, Form, Header, HTTPException, Query, Response, UploadFile, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from docflow.api.deps import (
@@ -24,17 +23,26 @@ from docflow.api.deps import (
     TenantDep,
     parse_id,
 )
-from docflow.api.limits import request_limit_bytes
 from docflow.db.models import Document
-from docflow.imaging.load import UnsupportedFile, count_pages, detect_kind
+from docflow.intake import (
+    IntakeDeps,
+    IntakeEnqueueFailed,
+    IntakeError,
+    IntakeFile,
+    IntakeInvalid,
+    IntakeLimitExceeded,
+    IntakeStorageFailed,
+    IntakeTooLarge,
+    IntakeUnsupported,
+    accept_document,
+)
 from docflow.labels import LabelSet, apply_labels, get_label_sets, queue_fields_for, resolve_labeled
 from docflow.pdf.digital import render_digital_pdf
-from docflow.pipeline import SchemaNotFound, process_job_id
-from docflow.queue import PROCESS_DOCUMENT
+from docflow.pipeline import SchemaNotFound
 from docflow.review import ReviewConflict, review_document, route_approved
 from docflow.schemas.model import DocSchema
 from docflow.serializers import document_exports, document_payload
-from docflow.storage.blobs import BlobNotFound, original_key, page_key, scan_key
+from docflow.storage.blobs import BlobNotFound, page_key, scan_key
 from docflow.validation.engine import INFO_CODES
 from docflow.webhooks import EVENT_REVIEWED, enqueue_webhooks
 
@@ -42,63 +50,37 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/documents", tags=["documents"])
 
-MODES = ("color", "gray", "bw")
 DocStatus = Literal["queued", "processing", "ok", "needs_review", "failed"]
 SUMMARY_FIELDS = 3
 CHUNK = 1024 * 1024
 NOT_FOUND = "документ не найден"
-ENQUEUE_ERROR = "не удалось поставить документ в очередь, загрузите его заново"
 IDEMPOTENCY_KEY_MAX = 255
 REVIEW_CONFLICT = "документ уже проверен или ещё обрабатывается"
 REVIEW_NOTE_MAX = 1000
 
 # сигнатура → MIME для хранилища; заголовку клиента не верим
-_IMAGE_TYPES = (
-    (b"\xff\xd8\xff", "image/jpeg"),
-    (b"\x89PNG", "image/png"),
-    (b"II*\x00", "image/tiff"),
-    (b"MM\x00*", "image/tiff"),
-)
-
-
-def _request_limit(settings) -> int:
-    return request_limit_bytes(settings)
-
-
-def _content_type(data: bytes, kind: str) -> str:
-    if kind == "pdf":
-        return "application/pdf"
-    for magic, mime in _IMAGE_TYPES:
-        if data.startswith(magic):
-            return mime
-    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "image/webp"
-    return "image/heic"  # остальное detect_kind признаёт только по ftyp HEIF
+_INTAKE_STATUS: dict[type[IntakeError], int] = {
+    IntakeInvalid: status.HTTP_422_UNPROCESSABLE_CONTENT,
+    IntakeTooLarge: status.HTTP_413_CONTENT_TOO_LARGE,
+    IntakeUnsupported: status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+    IntakeLimitExceeded: status.HTTP_402_PAYMENT_REQUIRED,
+    IntakeStorageFailed: status.HTTP_500_INTERNAL_SERVER_ERROR,
+    IntakeEnqueueFailed: status.HTTP_503_SERVICE_UNAVAILABLE,
+}
 
 
 def _accepted(document: Document) -> dict:
     return {"id": str(document.id), "status": document.status}
 
 
-async def _find_by_idempotency_key(session: AsyncSession, tenant_id: uuid.UUID, key: str) -> Document | None:
-    return (
-        await session.execute(
-            select(Document).where(Document.tenant_id == tenant_id, Document.idempotency_key == key)
-        )
-    ).scalar_one_or_none()
-
-
 async def _read_capped(upload: UploadFile, limit: int, max_mb: int) -> bytes:
-    """Читает файл кусками и бросает 413, как только набралось больше лимита: 2 ГБ в память не попадут."""
+    """Читает файл кусками и бросает IntakeTooLarge, как только набралось больше лимита: 2 ГБ в память не попадут."""
     chunks: list[bytes] = []
     size = 0
     while chunk := await upload.read(CHUNK):
         size += len(chunk)
         if size > limit:
-            raise HTTPException(
-                status.HTTP_413_CONTENT_TOO_LARGE,
-                f"Файл «{upload.filename}» больше {max_mb} МБ",
-            )
+            raise IntakeTooLarge(f"Файл «{upload.filename}» больше {max_mb} МБ")
         chunks.append(chunk)
     return b"".join(chunks)
 
@@ -126,7 +108,7 @@ async def _get_own(session: AsyncSession, tenant_id: uuid.UUID, raw_id: str) -> 
     responses={200: {"description": "Документ с этим Idempotency-Key уже был принят"}},
 )
 async def upload_document(
-    tenant_id: TenantDep,
+    principal: PrincipalDep,
     session: SessionDep,
     settings: SettingsDep,
     blobs: BlobsDep,
@@ -138,110 +120,29 @@ async def upload_document(
     mode: Annotated[str, Form(description="Режим скана: color, gray или bw")] = "gray",
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=IDEMPOTENCY_KEY_MAX)] = None,
 ):
-    try:
-        schema = await resolver.resolve(session, tenant_id, schema_slug, schema_version)
-    except LookupError as exc:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from None
-    if mode not in MODES:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "mode должен быть одним из: color, gray, bw")
-
-    if idempotency_key is not None:
-        existing = await _find_by_idempotency_key(session, tenant_id, idempotency_key)
-        if existing is not None:
-            return JSONResponse(_accepted(existing), status_code=status.HTTP_200_OK)
-
-    files = files or []
-    # в каждом файле минимум страница: лишние файлы отсекаем, не читая ни одного
-    if len(files) > settings.max_pages:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            f"Слишком много файлов: больше {settings.max_pages} на документ",
+    intake_files = [
+        IntakeFile(
+            upload.filename or "file",
+            lambda limit, upload=upload: _read_capped(upload, limit, settings.max_file_mb),
         )
-    limit = settings.max_file_mb * 1024 * 1024
-    total_limit = _request_limit(settings)
-    contents: list[tuple[str, bytes, str]] = []
-    total_pages = 0
-    total_bytes = 0
-    for upload in files:
-        filename = upload.filename or "file"
-        data = await _read_capped(upload, limit, settings.max_file_mb)
-        total_bytes += len(data)
-        if total_bytes > total_limit:
-            raise HTTPException(
-                status.HTTP_413_CONTENT_TOO_LARGE,
-                f"Файлы документа вместе больше {settings.max_request_mb} МБ",
-            )
-        kind = detect_kind(data)
-        if kind is None:
-            raise HTTPException(
-                status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-                f"Файл «{filename}»: неподдерживаемый формат (нужны JPEG, PNG, WEBP, TIFF, HEIC или PDF)",
-            )
-        try:
-            total_pages += await asyncio.to_thread(count_pages, data, filename)
-        except UnsupportedFile as exc:
-            raise HTTPException(status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, str(exc)) from None
-        if total_pages > settings.max_pages:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_CONTENT,
-                f"Слишком много страниц: больше {settings.max_pages} на документ",
-            )
-        contents.append((filename, data, _content_type(data, kind)))
-    if not contents:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Нужен хотя бы один файл в поле files")
-
-    doc_id = uuid.uuid4()
-    keys = [original_key(str(doc_id), n, name) for n, (name, _, _) in enumerate(contents, start=1)]
-    document = Document(
-        id=doc_id,
-        tenant_id=tenant_id,
-        schema_slug=schema.slug,
-        schema_version=schema.version,
-        status="queued",
-        idempotency_key=idempotency_key,
-        files=keys,
-        mode=mode,
-    )
-    session.add(document)
+        for upload in files or []
+    ]
     try:
-        # flush до записи файлов: гонку по Idempotency-Key ловим раньше, чем насорим в хранилище
-        await session.flush()
-    except IntegrityError:
-        await session.rollback()
-        winner = await _find_by_idempotency_key(session, tenant_id, idempotency_key) if idempotency_key else None
-        if winner is None:
-            raise
-        return JSONResponse(_accepted(winner), status_code=status.HTTP_200_OK)
-
-    try:
-        for key, (_, data, content_type) in zip(keys, contents, strict=True):
-            await blobs.put(key, data, content_type)
-    except Exception:
-        # транзакция не закоммичена: queued-документа без файлов не останется
-        await session.rollback()
-        logger.exception("не удалось сохранить файлы документа %s", doc_id)
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Не удалось сохранить файлы") from None
-    await session.commit()
-
-    try:
-        await enqueuer.enqueue(PROCESS_DOCUMENT, str(doc_id), job_id=process_job_id(doc_id))
-    except Exception:
-        # без задачи queued-документ ждал бы крона перепостановки; failed сразу честнее — клиент повторит загрузку
-        logger.exception("не удалось поставить документ %s в очередь", doc_id)
-        # Ошибка enqueue не значит, что задачи нет: Redis мог принять её и оборвать ответ, а воркер — уже
-        # забрать документ. Поэтому failed только из queued, условным UPDATE, а не перезаписью статуса.
-        res = await session.execute(
-            update(Document)
-            .where(Document.id == doc_id, Document.status == "queued")
-            # освобождаем ключ: повтор клиента с тем же Idempotency-Key должен создать документ заново
-            .values(status="failed", error=ENQUEUE_ERROR, idempotency_key=None, finished_at=datetime.now(UTC))
-            .execution_options(synchronize_session=False)
+        result = await accept_document(
+            session,
+            IntakeDeps(settings=settings, blobs=blobs, enqueuer=enqueuer, resolver=resolver),
+            tenant_id=principal.tenant_id,
+            schema_slug=schema_slug,
+            files=intake_files,
+            schema_version=schema_version,
+            mode=mode,
+            idempotency_key=idempotency_key,
+            source="cabinet" if principal.user_id else "api",
         )
-        await session.commit()
-        if res.rowcount == 1:
-            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, ENQUEUE_ERROR) from None
-        logger.info("документ %s уже забран воркером, ошибка постановки не влияет", doc_id)
-    return _accepted(document)
+    except IntakeError as exc:
+        raise HTTPException(_INTAKE_STATUS[type(exc)], exc.message) from None
+    code = status.HTTP_202_ACCEPTED if result.created else status.HTTP_200_OK
+    return JSONResponse(_accepted(result.document), status_code=code)
 
 
 def _scalar(value: object) -> bool:

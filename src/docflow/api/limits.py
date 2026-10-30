@@ -6,11 +6,9 @@ FastAPI разбирает форму (а Starlette пишет файлы на �
 
 import json
 
+from docflow.intake import request_limit_bytes
+
 LIMITED = {("POST", "/v1/documents")}
-
-
-def request_limit_bytes(settings) -> int:
-    return settings.max_request_mb * 1024 * 1024
 
 
 class _TooLarge(Exception):

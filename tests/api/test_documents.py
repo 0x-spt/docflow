@@ -251,10 +251,10 @@ async def test_too_many_files_422_before_reading(api, auth, monkeypatch):
 
 
 async def test_total_bytes_cap_in_handler(api, auth, monkeypatch):
-    from docflow.api import documents
+    from docflow import intake
 
     # middleware пропускает (лимит проверяется по всему телу), а обработчик считает сумму файлов
-    monkeypatch.setattr(documents, "_request_limit", lambda settings: 1024 * 1024)
+    monkeypatch.setattr(intake, "request_limit_bytes", lambda settings: 1024 * 1024)
     part = png_bytes() + b"\0" * (600 * 1024)  # валидный PNG с хвостом: страница считается
     files = [("files", ("a.png", part, "image/png")), ("files", ("b.png", part, "image/png"))]
     r = await upload(api, auth, files=files)
@@ -410,12 +410,12 @@ async def test_openapi_meta(api):
 
 
 async def test_idempotency_race_returns_winner(api, auth, monkeypatch):
-    from docflow.api import documents
+    from docflow import intake
 
     h = {**auth, "Idempotency-Key": "race"}
     winner = (await upload(api, h)).json()
     # второй запрос «не увидел» победителя на шаге поиска и упёрся в UNIQUE при вставке
-    real = documents._find_by_idempotency_key
+    real = intake.find_by_idempotency_key
     calls = []
 
     async def miss_once(*args, **kwargs):
@@ -424,7 +424,7 @@ async def test_idempotency_race_returns_winner(api, auth, monkeypatch):
             return None
         return await real(*args, **kwargs)
 
-    monkeypatch.setattr(documents, "_find_by_idempotency_key", miss_once)
+    monkeypatch.setattr(intake, "find_by_idempotency_key", miss_once)
     r = await upload(api, h)
     assert r.status_code == 200, r.text
     assert r.json() == winner
@@ -683,3 +683,21 @@ async def test_digital_pdf_uses_labels(digital_font, api, auth, monkeypatch):
     r = await api.client.get(f"/v1/documents/{doc_id}/digital.pdf", headers=auth)
     assert r.status_code == 200
     assert next(f.title for f in seen[0].fields if f.name == "vat") == "Налог"
+
+
+async def test_upload_source_api_or_cabinet(api, auth):
+    from api_helpers import session_for
+
+    key_doc = (await upload(api, auth)).json()["id"]
+    cabinet, _ = await session_for(api, auth)
+    cabinet_doc = (await upload(api, cabinet)).json()["id"]
+    async with api.sessionmaker() as s:
+        assert (await s.get(Document, uuid.UUID(key_doc))).source == "api"
+        assert (await s.get(Document, uuid.UUID(cabinet_doc))).source == "cabinet"
+
+
+async def test_upload_stores_pages_at_intake(api, auth):
+    files = [("files", ("a.pdf", pdf_bytes(2), "application/pdf"))]
+    doc_id = (await upload(api, auth, files=files)).json()["id"]
+    r = await api.client.get(f"/v1/documents/{doc_id}", headers=auth)
+    assert r.json()["pages"] == 2
