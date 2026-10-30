@@ -1,6 +1,7 @@
 import pytest
 from test_pipeline import INVOICE, ChecksConnection, load, make_deps, make_doc, page_jpeg
 
+from docflow.db.models import Document, SchemaRecord
 from docflow.extraction.base import ExtractionError
 from docflow.extraction.fake import FakeExtractor
 from docflow.pdf.build import NoOcr
@@ -101,8 +102,9 @@ async def test_local_tenant_never_uses_cloud_for_classify(sm, tmp_path):
 
 
 async def test_auto_sees_tenant_types(sm, tmp_path):
-    fake = FakeExtractor({"nakladnaya": INVOICE, "_classify": "nakladnaya"})
+    fake = FakeExtractor({"nakladnaya": {"number": "7"}, "_classify": "nakladnaya"})
     deps = make_deps(sm, tmp_path, extractor=fake)
+    doc_id = await auto_doc(deps)  # документ ждёт определения: slug auto, версия 0
     body = {
         "slug": "nakladnaya",
         "title": "Накладная",
@@ -110,14 +112,20 @@ async def test_auto_sees_tenant_types(sm, tmp_path):
         "version": 1,
         "fields": [{"name": "number", "type": "string"}],
     }
-    doc_id = await auto_doc(deps, schema_body=body)
+    async with sm() as s:  # своя схема тенанта — версия 1, независимо от версии 0 документа
+        tenant_id = (await s.get(Document, doc_id)).tenant_id
+        s.add(SchemaRecord(tenant_id=tenant_id, slug="nakladnaya", version=1, body=body))
+        await s.commit()
     await process_document(deps, doc_id)
 
     types, _ = fake.classify_calls[0]
     own = next(t for t in types if t.slug == "nakladnaya")
     assert (own.title, own.description, own.builtin) == ("Накладная", "Товарная накладная поставщика", False)
     doc = await load(deps, doc_id)
-    assert doc.schema_slug == "nakladnaya" and doc.status != "processing"
+    assert doc.status in ("ok", "needs_review"), doc.error
+    assert (doc.schema_slug, doc.schema_version) == ("nakladnaya", 1)
+    assert doc.data == {"number": "7"}
+    assert fake.calls[0][0] == "nakladnaya"
 
 
 class ChecksConnectionClassify(ChecksConnection):

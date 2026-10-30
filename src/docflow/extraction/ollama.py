@@ -19,12 +19,13 @@ from docflow.schemas.model import DocSchema
 if TYPE_CHECKING:
     from docflow.schemas.catalog import DocType
 
-# локальная VLM медленная, но ответ обязан успеть до job_timeout воркера (360 с, см. worker.JOB_TIMEOUT)
+# локальная VLM медленная, но ответ обязан успеть до job_timeout воркера (480 с, см. worker.JOB_TIMEOUT)
 # вместе с подготовкой страниц и OCR; без повторов
 _TIMEOUT = 240.0
 # держать модель загруженной между документами: загрузка крупной модели — минуты и съела бы таймаут
 _KEEP_ALIVE = "1h"
-_CLASSIFY_TIMEOUT = 60.0
+# определение типа — первый вызов, а при холодном старте загрузка модели занимает минуты
+_CLASSIFY_TIMEOUT = 180.0
 
 
 class OllamaExtractor:

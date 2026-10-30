@@ -1,5 +1,5 @@
 """Подставной извлекатель для тестов и демо без модели: ответ по slug схемы."""
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from docflow.extraction.base import Extraction
 from docflow.schemas.model import DocSchema
@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 class FakeExtractor:
     model = "fake"
 
-    def __init__(self, responses: dict[str, dict]):
+    def __init__(self, responses: dict[str, Any]):
         self.responses = responses
         self.calls: list[tuple[str, list[bytes]]] = []  # (slug, картинки) — тесты проверяют порядок страниц
         self.classify_calls: list[tuple[list[DocType], bytes]] = []  # (типы, первая страница)

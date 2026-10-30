@@ -548,7 +548,7 @@ def test_worker_settings_registered():
     names = {f.name for f in ws.functions}
     assert names == {PROCESS_DOCUMENT, DELIVER_WEBHOOK, DELIVER_EXPORT}
     assert next(f for f in ws.functions if f.name == DELIVER_EXPORT).keep_result_s == 0
-    assert ws.max_jobs == 4 and ws.job_timeout == 360
+    assert ws.max_jobs == 4 and ws.job_timeout == 480
     assert ws.on_startup is worker.startup and ws.on_shutdown is worker.shutdown
     assert len(ws.cron_jobs) == 1
     cron = ws.cron_jobs[0]

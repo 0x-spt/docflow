@@ -22,14 +22,28 @@ if TYPE_CHECKING:
 _BETAS = ["server-side-fallback-2026-07-01"]
 # предел structured outputs: не больше 16 параметров с union-типом (nullable) на схему
 MAX_UNIONS = 16
-# Бюджет одного запроса должен укладываться в job_timeout воркера (360 с, см. worker.JOB_TIMEOUT):
+# Бюджет одного запроса должен укладываться в job_timeout воркера (480 с, см. worker.JOB_TIMEOUT):
 # по умолчанию SDK ждёт до 10 минут и делает 2 повтора — задачу убил бы arq, а поток с запросом жил бы дальше.
 # Один повтор оставлен для быстрых отказов (429/529/обрыв соединения); повтор после таймаута в бюджет
 # не влезет — тогда документ закроет job_timeout как failed.
 CLIENT_TIMEOUT = 240.0
 CLIENT_MAX_RETRIES = 1
-# определение типа — короткий запрос лёгкой модели; в бюджет задачи (worker.JOB_TIMEOUT) входит до 60 с
+# определение типа — короткий запрос лёгкой модели, в бюджет задачи (worker.JOB_TIMEOUT) входит целиком
 CLASSIFY_TIMEOUT = 30.0
+
+
+def _response_text(response) -> str:
+    """Текст ответа; отказ, обрыв и прочие stop_reason — ExtractionError."""
+    if response.stop_reason == "refusal":
+        raise ExtractionError("refusal")
+    if response.stop_reason in ("max_tokens", "model_context_window_exceeded"):
+        raise ExtractionError("max_tokens")
+    if response.stop_reason != "end_turn":
+        raise ExtractionError("api_error", f"неожиданный stop_reason: {response.stop_reason}")
+    text = next((b.text for b in response.content if b.type == "text"), None)
+    if text is None:
+        raise ExtractionError("invalid_json", "в ответе нет текстового блока")
+    return text
 
 
 class ClaudeExtractor:
@@ -70,15 +84,7 @@ class ClaudeExtractor:
         except anthropic.APIError as e:
             # Auth/BadRequest — ошибки конфигурации, не временные: сообщение оставляем видимым.
             raise ExtractionError("api_error", str(e)) from e
-        if response.stop_reason == "refusal":
-            raise ExtractionError("refusal")
-        if response.stop_reason in ("max_tokens", "model_context_window_exceeded"):
-            raise ExtractionError("max_tokens")
-        if response.stop_reason != "end_turn":
-            raise ExtractionError("api_error", f"неожиданный stop_reason: {response.stop_reason}")
-        text = next((b.text for b in response.content if b.type == "text"), None)
-        if text is None:
-            raise ExtractionError("invalid_json", "в ответе нет текстового блока")
+        text = _response_text(response)
         try:
             raw = json.loads(text)
         except json.JSONDecodeError as e:
@@ -113,15 +119,7 @@ class ClaudeExtractor:
             )
         except anthropic.APIError as e:
             raise ExtractionError("api_error", str(e)) from e
-        if response.stop_reason == "refusal":
-            raise ExtractionError("refusal")
-        if response.stop_reason in ("max_tokens", "model_context_window_exceeded"):
-            raise ExtractionError("max_tokens")
-        if response.stop_reason != "end_turn":
-            raise ExtractionError("api_error", f"неожиданный stop_reason: {response.stop_reason}")
-        text = next((b.text for b in response.content if b.type == "text"), None)
-        if text is None:
-            raise ExtractionError("invalid_json", "в ответе нет текстового блока")
+        text = _response_text(response)
         try:
             return parse_classification(json.loads(text))
         except json.JSONDecodeError as e:

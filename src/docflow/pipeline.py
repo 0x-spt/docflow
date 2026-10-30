@@ -151,12 +151,12 @@ def approval_issues(decision: RoutingDecision) -> list[Issue]:
 
 
 async def _load_context(
-    deps: Deps, session: AsyncSession, tenant_id: UUID, slug: str, version: int | None
-) -> tuple[DocSchema, dict[str, list[DictEntry]], list, dict]:
-    schema = await deps.schemas.resolve(session, tenant_id, slug, version)
+    session: AsyncSession, tenant_id: UUID, schema: DocSchema
+) -> tuple[dict[str, list[DictEntry]], list, dict]:
+    """Справочники и правила маршрутизации для уже найденной схемы."""
     dictionaries = await load_dictionaries(session, tenant_id, schema)
     rules, rule_dictionaries = await load_rules(session, tenant_id)
-    return schema, dictionaries, rules, rule_dictionaries
+    return dictionaries, rules, rule_dictionaries
 
 
 async def _detect_schema(
@@ -201,18 +201,15 @@ async def _run(deps: Deps, session: AsyncSession, document_id: UUID) -> tuple[bo
     keys, mode = list(document.files), document.mode
     autodetect = document.schema_slug == AUTO_SLUG
     if not autodetect:
-        schema, dictionaries, rules, rule_dictionaries = await _load_context(
-            deps, session, tenant_id, document.schema_slug, document.schema_version
-        )
+        schema = await deps.schemas.resolve(session, tenant_id, document.schema_slug, document.schema_version)
+        dictionaries, rules, rule_dictionaries = await _load_context(session, tenant_id, schema)
     # Закрываем читающую транзакцию: OCR и модель идут минутами, idle in transaction на Postgres не нужен
     await session.commit()
 
     images, n_pages = await _render(deps, document_id, keys, mode)
     if autodetect:
         schema = await _detect_schema(deps, session, document_id, tenant_id, extractor, images[0])
-        schema, dictionaries, rules, rule_dictionaries = await _load_context(
-            deps, session, tenant_id, schema.slug, schema.version
-        )
+        dictionaries, rules, rule_dictionaries = await _load_context(session, tenant_id, schema)
         await session.commit()
     extraction = await asyncio.to_thread(extractor.extract, schema, images)
     del images
