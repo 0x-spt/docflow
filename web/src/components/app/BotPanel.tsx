@@ -124,7 +124,7 @@ export function BotPanel({ bot, schemas }: { bot: BotInfo; schemas: { slug: stri
         {bot.chats.length === 0 ? (
           <p className="border-2 border-ink bg-card p-4 text-muted">Пока ни один чат не привязан.</p>
         ) : (
-          <div className="overflow-x-auto">
+          <div className="relative overflow-x-auto">
             <table className="w-full min-w-[40rem] border-2 border-ink bg-card text-left">
               <thead>
                 <tr className="border-b-2 border-ink font-mono text-sm">
