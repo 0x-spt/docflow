@@ -6,9 +6,10 @@ import anthropic
 import httpx
 import pytest
 
-from docflow.extraction.base import ExtractionError, system_prompt
+from docflow.extraction.base import ExtractionError, classify_prompt, system_prompt
 from docflow.extraction.claude import ClaudeExtractor
 from docflow.extraction.fake import FakeExtractor
+from docflow.schemas.catalog import DocType
 from docflow.schemas.model import DocSchema
 
 SCHEMA = DocSchema.model_validate(
@@ -115,3 +116,71 @@ def test_default_client_fits_job_timeout(monkeypatch):
     ex = ClaudeExtractor()
     assert ex.client.timeout == 240.0 < JOB_TIMEOUT
     assert ex.client.max_retries == 1
+
+
+TYPES = [DocType("invoice_ru", 1, "Счёт", "Счёт на оплату", True), DocType("act_ru", 1, "Акт", "", True)]
+
+
+def _classify_client(response=None, exc=None):
+    client = MagicMock()
+    if exc:
+        client.messages.create.side_effect = exc
+    else:
+        client.messages.create.return_value = response
+    return client
+
+
+def test_classify_uses_light_model():
+    client = _classify_client(_response([_text('{"slug": "act_ru"}')], model="claude-haiku-5-5"))
+    assert ClaudeExtractor(client=client).classify(TYPES, b"img") == "act_ru"
+    kw = client.messages.create.call_args.kwargs
+    assert kw["model"] == "claude-haiku-5-5" and kw["max_tokens"] == 1024
+    assert kw["output_config"]["effort"] == "low"
+    schema = kw["output_config"]["format"]["schema"]
+    assert schema["properties"]["slug"]["enum"] == ["invoice_ru", "act_ru", "unknown"]
+    assert "fallbacks" not in kw and "betas" not in kw and "thinking" not in kw
+    assert kw["system"] == classify_prompt(TYPES)
+    assert kw["timeout"] == 30.0
+    content = kw["messages"][0]["content"]
+    assert [b["type"] for b in content] == ["image", "text"]
+    assert content[0]["source"]["data"] == base64.b64encode(b"img").decode()
+    client.beta.messages.create.assert_not_called()
+
+
+def test_classify_model_is_configurable():
+    client = _classify_client(_response([_text('{"slug": "act_ru"}')]))
+    ClaudeExtractor(client=client, classify_model="claude-x").classify(TYPES, b"i")
+    assert client.messages.create.call_args.kwargs["model"] == "claude-x"
+
+
+def test_classify_unknown_is_none():
+    ex = ClaudeExtractor(client=_classify_client(_response([_text('{"slug": "unknown"}')])))
+    assert ex.classify(TYPES, b"i") is None
+
+
+def test_classify_refusal_raises():
+    ex = ClaudeExtractor(client=_classify_client(_response([_text("{}")], stop_reason="refusal")))
+    with pytest.raises(ExtractionError) as e:
+        ex.classify(TYPES, b"i")
+    assert e.value.reason == "refusal"
+
+
+@pytest.mark.parametrize("text", ["не json", '{"other": 1}', "[]"])
+def test_classify_bad_answer_raises(text):
+    ex = ClaudeExtractor(client=_classify_client(_response([_text(text)])))
+    with pytest.raises(ExtractionError) as e:
+        ex.classify(TYPES, b"i")
+    assert e.value.reason == "invalid_json"
+
+
+def test_classify_api_error_wrapped():
+    exc = anthropic.APIConnectionError(request=httpx.Request("POST", "https://x"))
+    with pytest.raises(ExtractionError) as e:
+        ClaudeExtractor(client=_classify_client(exc=exc)).classify(TYPES, b"i")
+    assert e.value.reason == "api_error"
+
+
+def test_fake_classify():
+    ex = FakeExtractor({"_classify": "act_ru"})
+    assert ex.classify(TYPES, b"p") == "act_ru" and ex.classify_calls == [(TYPES, b"p")]
+    assert FakeExtractor({}).classify(TYPES, b"p") is None

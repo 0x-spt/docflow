@@ -36,13 +36,14 @@ from docflow.webhooks import deliver, requeue_stale
 logger = logging.getLogger(__name__)
 
 # Бюджет времени связан тремя числами:
-#   JOB_TIMEOUT (300 с) — arq отменяет задачу, process_document пишет failed (TIMEOUT_ERROR);
-#   таймауты экстракторов (Claude 240 с + 1 повтор на быстрые отказы, Ollama 240 с) — ответ модели вместе
-#   с подготовкой страниц и OCR должен уложиться в JOB_TIMEOUT, иначе задачу убьёт arq;
+#   JOB_TIMEOUT (360 с = 240 на извлечение + до 60 на определение типа + подготовка страниц и OCR) —
+#   arq отменяет задачу, process_document пишет failed (TIMEOUT_ERROR);
+#   таймауты экстракторов (Claude 240 с + 1 повтор на быстрые отказы, Ollama 240 с; определение типа 30/60 с) —
+#   ответ модели вместе с подготовкой страниц и OCR должен уложиться в JOB_TIMEOUT, иначе задачу убьёт arq;
 #   STALE_PROCESSING = JOB_TIMEOUT + 5 мин — после этого processing считается брошенным (воркер убит
 #   без шанса записать failed) и его закрывает жнец.
 # Меняя одно, проверьте остальные.
-JOB_TIMEOUT = 300
+JOB_TIMEOUT = 360
 # processing дольше job_timeout + запас — воркер точно мёртв (живой бы уже записал результат или failed)
 STALE_PROCESSING = timedelta(seconds=JOB_TIMEOUT) + timedelta(minutes=5)
 # queued дольше этого — задача, скорее всего, потеряна; перепостановка с тем же job_id безопасна и при живой задаче
@@ -84,7 +85,7 @@ def _extractors(settings: Settings) -> dict[str, Extractor]:
         return {"claude": fake, "ollama": fake}
     # ClaudeExtractor не требует ANTHROPIC_API_KEY при создании — только при запросе
     return {
-        "claude": ClaudeExtractor(model=settings.anthropic_model),
+        "claude": ClaudeExtractor(model=settings.anthropic_model, classify_model=settings.anthropic_classify_model),
         "ollama": OllamaExtractor(settings.ollama_url, settings.ollama_model),
     }
 

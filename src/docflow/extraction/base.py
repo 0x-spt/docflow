@@ -1,9 +1,14 @@
 """Общие типы извлечения и системный промпт."""
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from docflow.schemas.llm import UNCERTAIN
 from docflow.schemas.model import DocSchema
+
+if TYPE_CHECKING:  # каталог тянет модели БД; во время работы нужны только типы
+    from docflow.schemas.catalog import DocType
+
+UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True)
@@ -28,6 +33,10 @@ class Extractor(Protocol):
 
     def extract(self, schema: DocSchema, images: list[bytes]) -> Extraction: ...
 
+    def classify(self, types: "list[DocType]", image: bytes) -> str | None:
+        """Slug типа документа по первой странице или None («не знаю»). Сбой — ExtractionError."""
+        ...
+
 
 _RULES = f"""Ты распознаёшь документы по изображениям страниц и возвращаешь данные строго по заданной JSON-схеме.
 Документы бывают отсканированными, перекошенными, с рукописными вставками.
@@ -48,3 +57,29 @@ _RULES = f"""Ты распознаёшь документы по изображ�
 def system_prompt(schema: DocSchema) -> str:
     """Детерминированный (без дат и случайных частей) — иначе не работает кеш промпта."""
     return f"{_RULES}\n\nТип документа: {schema.title}.\n{schema.description}"
+
+
+def classify_prompt(types: "list[DocType]") -> str:
+    lines = [f"- {t.slug}: {t.title}" + (f" — {t.description}" if t.description else "") for t in types]
+    return (
+        "Определи тип документа по изображению его первой страницы. Выбери ровно один slug из списка:\n"
+        + "\n".join(lines)
+        + f"\n\nЕсли документ не подходит ни под один тип или вы не уверены — верни «{UNKNOWN}». "
+        "Не угадывай и ничего не выдумывай."
+    )
+
+
+def classify_schema(types: "list[DocType]") -> dict:
+    return {
+        "type": "object",
+        "properties": {"slug": {"type": "string", "enum": [*(t.slug for t in types), UNKNOWN]}},
+        "required": ["slug"],
+        "additionalProperties": False,
+    }
+
+
+def parse_classification(raw: object) -> str | None:
+    """Ответ модели {"slug": …} → slug или None («unknown»); остальное — invalid_json."""
+    if not isinstance(raw, dict) or not isinstance(raw.get("slug"), str):
+        raise ExtractionError("invalid_json", "ожидался объект со строкой slug")
+    return None if raw["slug"] == UNKNOWN else raw["slug"]

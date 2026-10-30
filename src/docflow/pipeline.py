@@ -15,13 +15,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from docflow.config import get_settings
 from docflow.db.models import Document, SchemaRecord, Tenant
 from docflow.exports import enqueue_routed
-from docflow.extraction.base import ExtractionError, Extractor
+from docflow.extraction.base import UNKNOWN, ExtractionError, Extractor
 from docflow.extraction.normalize import normalize
 from docflow.imaging.load import UnsupportedFile
 from docflow.imaging.prepare import prepare_pages
 from docflow.pdf.build import NoOcr, OcrEngine, build_pdf
 from docflow.queue import PROCESS_DOCUMENT, Enqueuer
 from docflow.routing import RoutingDecision, evaluate_rules, fetch_dictionaries, load_rules
+from docflow.schemas.catalog import AUTO_SLUG, list_doc_types
 from docflow.schemas.library import builtin_schemas
 from docflow.schemas.llm import UNCERTAIN
 from docflow.schemas.model import DocSchema
@@ -41,6 +42,7 @@ REVIEW_REQUIRED = Issue(
 APPROVAL_REQUIRED = "approval_required"
 TIMEOUT_ERROR = "обработка прервана: превышено время или воркер остановлен"
 REAPED_ERROR = "обработка прервана (воркер остановился)"
+AUTODETECT_FAILED = "Не удалось определить тип документа"
 
 
 class SchemaNotFound(LookupError):
@@ -148,6 +150,45 @@ def approval_issues(decision: RoutingDecision) -> list[Issue]:
     return [Issue(None, APPROVAL_REQUIRED, f"нужно согласование: {name}") for name in decision.approval]
 
 
+async def _load_context(
+    deps: Deps, session: AsyncSession, tenant_id: UUID, slug: str, version: int | None
+) -> tuple[DocSchema, dict[str, list[DictEntry]], list, dict]:
+    schema = await deps.schemas.resolve(session, tenant_id, slug, version)
+    dictionaries = await load_dictionaries(session, tenant_id, schema)
+    rules, rule_dictionaries = await load_rules(session, tenant_id)
+    return schema, dictionaries, rules, rule_dictionaries
+
+
+async def _detect_schema(
+    deps: Deps,
+    session: AsyncSession,
+    document_id: UUID,
+    tenant_id: UUID,
+    extractor: Extractor,
+    first_page: bytes,
+) -> DocSchema:
+    """Тип документа определяет экстрактор тенанта (локальный не уходит в облако); тип пишется в документ."""
+    types = await list_doc_types(session, tenant_id)
+    await session.commit()  # на время вызова модели транзакция закрыта
+    try:
+        slug = await asyncio.to_thread(extractor.classify, types, first_page)
+    except Exception as exc:
+        # текст исключения не логируем: в нём может быть тело ответа API
+        logger.warning("определение типа документа %s не удалось: %s", document_id, type(exc).__name__)
+        raise _Failure(AUTODETECT_FAILED) from None
+    chosen = next((t for t in types if t.slug == slug), None) if slug and slug != UNKNOWN else None
+    if chosen is None:
+        raise _Failure(AUTODETECT_FAILED)
+    await session.execute(
+        update(Document)
+        .where(Document.id == document_id, Document.status == "processing")
+        .values(schema_slug=chosen.slug, schema_version=chosen.version)
+        .execution_options(synchronize_session=False)
+    )
+    await session.commit()
+    return await deps.schemas.resolve(session, tenant_id, chosen.slug, chosen.version)
+
+
 async def _run(deps: Deps, session: AsyncSession, document_id: UUID) -> tuple[bool, RoutingDecision, str]:
     """(записан ли результат — документ ещё был в processing; решение маршрутизации; записанный статус)."""
     document = await session.get(Document, document_id)
@@ -156,15 +197,23 @@ async def _run(deps: Deps, session: AsyncSession, document_id: UUID) -> tuple[bo
     extractor = deps.extractors.get(kind) if kind else None
     if extractor is None:
         raise _Failure(f"Экстрактор «{kind}» не настроен")
-    schema = await deps.schemas.resolve(session, document.tenant_id, document.schema_slug, document.schema_version)
-    dictionaries = await load_dictionaries(session, document.tenant_id, schema)
-    auto_ok = tenant.auto_ok
-    rules, rule_dictionaries = await load_rules(session, document.tenant_id)
+    tenant_id, auto_ok = document.tenant_id, tenant.auto_ok
     keys, mode = list(document.files), document.mode
+    autodetect = document.schema_slug == AUTO_SLUG
+    if not autodetect:
+        schema, dictionaries, rules, rule_dictionaries = await _load_context(
+            deps, session, tenant_id, document.schema_slug, document.schema_version
+        )
     # Закрываем читающую транзакцию: OCR и модель идут минутами, idle in transaction на Postgres не нужен
     await session.commit()
 
     images, n_pages = await _render(deps, document_id, keys, mode)
+    if autodetect:
+        schema = await _detect_schema(deps, session, document_id, tenant_id, extractor, images[0])
+        schema, dictionaries, rules, rule_dictionaries = await _load_context(
+            deps, session, tenant_id, schema.slug, schema.version
+        )
+        await session.commit()
     extraction = await asyncio.to_thread(extractor.extract, schema, images)
     del images
     data, issues = normalize(schema, extraction.raw)

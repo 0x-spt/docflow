@@ -23,6 +23,7 @@ class Settings(BaseSettings):
 
     # ключ Anthropic берёт сам SDK из ANTHROPIC_API_KEY, здесь его не храним
     anthropic_model: str = "claude-opus-5-5"
+    anthropic_classify_model: str = "claude-haiku-5-5"
     ollama_url: str = "http://localhost:11434"
     ollama_model: str = "qwen3-vl:30b-a3b-instruct"
 

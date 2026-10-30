@@ -5,8 +5,9 @@ import httpx
 import pytest
 import respx
 
-from docflow.extraction.base import ExtractionError
+from docflow.extraction.base import ExtractionError, classify_prompt
 from docflow.extraction.ollama import OllamaExtractor
+from docflow.schemas.catalog import DocType
 from docflow.schemas.model import DocSchema
 
 SCHEMA = DocSchema.model_validate(
@@ -65,3 +66,41 @@ def test_default_http_timeout_fits_job_timeout():
 
     ex = OllamaExtractor("http://localhost:11434", "m")
     assert ex.http.timeout.read == 240.0 < JOB_TIMEOUT
+
+
+TYPES = [DocType("invoice_ru", 1, "Счёт", "Счёт на оплату", True), DocType("act_ru", 1, "Акт", "", True)]
+
+
+@respx.mock
+def test_classify_posts_only_to_ollama():
+    route = respx.post(f"{URL}/api/chat").mock(
+        return_value=httpx.Response(200, json={"message": {"content": '{"slug": "act_ru"}'}})
+    )
+    assert OllamaExtractor(URL, "qwen2.5vl:7b").classify(TYPES, b"x") == "act_ru"
+    assert len(respx.calls) == 1  # единственный запрос — к Ollama
+    body = json.loads(route.calls[0].request.content)
+    assert body["model"] == "qwen2.5vl:7b" and body["stream"] is False
+    assert body["format"]["properties"]["slug"]["enum"] == ["invoice_ru", "act_ru", "unknown"]
+    assert body["messages"][0]["content"] == classify_prompt(TYPES)
+    assert body["messages"][1]["images"] == [base64.b64encode(b"x").decode()]
+
+
+@respx.mock
+def test_classify_unknown_is_none():
+    respx.post(f"{URL}/api/chat").mock(
+        return_value=httpx.Response(200, json={"message": {"content": '{"slug": "unknown"}'}})
+    )
+    assert OllamaExtractor(URL, "m").classify(TYPES, b"x") is None
+
+
+@respx.mock
+def test_classify_network_error_raises():
+    route = respx.post(f"{URL}/api/chat")
+    route.mock(side_effect=httpx.ConnectError("no"))
+    with pytest.raises(ExtractionError) as e:
+        OllamaExtractor(URL, "m").classify(TYPES, b"x")
+    assert e.value.reason == "api_error"
+    route.mock(return_value=httpx.Response(200, json={"message": {"content": "zzz"}}))
+    with pytest.raises(ExtractionError) as e:
+        OllamaExtractor(URL, "m").classify(TYPES, b"x")
+    assert e.value.reason == "invalid_json"

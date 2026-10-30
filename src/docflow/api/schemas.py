@@ -21,6 +21,7 @@ from docflow.labels import (
     prune_label_set,
     queue_fields_for,
 )
+from docflow.schemas.catalog import list_doc_types
 from docflow.schemas.library import builtin_schemas
 from docflow.schemas.llm import to_json_schema
 from docflow.schemas.model import DocSchema
@@ -43,25 +44,10 @@ ManagerDep = Annotated[Principal, Depends(require_owner_or_key)]
     ),
 )
 async def list_schemas(tenant_id: TenantDep, session: SessionDep) -> list[dict[str, Any]]:
-    items: dict[str, dict[str, Any]] = {
-        slug: {"slug": slug, "version": s.version, "title": s.title, "builtin": True}
-        for slug, s in builtin_schemas().items()
-    }
-    rows = (
-        await session.execute(
-            select(SchemaRecord.tenant_id, SchemaRecord.slug, SchemaRecord.version, SchemaRecord.body)
-            .where(or_(SchemaRecord.tenant_id.is_(None), SchemaRecord.tenant_id == tenant_id))
-            # встроенные раньше своих, внутри — по возрастанию версии: последняя запись побеждает
-            .order_by(SchemaRecord.tenant_id.is_not(None), SchemaRecord.version)
-        )
-    ).all()
-    for owner, slug, version, body in rows:
-        builtin = owner is None
-        current = items.get(slug)
-        if builtin and current is not None and current["version"] > version:
-            continue
-        items[slug] = {"slug": slug, "version": version, "title": body.get("title", slug), "builtin": builtin}
-    return sorted(items.values(), key=lambda i: i["slug"])
+    return [
+        {"slug": t.slug, "version": t.version, "title": t.title, "builtin": t.builtin}
+        for t in await list_doc_types(session, tenant_id)
+    ]
 
 
 async def _latest_visible_version(session, tenant_id, slug: str) -> int:
