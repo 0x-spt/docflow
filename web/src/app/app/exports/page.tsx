@@ -1,7 +1,7 @@
 import Link from "next/link";
 
 import { RetryExportButton } from "@/components/app/RetryExportButton";
-import { formatDateTime } from "@/lib/format";
+import { formatDateTime, kindLabel } from "@/lib/format";
 import { isUuid } from "@/lib/ids";
 import { apiFetchAuthed, requireMe } from "@/lib/session";
 import type { ConnectorInfo, Destination, ExportItem, ExportLogItem } from "@/lib/types";
@@ -14,6 +14,8 @@ const PURPOSE: Record<ExportItem["purpose"], string> = {
   export: "Выгрузка",
   notify_review: "Уведомление о проверке",
   notify_new: "Уведомление о новом",
+  bot_ready: "Ответ в бот",
+  bot_reviewed: "Итог проверки в бот",
 };
 
 const LINK = "underline decoration-2 underline-offset-4 hover:text-accent-text";
@@ -86,7 +88,7 @@ export default async function ExportsPage({
             </thead>
             <tbody>
               {items.map((e) => {
-                const name = e.destination_name ?? "Подключение удалено";
+                const name = e.destination_name ?? (e.kind === "tenant_bot" ? "Telegram-бот" : "Подключение удалено");
                 return (
                   <tr key={e.id} className="border-t-2 border-ink align-top">
                     <td className="px-3 py-1.5">
@@ -101,7 +103,7 @@ export default async function ExportsPage({
                     </td>
                     <td className="px-3 py-2.5">
                       <div className="break-words font-medium">{name}</div>
-                      {e.kind ? <div className="font-mono text-xs text-muted">{labels.get(e.kind) ?? e.kind}</div> : null}
+                      {e.kind ? <div className="font-mono text-xs text-muted">{kindLabel(labels, e.kind)}</div> : null}
                     </td>
                     <td className="max-w-[22rem] px-3 py-2.5">
                       <p className="break-words font-medium text-accent-text">{e.error ?? "—"}</p>

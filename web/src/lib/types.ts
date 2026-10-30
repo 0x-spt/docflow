@@ -79,7 +79,7 @@ export interface ExportItem {
   destination_id: string | null;
   destination_name: string | null;
   kind: string | null;
-  purpose: "export" | "notify_review" | "notify_new";
+  purpose: "export" | "notify_review" | "notify_new" | "bot_ready" | "bot_reviewed";
   status: ExportStatus;
   external_id: string | null;
   error: string | null;
@@ -169,6 +169,17 @@ export interface Suggestion {
   code: "not_in_dictionary" | "corrected";
   count: number;
   nearest: string | null;
+}
+
+/** GET /v1/usage */
+export interface Usage {
+  plan: string;
+  plan_title: string;
+  /** null — тариф без лимита */
+  pages_limit: number | null;
+  pages_used: number;
+  period_start: string;
+  period_end: string;
 }
 
 /** GET /v1/api-keys */

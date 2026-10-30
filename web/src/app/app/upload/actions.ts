@@ -40,6 +40,7 @@ export async function uploadDocument(_prev: UploadState, form: FormData): Promis
     id = accepted.id;
   } catch (e) {
     unstable_rethrow(e); // редирект на /login при 401
+    if (e instanceof ApiError && e.status === 402) return { error: `${e.detail}. Напишите нам, чтобы сменить тариф.` };
     if (e instanceof ApiError && e.status >= 400 && e.status < 500) return { error: e.detail };
     console.error("документ не загружен", e);
     return { error: FAILED };

@@ -5,13 +5,15 @@ import { DocumentData } from "@/components/app/DocumentData";
 import { ExportsBlock } from "@/components/app/ExportsBlock";
 import { PagePreview } from "@/components/app/PagePreview";
 import { ReviewForm } from "@/components/app/ReviewForm";
+import { RetypeForm } from "@/components/app/RetypeForm";
 import { StatusBadge } from "@/components/ui";
 import { ApiError } from "@/lib/api";
+import { AUTO_SLUG, docTypeLabel } from "@/lib/doc-type";
 import { fieldLabel, formatDateTime } from "@/lib/format";
 import { isDocId } from "@/lib/ids";
 import { INFO_CODES, notesByField } from "@/lib/review-form";
 import { apiFetchAuthed, requireMe } from "@/lib/session";
-import type { ConnectorInfo, DocSchema, DocumentPayload, Issue } from "@/lib/types";
+import type { ConnectorInfo, DocSchema, DocumentPayload, Issue, SchemaListItem } from "@/lib/types";
 
 export const metadata = { title: "Документ — DocFlow" };
 
@@ -36,6 +38,7 @@ function docTitle(doc: DocumentPayload): string {
 }
 
 async function loadSchema(doc: DocumentPayload): Promise<DocSchema | null> {
+  if (doc.schema.slug === AUTO_SLUG) return null; // служебный тип: схемы у него нет
   try {
     return await apiFetchAuthed<DocSchema>(
       `/v1/schemas/${encodeURIComponent(doc.schema.slug)}?version=${doc.schema.version}`,
@@ -99,6 +102,8 @@ export default async function DocumentPage({ params }: { params: Promise<{ id: s
     throw e;
   }
   const schema = await loadSchema(doc);
+  const needsType = doc.status === "failed" && doc.schema.slug === AUTO_SLUG;
+  const schemaChoices = needsType ? await apiFetchAuthed<SchemaListItem[]>("/v1/schemas") : [];
   const exports = doc.exports ?? [];
   const [me, catalog] = exports.length
     ? await Promise.all([requireMe(), apiFetchAuthed<ConnectorInfo[]>("/v1/connectors")])
@@ -123,7 +128,7 @@ export default async function DocumentPage({ params }: { params: Promise<{ id: s
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div className="flex flex-col gap-2">
             <h1 className="font-mono text-4xl font-medium tracking-tight sm:text-5xl">{docTitle(doc)}</h1>
-            <p className="text-lg">{schema?.title ?? doc.schema.slug}</p>
+            <p className="text-lg">{docTypeLabel(doc.schema.slug, schema?.title, doc.status)}</p>
             <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-sm">
               <StatusBadge status={doc.status} />
               <span className="text-muted">
@@ -171,6 +176,8 @@ export default async function DocumentPage({ params }: { params: Promise<{ id: s
         </div>
       ) : null}
 
+      {needsType ? <RetypeForm id={doc.id} schemas={schemaChoices} /> : null}
+
       {inWork ? (
         <div className="border-2 border-ink bg-card p-6">
           <p className="text-lg font-medium">Документ ещё обрабатывается</p>
@@ -199,7 +206,9 @@ export default async function DocumentPage({ params }: { params: Promise<{ id: s
               <h2 id="data-title" className="text-2xl font-semibold tracking-tight">
                 {reviewable ? "Проверьте поля" : "Данные"}
               </h2>
-              {!schema ? (
+              {!schema && doc.schema.slug === AUTO_SLUG ? (
+                <p className="text-muted">Данных нет: тип документа не определён.</p>
+              ) : !schema ? (
                 <div className="border-2 border-accent-text bg-card p-4">
                   <p className="font-medium text-accent-text">
                     Схема «{doc.schema.slug}» версии {doc.schema.version} не найдена — форму не построить.

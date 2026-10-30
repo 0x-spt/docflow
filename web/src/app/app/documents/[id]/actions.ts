@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { redirect, unstable_rethrow } from "next/navigation";
 
 import { ApiError } from "@/lib/api";
+import { AUTO_SLUG } from "@/lib/doc-type";
 import { isDocId } from "@/lib/ids";
 import { buildData } from "@/lib/review-form";
 import { apiFetchAuthed } from "@/lib/session";
@@ -65,6 +66,28 @@ async function review(id: string, decision: ReviewRequest["decision"], form: For
     console.error("не удалось найти следующий документ на проверку", e); // проверка уже сохранена — в очередь
   }
   redirect(next);
+}
+
+/** «Распознать заново» документ, у которого не определился тип: он снова встаёт в очередь с выбранным типом. */
+export async function retypeDocument(id: string, schema: string): Promise<{ error?: string }> {
+  if (!isDocId(id)) return { error: "Документ не найден" };
+  if (!schema || schema === AUTO_SLUG) return { error: "Выберите тип документа" };
+  try {
+    await apiFetchAuthed(`/v1/documents/${encodeURIComponent(id)}/retype`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ schema }),
+    });
+  } catch (e) {
+    unstable_rethrow(e);
+    if (e instanceof ApiError && e.status === 402) return { error: `${e.detail}. Напишите нам, чтобы сменить тариф.` };
+    if (e instanceof ApiError && [404, 409, 422].includes(e.status)) return { error: e.detail };
+    console.error("повторное распознавание не поставлено", id, e);
+    return { error: "Не удалось поставить в очередь: сервис недоступен. Попробуйте ещё раз." };
+  }
+  revalidatePath(`/app/documents/${id}`);
+  revalidatePath("/app");
+  return {};
 }
 
 export type RetryState = { error?: string; ok?: boolean };

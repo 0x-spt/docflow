@@ -3,6 +3,8 @@ import { unstable_rethrow } from "next/navigation";
 
 import { ExcelRegistryForm } from "@/components/app/ExcelRegistryForm";
 import { Button, Stat, StatusBadge } from "@/components/ui";
+import { UsageBlock } from "@/components/app/UsageBlock";
+import { docTypeLabel } from "@/lib/doc-type";
 import { formatDateTime, summaryValue } from "@/lib/format";
 import { apiFetchAuthed } from "@/lib/session";
 import type { DocStatus, DocumentList, ExportsSummary, SchemaListItem, Stats } from "@/lib/types";
@@ -96,6 +98,8 @@ export default async function QueuePage({
           </Button>
         ) : null}
       </div>
+
+      <UsageBlock />
 
       {failedExports > 0 ? (
         <Link
@@ -193,7 +197,7 @@ export default async function QueuePage({
                       >
                         {d.title}
                       </Link>
-                      <div className="text-xs text-muted">{schemaTitles.get(d.schema.slug) ?? d.schema.slug}</div>
+                      <div className="text-xs text-muted">{docTypeLabel(d.schema.slug, schemaTitles.get(d.schema.slug), d.status)}</div>
                     </td>
                     <td className="max-w-[22rem] px-3 py-2.5">
                       {d.summary.length ? (

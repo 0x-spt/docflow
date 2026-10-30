@@ -1,11 +1,13 @@
 import { RetryExportButton } from "@/components/app/RetryExportButton";
-import { formatDateTime } from "@/lib/format";
+import { formatDateTime, kindLabel } from "@/lib/format";
 import type { ConnectorInfo, ExportItem, ExportStatus } from "@/lib/types";
 
 const PURPOSE: Record<ExportItem["purpose"], string> = {
   export: "Выгрузка",
   notify_review: "Уведомление о проверке",
   notify_new: "Уведомление о новом",
+  bot_ready: "Ответ в бот",
+  bot_reviewed: "Итог проверки в бот",
 };
 
 const STATUS: Record<ExportStatus, { label: string; square: string }> = {
@@ -48,12 +50,12 @@ export function ExportsBlock({
           <tbody>
             {exports.map((e) => {
               const st = STATUS[e.status];
-              const name = e.destination_name ?? "Подключение удалено";
+              const name = e.destination_name ?? (e.kind === "tenant_bot" ? "Telegram-бот" : "Подключение удалено");
               return (
                 <tr key={e.id} className="border-t-2 border-ink align-top">
                   <td className="px-3 py-2.5">
                     <div className="break-words font-medium">{name}</div>
-                    {e.kind ? <div className="font-mono text-xs text-muted">{labels.get(e.kind) ?? e.kind}</div> : null}
+                    {e.kind ? <div className="font-mono text-xs text-muted">{kindLabel(labels, e.kind)}</div> : null}
                   </td>
                   <td className="px-3 py-2.5">{PURPOSE[e.purpose] ?? e.purpose}</td>
                   <td className="px-3 py-2.5">

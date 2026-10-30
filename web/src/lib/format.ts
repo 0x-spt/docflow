@@ -92,3 +92,8 @@ export function plural(n: number, forms: [string, string, string]): string {
   if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return forms[1];
   return forms[2];
 }
+
+/** Название вида получателя для журналов; Telegram-бот кабинета в каталоге коннекторов не числится. */
+export function kindLabel(labels: Map<string, string>, kind: string): string {
+  return labels.get(kind) ?? (kind === "tenant_bot" ? "Telegram-бот" : kind);
+}

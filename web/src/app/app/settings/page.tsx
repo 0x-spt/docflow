@@ -2,6 +2,7 @@ import Link from "next/link";
 
 import { CreateKeyForm } from "@/components/app/CreateKeyForm";
 import { CreateWebhookForm } from "@/components/app/CreateWebhookForm";
+import { UsageBlock } from "@/components/app/UsageBlock";
 import { Section } from "@/components/ui";
 import { formatDateTime } from "@/lib/format";
 import { isUuid } from "@/lib/ids";
@@ -62,6 +63,10 @@ export default async function SettingsPage({
       <div className="mb-4">
         <h1 className="text-4xl font-semibold tracking-tight">API и вебхуки</h1>
         <p className="mt-1 text-muted">Ключи API и вебхуки: подключите DocFlow к своей учётной системе.</p>
+      </div>
+
+      <div className="mb-4">
+        <UsageBlock />
       </div>
 
       {errorText ? (

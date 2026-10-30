@@ -4,6 +4,7 @@ import { startTransition, useActionState, useEffect, useId, useRef, useState, ty
 
 import { uploadDocument, type UploadState } from "@/app/app/upload/actions";
 import { Button, Field } from "@/components/ui";
+import { AUTO_SLUG } from "@/lib/doc-type";
 import type { SchemaListItem } from "@/lib/types";
 
 // лимиты API (по умолчанию): 20 МБ на файл, 30 файлов/страниц на документ
@@ -71,7 +72,8 @@ export function UploadForm({ schemas }: { schemas: SchemaListItem[] }) {
         </div>
       ) : null}
 
-      <Field as="select" label="Тип документа" name="schema" required defaultValue={schemas[0]?.slug}>
+      <Field as="select" label="Тип документа" name="schema" required defaultValue={AUTO_SLUG}>
+        <option value={AUTO_SLUG}>Определить автоматически</option>
         {schemas.map((s) => (
           <option key={s.slug} value={s.slug}>
             {s.title}
