@@ -28,6 +28,19 @@ def test_match_first_by_slug_on_tie():
     assert match_doc_type("Договор", twins) == "a"
 
 
+def test_match_ignores_trailing_parenthetical():
+    types = [DocType("invoice_ru", 1, "Счёт на оплату (РФ)", "", True)]
+    assert match_doc_type("счет на оплату", types) == "invoice_ru"
+    assert match_doc_type("счёт на оплату (рф)", types) == "invoice_ru"
+    assert match_doc_type("(рф)", types) is None
+    assert match_doc_type("счет", types) is None
+
+
+def test_match_exact_title_beats_trimmed():
+    types = [DocType("a_ru", 1, "Счёт на оплату (РФ)", "", True), DocType("b_own", 1, "Счёт на оплату", "", False)]
+    assert match_doc_type("счет на оплату", types) == "b_own"
+
+
 def test_normalize_title():
     assert normalize_title("  Счёт   НА\tоплату ") == "счет на оплату"
 

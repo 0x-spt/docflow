@@ -89,6 +89,14 @@ async def test_download_cuts_off_over_limit(bot, tg, report_size):
     assert_clean(e.value)
 
 
+async def test_get_file_over_bot_api_limit_is_too_big(bot, tg):
+    tg.fail_with["getFile"] = (400, {"ok": False, "description": "Bad Request: file is too big"})
+    with pytest.raises(BotFileTooBig) as e:
+        await bot.download("big")
+    assert_clean(e.value)
+    assert e.value.retryable is False
+
+
 async def test_reply_parameters_sent(bot, tg):
     await bot.send_message(42, "привет", reply_to=9)
     assert tg.calls[-1] == (

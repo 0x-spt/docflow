@@ -16,11 +16,10 @@ from docflow.channels import bot_poller  # noqa: E402
 from docflow.channels.bot_poller import ALBUM_TICK, ALBUM_WAIT, CONFLICT_PAUSE, DOWNLOAD_RETRIES, BotPoller  # noqa: E402
 from docflow.channels.deps import ChannelDeps  # noqa: E402
 from docflow.config import Settings  # noqa: E402
-from docflow.db.models import BotChat, Document, Export, SchemaRecord, Tenant, TenantBot  # noqa: E402
+from docflow.db.models import BotChat, Document, Export, Tenant, TenantBot  # noqa: E402
 from docflow.intake import IntakeDeps  # noqa: E402
 from docflow.pipeline import SchemaResolver  # noqa: E402
 from docflow.queue import ListEnqueuer  # noqa: E402
-from docflow.schemas.library import builtin_schemas  # noqa: E402
 from docflow.secrets import encrypt_secrets  # noqa: E402
 from docflow.storage.blobs import LocalBlobStore  # noqa: E402
 
@@ -344,6 +343,16 @@ async def test_oversize_uses_lower_configured_limit(env):
     assert env.replies() == ["Файл больше 5 МБ: Telegram не отдаёт боту такие файлы, загрузите его в кабинете"]
 
 
+async def test_bot_api_refuses_big_file_without_size(env):
+    """В сообщении нет file_size, а getFile отвечает 400 file is too big: не повторяем и говорим про размер."""
+    await env.link()
+    env.push(document={"file_id": "f", "file_name": "a.pdf", "mime_type": "application/pdf"})
+    env.tg.fail_with["getFile"] = (400, {"ok": False, "description": "Bad Request: file is too big"})
+    await env.poller().poll_once()
+    assert env.replies() == ["Файл больше 20 МБ: Telegram не отдаёт боту такие файлы, загрузите его в кабинете"]
+    assert (await env.bot()).update_offset == 101
+
+
 async def test_too_big_found_while_downloading(env):
     """Размера в сообщении нет, лимит срабатывает при скачивании."""
     await env.link()
@@ -357,14 +366,10 @@ async def test_too_big_found_while_downloading(env):
 
 async def test_caption_selects_type(env):
     await env.link()
-    body = builtin_schemas()["invoice_ru"].model_dump() | {"slug": "my_bill", "title": "Счёт на оплату"}
-    async with env.sm() as s:
-        s.add(SchemaRecord(tenant_id=env.tenant_id, slug="my_bill", version=1, body=body))
-        await s.commit()
     env.photo("p1", caption="счет на оплату")
     env.photo("p2", caption="PASSPORT_RU")
     await env.poller().poll_once()
-    assert sorted(d.schema_slug for d in await env.docs()) == ["my_bill", "passport_ru"]
+    assert sorted(d.schema_slug for d in await env.docs()) == ["invoice_ru", "passport_ru"]
 
 
 async def test_default_schema_and_auto(env):
@@ -504,6 +509,132 @@ async def test_album_download_gives_up(env):
         await poller.poll_once()
     assert env.replies() == [DOWNLOAD_FAILED]
     assert (await env.bot()).update_offset == 101
+
+
+async def album_docs(env) -> list[Document]:
+    return [d for d in await env.docs() if d.source_ref["media_group_id"]]
+
+
+async def test_slow_batch_does_not_truncate_album(env):
+    """Пока качается чужой файл, Telegram получил ещё часть альбома: сборке нужен свежий опрос."""
+    await env.link()
+    poller = env.poller()
+    env.album_part("a", 11)
+    env.photo("slow", message_id=20)
+    state = {"done": False}
+
+    def on_call(method):
+        if method == "getFile" and not state["done"]:
+            state["done"] = True
+            env.now += ALBUM_WAIT + 1
+            env.album_part("b", 12)
+
+    env.tg.on_call = on_call
+    await poller.poll_once()
+    assert await album_docs(env) == []
+    await poller.poll_once()
+    assert await album_docs(env) == []
+    env.now += ALBUM_WAIT
+    await poller.poll_once()
+    assert [d.pages for d in await album_docs(env)] == [2]
+
+
+async def test_failed_download_does_not_truncate_album(env):
+    """Проход остановился на упавшем файле раньше части B: альбом не собирается без неё."""
+    await env.link()
+    poller = env.poller()
+    env.album_part("a", 11)
+    env.photo("flaky", message_id=20)
+    env.album_part("b", 12)
+    env.tg.fail_files.add("flaky")
+    await poller.poll_once()
+    env.now += ALBUM_WAIT + 3
+    await poller.poll_once()
+    assert await album_docs(env) == []
+    env.tg.fail_files.clear()
+    await poller.poll_once()
+    assert await album_docs(env) == []
+    env.now += ALBUM_WAIT
+    await poller.poll_once()
+    assert [d.pages for d in await album_docs(env)] == [2]
+    assert (await env.bot()).update_offset == 103
+
+
+LATE_PART = "Эта часть альбома пришла позже остальных и не вошла в документ. Пришлите её отдельным сообщением."
+
+
+async def test_late_album_part_gets_reply_once(env):
+    await env.link()
+    poller = env.poller()
+    env.album_part("a", 11)
+    env.album_part("b", 12)
+    await poller.poll_once()
+    env.now += ALBUM_WAIT
+    await poller.poll_once()
+
+    env.album_part("c", 13)
+    await poller.poll_once()
+    env.now += ALBUM_WAIT
+    await poller.poll_once()
+    await poller.poll_once()
+    assert env.replies() == ["Принял, распознаю (2 стр.)", LATE_PART]
+    assert env.methods("sendMessage")[1]["reply_parameters"]["message_id"] == 13
+    docs = await env.docs()
+    assert len(docs) == 1 and docs[0].pages == 2
+    assert (await env.bot()).update_offset == 103
+
+
+async def test_late_album_part_recognized_after_restart(env):
+    await env.link()
+    first = env.poller()
+    env.album_part("a", 11)
+    await first.poll_once()
+    env.now += ALBUM_WAIT
+    await first.poll_once()
+
+    second = env.poller()
+    env.album_part("b", 12)
+    await second.poll_once()
+    env.now += ALBUM_WAIT
+    await second.poll_once()
+    assert env.replies() == [ACCEPTED_ONE, LATE_PART]
+
+
+async def test_whole_album_redelivery_after_restart_silent(env):
+    await env.link()
+    first = env.poller()
+    env.album_part("a", 11)
+    env.album_part("b", 12)
+    await first.poll_once()
+    env.now += ALBUM_WAIT
+    await first.poll_once()
+
+    await env.set_bot(update_offset=0)  # упали после создания документа, но до сохранения offset
+    second = env.poller()
+    await second.poll_once()
+    env.now += ALBUM_WAIT
+    await second.poll_once()
+    assert env.replies() == ["Принял, распознаю (2 стр.)"]
+    assert len(await env.docs()) == 1
+
+
+async def test_redelivered_album_with_extra_part_logged(env, caplog):
+    """Из повторной выдачи опоздавшую часть не вычленить: без ответа, но с предупреждением в логе."""
+    await env.link()
+    first = env.poller()
+    env.album_part("a", 11)
+    await first.poll_once()
+    env.now += ALBUM_WAIT
+    await first.poll_once()
+
+    await env.set_bot(update_offset=0)
+    env.album_part("b", 12)
+    second = env.poller()
+    await second.poll_once()
+    env.now += ALBUM_WAIT
+    await second.poll_once()
+    assert env.replies() == [ACCEPTED_ONE]
+    assert "лишние части" in caplog.text
 
 
 # --- идемпотентность ----------------------------------------------------------
@@ -730,6 +861,25 @@ async def test_last_error_cleared_after_recovery(env):
     del env.tg.fail_with["getUpdates"]
     await poller.poll_once()
     assert (await env.bot()).last_error is None
+
+
+async def test_foreign_last_error_survives_poll(env):
+    """last_error пишет и отправка ответов: успешный опрос чужую ошибку не стирает."""
+    await env.set_bot(last_error="не отправлено в чат")
+    poller = env.poller()
+    await poller.poll_once()
+    await poller.poll_once()
+    assert (await env.bot()).last_error == "не отправлено в чат"
+
+
+async def test_foreign_error_written_after_own_survives_recovery(env):
+    poller = env.poller()
+    env.tg.fail_with["getUpdates"] = 500
+    await poller.poll_once()
+    await env.set_bot(last_error="не отправлено в чат")
+    del env.tg.fail_with["getUpdates"]
+    await poller.poll_once()
+    assert (await env.bot()).last_error == "не отправлено в чат"
 
 
 async def test_db_failure_on_link_check_keeps_update(env, monkeypatch):

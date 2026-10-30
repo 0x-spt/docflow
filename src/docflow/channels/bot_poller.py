@@ -24,7 +24,7 @@ from docflow.channels.botapi import (
     BotTokenRevoked,
 )
 from docflow.channels.deps import ChannelDeps
-from docflow.db.models import BotChat, Tenant, TenantBot
+from docflow.db.models import BotChat, Document, Tenant, TenantBot
 from docflow.intake import IntakeError, IntakeFile, accept_document
 from docflow.schemas.catalog import AUTO_SLUG, list_doc_types, match_doc_type
 from docflow.secrets import decrypt_secrets
@@ -60,6 +60,7 @@ ALREADY_LINKED = "Этот чат уже подключён, присылайт�
 NEED_FILE = "Пришлите фото или PDF документа"
 DOWNLOAD_FAILED = "Не удалось скачать файл. Пришлите его ещё раз"
 ACCEPT_FAILED = "Не удалось принять документ. Пришлите его ещё раз"
+LATE_ALBUM_PART = "Эта часть альбома пришла позже остальных и не вошла в документ. Пришлите её отдельным сообщением."
 
 
 @dataclass(frozen=True)
@@ -137,7 +138,8 @@ class BotPoller:
         self._albums: dict[tuple[int, str], _Album] = {}
         self._attempts: dict[str, int] = {}  # ключ идемпотентности → неудачные скачивания
         self._retrying = False
-        self._error_shown = False
+        # last_error общий с отправкой ответов (задача 9): снимаем только ошибку, записанную этим поллером
+        self._own_error: str | None = None
         self._stopped = False
         self._pause = 0.0
         self._backoff = PAUSE_MIN
@@ -161,15 +163,13 @@ class BotPoller:
                 self._pause = self._grow_backoff()
         except BotConflict as exc:
             logger.warning("бот %s: параллельный опрос или вебхук", self._bot_id)
-            await self._save_status(last_error=exc.message)
-            self._error_shown = True
+            await self._record_error(exc.message)
             self._pause = CONFLICT_PAUSE
         except Exception as exc:
             logger.warning("бот %s: сбой опроса: %s", self._bot_id, type(exc).__name__)
             # в тексте чужого исключения мог оказаться адрес с токеном; BotApiError уже очищен
             text = exc.message if isinstance(exc, BotApiError) else f"Сбой опроса ({type(exc).__name__})"
-            await self._save_status(last_error=text)
-            self._error_shown = True
+            await self._record_error(text)
             self._pause = self._grow_backoff()
 
     async def _poll(self, timeout: int) -> None:
@@ -179,21 +179,25 @@ class BotPoller:
                 self._stopped = True
                 return
             self._offset = self._next_offset = info.bot.update_offset
-            self._error_shown = info.bot.last_error is not None
             token = decrypt_secrets(info.bot.token_enc, self._deps.settings.secrets_key)["token"]
             self._api = BotApi(self._http, token, self._deps.settings.telegram_api_url)
 
         updates = await self._api.get_updates(self._offset, 0 if self._albums else timeout)
+        # альбом готов, только если свежий опрос не принёс новых частей: время обработки пачки не считается
+        polled_at = self._clock()
 
         # за время опроса бота могли отключить, а код приглашения — выпустить новый
         info = await self._load_bot()
         if info is None:
             self._stopped = True
             return
-        if self._error_shown and await self._save_status(last_error=None):
-            self._error_shown = False
+        if self._own_error is not None and await self._save_status(
+            TenantBot.last_error == self._own_error, last_error=None
+        ):
+            self._own_error = None
 
         self._retrying = False
+        stopped_early = False
         for item in sorted(updates, key=lambda u: u["update_id"]):
             update_id = item["update_id"]
             if update_id in self._seen:
@@ -201,10 +205,13 @@ class BotPoller:
             message = item.get("message")
             # упавшее скачивание останавливает проход: это и всё следующее придёт снова, раньше прошедшее отсечёт _seen
             if isinstance(message, dict) and not await self._take(info, message, update_id):
+                stopped_early = True
                 break
             self._seen.add(update_id)
             self._next_offset = max(self._next_offset, update_id + 1)
-        await self._flush_albums(info)
+        # за остановившимся проходом могут лежать ещё не прочитанные части альбомов
+        if not stopped_early:
+            await self._flush_albums(info, polled_at)
         await self._save_offset()
 
         if self._retrying:
@@ -231,12 +238,16 @@ class BotPoller:
             ).first()
         return _BotInfo(row[0], row[1]) if row is not None else None
 
-    async def _save_status(self, **values) -> bool:
+    async def _record_error(self, text: str) -> None:
+        await self._save_status(last_error=text)
+        self._own_error = text
+
+    async def _save_status(self, *where, **values) -> bool:
         try:
             async with self._deps.sessionmaker() as session:
                 await session.execute(
                     update(TenantBot)
-                    .where(TenantBot.id == self._bot_id)
+                    .where(TenantBot.id == self._bot_id, *where)
                     .values(**values)
                     .execution_options(synchronize_session=False)
                 )
@@ -288,9 +299,8 @@ class BotPoller:
         album.update_ids.add(update_id)
         album.last_at = self._clock()
 
-    async def _flush_albums(self, info: _BotInfo) -> None:
-        now = self._clock()
-        due = [key for key, album in self._albums.items() if now - album.last_at >= ALBUM_WAIT]
+    async def _flush_albums(self, info: _BotInfo, polled_at: float) -> None:
+        due = [key for key, album in self._albums.items() if polled_at - album.last_at >= ALBUM_WAIT]
         for key in due:
             album = self._albums[key]
             messages = [album.parts[message_id] for message_id in sorted(album.parts)]
@@ -409,7 +419,23 @@ class BotPoller:
                     "media_group_id": media_group_id,
                 },
             )
-        return f"Принял, распознаю ({result.document.pages} стр.)" if result.created else None
+        if result.created:
+            return f"Принял, распознаю ({result.document.pages} стр.)"
+        if media_group_id is not None:
+            await self._report_late_parts(messages, result.document, len(files))
+        return None
+
+    async def _report_late_parts(self, messages: list[dict], document: Document, file_count: int) -> None:
+        """Документ альбома уже есть. Его первое сообщение в буфере — повторная выдача альбома, иначе части опоздали."""
+        first = (document.source_ref or {}).get("message_id")
+        if first in (m["message_id"] for m in messages):
+            # тот же альбом после перезапуска; какие части лишние, по документу не узнать
+            if file_count > len(document.files):
+                logger.warning("бот %s: при повторной выдаче альбома есть лишние части", self._bot_id)
+            return
+        for message in messages:
+            if _pick_file(message) is not None:
+                await self._reply(message["chat"]["id"], LATE_ALBUM_PART, message["message_id"])
 
     def _intake_file(self, session: AsyncSession, file: _File) -> IntakeFile:
         async def read(limit: int) -> bytes:

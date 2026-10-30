@@ -1,4 +1,5 @@
 """Каталог типов документов, видимых тенанту: встроенные и свои (последняя версия каждого slug)."""
+import re
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -42,16 +43,26 @@ async def list_doc_types(session: AsyncSession, tenant_id: UUID | None) -> list[
     return sorted((t for t in items.values() if t.slug != AUTO_SLUG), key=lambda t: t.slug)
 
 
+_TRAILING_PARENS = re.compile(r"\s*\([^()]*\)$")
+
+
 def normalize_title(text: str) -> str:
     return " ".join(text.split()).casefold().replace("ё", "е")
 
 
 def match_doc_type(text: str | None, types: list[DocType]) -> str | None:
-    """Slug типа, у которого название или slug равны тексту (без регистра, пробелов и ё); при нескольких — первый."""
+    """Slug типа, у которого название или slug равны тексту (без регистра, пробелов и ё); при нескольких — первый.
+
+    Точное совпадение важнее совпадения с названием без уточнения в конце: «Счёт на оплату (РФ)» → «счет на оплату».
+    """
     if not text or not text.strip():
         return None
     wanted = normalize_title(text)
-    for t in sorted(types, key=lambda t: t.slug):
+    ordered = sorted(types, key=lambda t: t.slug)
+    for t in ordered:
         if wanted in (normalize_title(t.title), normalize_title(t.slug)):
+            return t.slug
+    for t in ordered:
+        if wanted == _TRAILING_PARENS.sub("", normalize_title(t.title)):
             return t.slug
     return None

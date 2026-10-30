@@ -80,6 +80,8 @@ class BotApi:
             return BotTokenRevoked(text)
         if status == 409:
             return BotConflict(text)
+        if status == 400 and isinstance(description, str) and "file is too big" in description.casefold():
+            return BotFileTooBig(text)
         return BotApiError(text, retryable=status == 429 or status >= 500)
 
     async def get_me(self) -> dict:
