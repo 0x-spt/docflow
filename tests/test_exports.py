@@ -13,6 +13,7 @@ from docflow.connectors.base import ConnectorError
 from docflow.db.models import Destination, Document, Export, FieldLabels, Tenant
 from docflow.exports import (
     DESTINATION_OFF,
+    NOT_APPROVED,
     RETRY_DELAYS,
     STALE_NOTIFICATION,
     build_export_doc,
@@ -560,3 +561,15 @@ async def test_deliver_uses_tenant_labels(session, fake_connector, settings, blo
         await run(session, row.id, settings, blobs)
     assert _vat_title(fake_connector.docs[0].schema) == "Налог"
     assert _vat_title(fake_connector.docs[1].schema) != "Налог"
+
+
+async def test_deliver_export_on_auto_document_fails_clean(session, fake_connector, settings, blobs):
+    t, doc = await setup(session, status="failed", data={})
+    doc.schema_slug, doc.schema_version = "auto", 0
+    dest = await add_dest(session, t.id)
+    await enqueue_exports(session, doc, "export", {dest.id}, ListEnqueuer())
+    (row,) = await exports_of(session, doc.id)
+    row, _ = await run(session, row.id, settings, blobs)
+    assert row.status == "failed"
+    assert row.last_error == NOT_APPROVED.format(status="failed")
+    assert fake_connector.calls == []

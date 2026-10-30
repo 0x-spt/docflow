@@ -21,7 +21,7 @@ from docflow.labels import (
     prune_label_set,
     queue_fields_for,
 )
-from docflow.schemas.catalog import list_doc_types
+from docflow.schemas.catalog import AUTO_SLUG, list_doc_types
 from docflow.schemas.library import builtin_schemas
 from docflow.schemas.llm import to_json_schema
 from docflow.schemas.model import DocSchema
@@ -31,6 +31,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/schemas", tags=["schemas"])
 
 SAVE_ATTEMPTS = 3
+# служебные имена: auto — «определить тип», unknown — «не знаю» в перечне классификации
+RESERVED_SLUGS = (AUTO_SLUG, "unknown")
 
 ManagerDep = Annotated[Principal, Depends(require_owner_or_key)]
 
@@ -79,6 +81,7 @@ async def _latest_visible_version(session, tenant_id, slug: str) -> int:
         "и `version=1` по-прежнему означает встроенную. Ошибка в схеме — 422, `loc` указывает на поле или правило. "
         "`expected_version` — версия, которую видел редактор (`GET ...?raw=true`, 0 — схемы ещё нет): если схему "
         "успели изменить, 409. Подписи и поля очереди удалённых полей убираются в той же транзакции. "
+        "Имена `auto` и `unknown` зарезервированы — 422. "
         "403 — сессия оператора (нужен владелец или ключ API)."
     ),
 )
@@ -90,6 +93,8 @@ async def create_schema(
     expected_version: int | None = Query(None, ge=0, description="Версия схемы, с которой начал редактор"),
 ) -> dict[str, Any]:
     tenant_id = manager.tenant_id
+    if schema.slug in RESERVED_SLUGS:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"Служебное имя «{schema.slug}» зарезервировано")
     for _ in range(SAVE_ATTEMPTS):
         if expected_version is not None:
             try:

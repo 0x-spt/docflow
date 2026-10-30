@@ -25,6 +25,7 @@ from docflow.api.deps import (
 )
 from docflow.db.models import Document
 from docflow.intake import (
+    IntakeConflict,
     IntakeDeps,
     IntakeEnqueueFailed,
     IntakeError,
@@ -35,6 +36,7 @@ from docflow.intake import (
     IntakeTooLarge,
     IntakeUnsupported,
     accept_document,
+    retype_document,
 )
 from docflow.labels import LabelSet, apply_labels, get_label_sets, queue_fields_for, resolve_labeled
 from docflow.pdf.digital import render_digital_pdf
@@ -60,6 +62,7 @@ REVIEW_NOTE_MAX = 1000
 
 # сигнатура → MIME для хранилища; заголовку клиента не верим
 _INTAKE_STATUS: dict[type[IntakeError], int] = {
+    IntakeConflict: status.HTTP_409_CONFLICT,
     IntakeInvalid: status.HTTP_422_UNPROCESSABLE_CONTENT,
     IntakeTooLarge: status.HTTP_413_CONTENT_TOO_LARGE,
     IntakeUnsupported: status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
@@ -100,10 +103,13 @@ async def _get_own(session: AsyncSession, tenant_id: uuid.UUID, raw_id: str) -> 
     description=(
         "Принимает один или несколько файлов (JPEG, PNG, WEBP, TIFF, HEIC, PDF) одного документа и ставит его "
         "в очередь. Возвращает id и статус `queued`; результат — через `GET /v1/documents/{id}` или вебхук. "
+        "`schema=auto` — тип определит сервер по первой странице (в документе сначала `auto`, версия 0); "
+        "`schema_version` для `auto` игнорируется. "
         "Повтор с тем же заголовком `Idempotency-Key` (до 255 символов) вернёт 200 и исходный документ без "
         "повторной обработки — даже если файлы в повторе другие: они не читаются и не проверяются. "
         "Ошибки: 413 — файл или весь запрос больше лимита, 415 — неподдерживаемый или битый файл, "
-        "422 — неизвестная схема, неверный режим, нет файлов, слишком много файлов или страниц."
+        "422 — неизвестная схема, неверный режим, нет файлов, слишком много файлов или страниц; "
+        "402 — страницы месяца по тарифу исчерпаны."
     ),
     responses={200: {"description": "Документ с этим Idempotency-Key уже был принят"}},
 )
@@ -358,6 +364,40 @@ async def get_document_page(
     except BlobNotFound:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "страница не найдена") from None
     return Response(content=image, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"})
+
+
+class RetypeIn(BaseModel):
+    schema_slug: str = Field(alias="schema", description="slug выбранного типа документа, не `auto`")
+
+
+@router.post(
+    "/{document_id}/retype",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Распознать заново с выбранным типом",
+    description=(
+        "Только для документа, который упал при определении типа (`failed`, схема `auto`, модель не вызывалась): "
+        "ставит те же файлы в очередь с выбранным типом (последняя версия). Возвращает id и статус `queued`. "
+        "409 — тип документа уже известен или документ не в `failed` (в том числе повторный запрос); "
+        "422 — `schema` равна `auto` или такой схемы нет; 402 — страницы месяца по тарифу исчерпаны; "
+        "503 — не удалось поставить в очередь, документ остаётся `failed`; 404 — чужой или несуществующий."
+    ),
+)
+async def retype_document_endpoint(
+    document_id: str,
+    body: RetypeIn,
+    tenant_id: TenantDep,
+    session: SessionDep,
+    enqueuer: EnqueuerDep,
+    resolver: ResolverDep,
+) -> dict:
+    document = await _get_own(session, tenant_id, document_id)
+    try:
+        document = await retype_document(
+            session, resolver, enqueuer, tenant_id=tenant_id, document_id=document.id, schema_slug=body.schema_slug
+        )
+    except IntakeError as exc:
+        raise HTTPException(_INTAKE_STATUS[type(exc)], exc.message) from None
+    return _accepted(document)
 
 
 class ReviewIn(BaseModel):

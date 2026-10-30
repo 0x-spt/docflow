@@ -206,3 +206,17 @@ async def test_replay_over_limit_returns_existing(sm, deps, tenant_id):
         )
     assert second.created is False
     assert second.document.id == first.document.id
+
+
+async def test_accept_auto_skips_resolver(sm, deps, tenant_id):
+    class Boom(SchemaResolver):
+        async def resolve(self, *a, **k):
+            raise AssertionError("резолвер не должен вызываться для auto")
+
+    boom = IntakeDeps(settings=deps.settings, blobs=deps.blobs, enqueuer=deps.enqueuer, resolver=Boom())
+    async with sm() as s:
+        result = await accept_document(
+            s, boom, tenant_id=tenant_id, schema_slug="auto", schema_version=7, files=[png()]
+        )
+    assert (result.document.schema_slug, result.document.schema_version) == ("auto", 0)
+    assert result.document.status == "queued"

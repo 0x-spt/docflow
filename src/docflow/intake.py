@@ -7,15 +7,16 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from docflow.config import Settings
-from docflow.db.models import Document, Tenant
+from docflow.db.models import BOT_PURPOSES, Document, Export, Tenant
 from docflow.imaging.load import UnsupportedFile, count_pages, detect_kind
 from docflow.pipeline import SchemaResolver, process_job_id
 from docflow.queue import PROCESS_DOCUMENT, Enqueuer
+from docflow.schemas.catalog import AUTO_SLUG
 from docflow.storage.blobs import BlobStore, original_key
 from docflow.usage import limit_message, pages_used
 
@@ -23,6 +24,8 @@ logger = logging.getLogger(__name__)
 
 MODES = ("color", "gray", "bw")
 ENQUEUE_ERROR = "не удалось поставить документ в очередь, загрузите его заново"
+RETYPE_CONFLICT = "Выбрать тип можно только у документа, тип которого не определён"
+RETYPE_AUTO = "Выберите конкретный тип документа"
 
 _IMAGE_TYPES = (
     (b"\xff\xd8\xff", "image/jpeg"),
@@ -50,6 +53,9 @@ class IntakeUnsupported(IntakeError): ...  # 415
 
 
 class IntakeLimitExceeded(IntakeError): ...  # 402
+
+
+class IntakeConflict(IntakeError): ...  # 409
 
 
 class IntakeStorageFailed(IntakeError): ...  # 500
@@ -135,10 +141,15 @@ async def accept_document(
     source_ref: dict | None = None,
 ) -> IntakeResult:
     settings = deps.settings
-    try:
-        schema = await deps.resolver.resolve(session, tenant_id, schema_slug, schema_version)
-    except LookupError as exc:
-        raise IntakeInvalid(str(exc)) from None
+    if schema_slug == AUTO_SLUG:
+        # тип определит воркер; версия из запроса не имеет смысла
+        slug, version = AUTO_SLUG, 0
+    else:
+        try:
+            schema = await deps.resolver.resolve(session, tenant_id, schema_slug, schema_version)
+        except LookupError as exc:
+            raise IntakeInvalid(str(exc)) from None
+        slug, version = schema.slug, schema.version
     if mode not in MODES:
         raise IntakeInvalid("mode должен быть одним из: color, gray, bw")
 
@@ -182,8 +193,8 @@ async def accept_document(
     document = Document(
         id=doc_id,
         tenant_id=tenant_id,
-        schema_slug=schema.slug,
-        schema_version=schema.version,
+        schema_slug=slug,
+        schema_version=version,
         status="queued",
         idempotency_key=idempotency_key,
         files=keys,
@@ -232,3 +243,70 @@ async def accept_document(
             raise IntakeEnqueueFailed(ENQUEUE_ERROR) from None
         logger.info("документ %s уже забран воркером, ошибка постановки не влияет", doc_id)
     return IntakeResult(document, created=True)
+
+
+async def retype_document(
+    session: AsyncSession,
+    resolver: SchemaResolver,
+    enqueuer: Enqueuer,
+    *,
+    tenant_id: uuid.UUID,
+    document_id: uuid.UUID,
+    schema_slug: str,
+) -> Document:
+    """«Распознать заново» с выбранным типом: failed-документ без определённого типа снова встаёт в очередь."""
+    if schema_slug == AUTO_SLUG:
+        raise IntakeInvalid(RETYPE_AUTO)
+    try:
+        schema = await resolver.resolve(session, tenant_id, schema_slug, None)
+    except LookupError as exc:
+        raise IntakeInvalid(str(exc)) from None
+    await check_limit(session, tenant_id)  # документ снова станет считаться в страницах месяца
+
+    # атомарно: двойное нажатие и гонка с воркером дают один запуск, второй получит rowcount 0
+    res = await session.execute(
+        update(Document)
+        .where(
+            Document.id == document_id,
+            Document.tenant_id == tenant_id,
+            Document.status == "failed",
+            Document.schema_slug == AUTO_SLUG,
+            Document.model.is_(None),
+        )
+        .values(
+            status="queued",
+            schema_slug=schema.slug,
+            schema_version=schema.version,
+            error=None,
+            finished_at=None,
+            claimed_at=None,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if res.rowcount != 1:
+        await session.rollback()
+        raise IntakeConflict(RETYPE_CONFLICT)
+    # ответ бота в чат уникален по (документ, чат, повод): без чистки новый результат не отправился бы
+    await session.execute(
+        delete(Export)
+        .where(Export.document_id == document_id, Export.purpose.in_(BOT_PURPOSES))
+        .execution_options(synchronize_session=False)
+    )
+    await session.commit()
+
+    try:
+        await enqueuer.enqueue(PROCESS_DOCUMENT, str(document_id), job_id=process_job_id(document_id))
+    except Exception:
+        logger.exception("не удалось поставить документ %s в очередь", document_id)
+        # как при загрузке: failed только из queued, а если воркер уже забрал документ — не трогаем
+        res = await session.execute(
+            update(Document)
+            .where(Document.id == document_id, Document.status == "queued")
+            .values(status="failed", error=ENQUEUE_ERROR, finished_at=datetime.now(UTC))
+            .execution_options(synchronize_session=False)
+        )
+        await session.commit()
+        if res.rowcount == 1:
+            raise IntakeEnqueueFailed(ENQUEUE_ERROR) from None
+        logger.info("документ %s уже забран воркером, ошибка постановки не влияет", document_id)
+    return await session.get(Document, document_id, populate_existing=True)
