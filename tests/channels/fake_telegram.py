@@ -13,6 +13,8 @@ class FakeTelegram:
     """updates — очередь входящих; files — file_id → байты; calls — (метод, тело) каждого запроса.
 
     fail_with: метод (или "*") → число (HTTP-статус), (статус, тело) или исключение, которое будет выброшено.
+    fail_files: file_id, на которых getFile отвечает 500 (сбой одного файла, а не всего метода).
+    on_call: вызывается с именем метода при каждом запросе, чтобы проверить состояние в этот момент.
     """
 
     def __init__(self, username: str = "acme_bot"):
@@ -23,6 +25,8 @@ class FakeTelegram:
         self.fail_with: dict[str, object] = {}
         # False: getFile не сообщает размер, и клиент обязан резать поток сам
         self.report_size = True
+        self.fail_files: set[str] = set()
+        self.on_call = None
         self.transport = httpx.MockTransport(self._handle)
 
     def _failure(self, method: str):
@@ -32,6 +36,8 @@ class FakeTelegram:
         m = FILE_PATH.match(request.url.path)
         if m:
             self.calls.append(("download", m["path"]))
+            if self.on_call:
+                self.on_call("download")
             fail = self._failure("download")
             if isinstance(fail, Exception):
                 raise fail
@@ -48,6 +54,10 @@ class FakeTelegram:
         else:
             payload = {"multipart": request.content, "content_type": request.headers.get("content-type")}
         self.calls.append((method, payload))
+        if self.on_call:
+            self.on_call(method)
+        if method == "getFile" and payload["file_id"] in self.fail_files:
+            return httpx.Response(500, json={"ok": False, "description": "failure"})
         fail = self._failure(method)
         if isinstance(fail, Exception):
             raise fail
