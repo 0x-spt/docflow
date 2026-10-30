@@ -46,3 +46,18 @@ def test_upd_titles_fixed():
     assert fields["vat"].title == "НДС"
     assert "Расчётный счёт" in fields["account"].description
     assert "Корреспондентский" not in fields["account"].description
+
+
+def test_web_fixture_matches_builtins():
+    """Фикстура веб-тестов (web/tests/unit/fixtures/builtin.json) равна текущим встроенным схемам."""
+    import json
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[2] / "web" / "tests" / "unit" / "fixtures" / "builtin.json"
+    current = {k: v.model_dump(mode="json") for k, v in builtin_schemas().items()}
+    assert json.loads(path.read_text(encoding="utf-8")) == current, (
+        'фикстура устарела; обновить: .venv/Scripts/python -X utf8 -c "import json;'
+        "from docflow.schemas.library import builtin_schemas as b;"
+        "print(json.dumps({k:v.model_dump(mode='json') for k,v in b().items()},ensure_ascii=False,indent=1))\""
+        " > web/tests/unit/fixtures/builtin.json"
+    )

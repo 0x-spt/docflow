@@ -239,10 +239,23 @@ export interface SchemaColumn {
   values?: string[] | null;
 }
 
+/** Правило проверки: у поля или у документа */
+export interface RuleSpec {
+  kind: string;
+  params: Record<string, unknown>;
+}
+
 export interface SchemaField extends Omit<SchemaColumn, "type"> {
   type: FieldType;
   required?: boolean;
   columns?: SchemaColumn[] | null;
+  rules?: RuleSpec[];
+}
+
+/** Элемент detail 422: путь до места ошибки и текст */
+export interface ValidationItem {
+  loc: (string | number)[];
+  msg: string;
 }
 
 /** GET /v1/schemas/{slug}?version= */
@@ -252,6 +265,7 @@ export interface DocSchema {
   title: string;
   description: string;
   fields: SchemaField[];
+  rules?: RuleSpec[];
 }
 
 /** Поле формы подключения (GET /v1/connectors) */

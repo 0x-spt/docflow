@@ -1,0 +1,648 @@
+{
+ "invoice_ru": {
+  "slug": "invoice_ru",
+  "version": 1,
+  "title": "Счёт на оплату (РФ)",
+  "description": "Счёт на оплату от поставщика покупателю, с реквизитами для платежа и таблицей позиций.",
+  "fields": [
+   {
+    "name": "number",
+    "type": "string",
+    "title": "Номер",
+    "description": "Номер счёта строкой, как написан (может быть «15», «СЧ-0042/А»). Только номер, без слов «Счёт №» и без даты.",
+    "values": null,
+    "required": true,
+    "columns": null,
+    "rules": []
+   },
+   {
+    "name": "issued",
+    "type": "date",
+    "title": "Дата",
+    "description": "Дата счёта (после «от»). Если месяц прописью («5 марта 2026 г.») — переведи в число. null, если даты нет.",
+    "values": null,
+    "required": true,
+    "columns": null,
+    "rules": [
+     {
+      "kind": "date_not_future",
+      "params": {}
+     }
+    ]
+   },
+   {
+    "name": "supplier",
+    "type": "string",
+    "title": "Поставщик",
+    "description": "Поставщик (получатель платежа): наименование как написано, с формой («ООО «Ромашка»», «ИП Иванов И. И.»).",
+    "values": null,
+    "required": false,
+    "columns": null,
+    "rules": []
+   },
+   {
+    "name": "supplier_inn",
+    "type": "string",
+    "title": "ИНН поставщика",
+    "description": "ИНН поставщика: 10 цифр (юрлицо) или 12 (ИП), только цифры, без пробелов. Не путай с КПП и ИНН покупателя.",
+    "values": null,
+    "required": false,
+    "columns": null,
+    "rules": [
+     {
+      "kind": "inn",
+      "params": {}
+     }
+    ]
+   },
+   {
+    "name": "supplier_kpp",
+    "type": "string",
+    "title": "КПП поставщика",
+    "description": "КПП поставщика: ровно 9 цифр. null у ИП — у них КПП нет.",
+    "values": null,
+    "required": false,
+    "columns": null,
+    "rules": [
+     {
+      "kind": "kpp",
+      "params": {}
+     }
+    ]
+   },
+   {
+    "name": "buyer",
+    "type": "string",
+    "title": "Покупатель",
+    "description": "Покупатель (плательщик): наименование как написано. null, если не указан.",
+    "values": null,
+    "required": false,
+    "columns": null,
+    "rules": []
+   },
+   {
+    "name": "buyer_inn",
+    "type": "string",
+    "title": "ИНН покупателя",
+    "description": "ИНН покупателя: 10 или 12 цифр, без пробелов. null, если не указан.",
+    "values": null,
+    "required": false,
+    "columns": null,
+    "rules": [
+     {
+      "kind": "inn",
+      "params": {}
+     }
+    ]
+   },
+   {
+    "name": "bik",
+    "type": "string",
+    "title": "БИК банка поставщика",
+    "description": "БИК банка поставщика: 9 цифр (начинается с 04). Берётся из блока банковских реквизитов.",
+    "values": null,
+    "required": false,
+    "columns": null,
+    "rules": [
+     {
+      "kind": "bik",
+      "params": {}
+     }
+    ]
+   },
+   {
+    "name": "account",
+    "type": "string",
+    "title": "Расчётный счёт поставщика",
+    "description": "Расчётный счёт поставщика (р/с): 20 цифр подряд, без пробелов и точек.",
+    "values": null,
+    "required": false,
+    "columns": null,
+    "rules": []
+   },
+   {
+    "name": "corr_account",
+    "type": "string",
+    "title": "Корр. счёт банка",
+    "description": "Корреспондентский счёт банка (к/с): 20 цифр подряд, без пробелов. Не путай с расчётным счётом.",
+    "values": null,
+    "required": false,
+    "columns": null,
+    "rules": []
+   },
+   {
+    "name": "items",
+    "type": "table",
+    "title": "Позиции",
+    "description": "Все строки таблицы товаров/услуг по порядку, без строки «Итого».",
+    "values": null,
+    "required": true,
+    "columns": [
+     {
+      "name": "name",
+      "type": "string",
+      "title": "Наименование",
+      "description": "Наименование товара или услуги целиком, как написано.",
+      "values": null
+     },
+     {
+      "name": "qty",
+      "type": "number",
+      "title": "Кол-во",
+      "description": "Количество (число). «2,5» = 2.5. null, если не указано.",
+      "values": null
+     },
+     {
+      "name": "unit",
+      "type": "string",
+      "title": "Ед. изм.",
+      "description": "Единица измерения как написана: «шт», «кг», «усл.», «час». null, если нет.",
+      "values": null
+     },
+     {
+      "name": "price",
+      "type": "number",
+      "title": "Цена",
+      "description": "Цена ЗА ЕДИНИЦУ в рублях числом, без пробелов: «12 500,50» = 12500.5. null, если нет.",
+      "values": null
+     },
+     {
+      "name": "amount",
+      "type": "number",
+      "title": "Сумма",
+      "description": "Сумма по строке в рублях, как напечатана в графе «Сумма» (не пересчитывай сам). Если НДС начисляется сверху, это сумма БЕЗ НДС; если «в т.ч. НДС» — с НДС. null, если нет.",
+      "values": null
+     }
+    ],
+    "rules": []
+   },
+   {
+    "name": "subtotal",
+    "type": "number",
+    "title": "Итого без НДС",
+    "description": "Строка «Итого» под таблицей: сумма граф «Сумма» по всем строкам, в рублях ТАК, КАК НАПЕЧАТАНА, до начисления НДС сверху. Если строки «Итого» нет — null.",
+    "values": null,
+    "required": false,
+    "columns": null,
+    "rules": []
+   },
+   {
+    "name": "total",
+    "type": "number",
+    "title": "Всего к оплате",
+    "description": "Итоговая сумма к оплате («Всего к оплате») в рублях ТАК, КАК НАПЕЧАТАНА, включая НДС. Не пересчитывай.",
+    "values": null,
+    "required": true,
+    "columns": null,
+    "rules": []
+   },
+   {
+    "name": "vat",
+    "type": "number",
+    "title": "НДС",
+    "description": "Сумма НДС в рублях, как напечатана. null, если «Без НДС» или не указан.",
+    "values": null,
+    "required": false,
+    "columns": null,
+    "rules": []
+   }
+  ],
+  "rules": [
+   {
+    "kind": "table_sum_equals",
+    "params": {
+     "table": "items",
+     "column": "amount",
+     "total": "subtotal",
+     "tolerance": 0.01
+    }
+   },
+   {
+    "kind": "table_row_product",
+    "params": {
+     "table": "items",
+     "qty": "qty",
+     "price": "price",
+     "amount": "amount"
+    }
+   },
+   {
+    "kind": "account_matches_bik",
+    "params": {
+     "account": "account",
+     "bik": "bik"
+    }
+   },
+   {
+    "kind": "total_consistent",
+    "params": {
+     "total": "total",
+     "subtotal": "subtotal",
+     "vat": "vat",
+     "table": "items",
+     "column": "amount",
+     "tolerance": 0.01
+    }
+   }
+  ]
+ },
+ "passport_ru": {
+  "slug": "passport_ru",
+  "version": 1,
+  "title": "Паспорт гражданина РФ",
+  "description": "Разворот паспорта РФ с фотографией и персональными данными.",
+  "fields": [
+   {
+    "name": "series",
+    "type": "string",
+    "title": "Серия",
+    "description": "Серия паспорта: 4 цифры подряд без пробелов («4515»). Если напечатано «45 15» — склей.",
+    "values": null,
+    "required": true,
+    "columns": null,
+    "rules": [
+     {
+      "kind": "regex",
+      "params": {
+       "pattern": "^\\d{4}$"
+      }
+     }
+    ]
+   },
+   {
+    "name": "number",
+    "type": "string",
+    "title": "Номер паспорта",
+    "description": "Номер паспорта: 6 цифр подряд, с ведущими нулями («012345»). Строкой, не числом.",
+    "values": null,
+    "required": true,
+    "columns": null,
+    "rules": [
+     {
+      "kind": "regex",
+      "params": {
+       "pattern": "^\\d{6}$"
+      }
+     }
+    ]
+   },
+   {
+    "name": "full_name",
+    "type": "string",
+    "title": "ФИО",
+    "description": "ФИО целиком в именительном падеже, как напечатано: «ИВАНОВ ИВАН ИВАНОВИЧ». Фамилия, имя и отчество на отдельных строках — склей через пробел.",
+    "values": null,
+    "required": true,
+    "columns": null,
+    "rules": []
+   },
+   {
+    "name": "birth_date",
+    "type": "date",
+    "title": "Дата рождения",
+    "description": "Дата рождения. На паспорте «05.03.1990» — переведи в число-месяц-год.",
+    "values": null,
+    "required": true,
+    "columns": null,
+    "rules": [
+     {
+      "kind": "date_not_future",
+      "params": {}
+     }
+    ]
+   },
+   {
+    "name": "birth_place",
+    "type": "string",
+    "title": "Место рождения",
+    "description": "Место рождения как написано, без сокращений и исправлений (например, «ГОР. МОСКВА»).",
+    "values": null,
+    "required": false,
+    "columns": null,
+    "rules": []
+   },
+   {
+    "name": "issued_by",
+    "type": "string",
+    "title": "Кем выдан",
+    "description": "Кем выдан: орган целиком как написано, строки склей через пробел.",
+    "values": null,
+    "required": true,
+    "columns": null,
+    "rules": []
+   },
+   {
+    "name": "issue_date",
+    "type": "date",
+    "title": "Дата выдачи",
+    "description": "Дата выдачи паспорта (после «Дата выдачи»).",
+    "values": null,
+    "required": true,
+    "columns": null,
+    "rules": [
+     {
+      "kind": "date_not_future",
+      "params": {}
+     }
+    ]
+   },
+   {
+    "name": "division_code",
+    "type": "string",
+    "title": "Код подразделения",
+    "description": "Код подразделения в формате «123-456» (3 цифры, дефис, 3 цифры).",
+    "values": null,
+    "required": true,
+    "columns": null,
+    "rules": [
+     {
+      "kind": "regex",
+      "params": {
+       "pattern": "^\\d{3}-\\d{3}$"
+      }
+     }
+    ]
+   }
+  ],
+  "rules": [
+   {
+    "kind": "date_order",
+    "params": {
+     "earlier": "birth_date",
+     "later": "issue_date"
+    }
+   }
+  ]
+ },
+ "upd_ru": {
+  "slug": "upd_ru",
+  "version": 1,
+  "title": "Универсальный передаточный документ (УПД)",
+  "description": "УПД (счёт-фактура и передаточный документ) с таблицей товаров, статусом и участниками сделки.",
+  "fields": [
+   {
+    "name": "number",
+    "type": "string",
+    "title": "Номер",
+    "description": "Номер УПД строкой, как написан (из шапки «Счёт-фактура № … от …»).",
+    "values": null,
+    "required": true,
+    "columns": null,
+    "rules": []
+   },
+   {
+    "name": "issued",
+    "type": "date",
+    "title": "Дата",
+    "description": "Дата УПД (после «от»). Месяц прописью переведи в число. null, если даты нет.",
+    "values": null,
+    "required": true,
+    "columns": null,
+    "rules": [
+     {
+      "kind": "date_not_future",
+      "params": {}
+     }
+    ]
+   },
+   {
+    "name": "status",
+    "type": "enum",
+    "title": "Статус УПД",
+    "description": "Статус УПД из левого верхнего угла: «1» — счёт-фактура и передаточный документ, «2» — только передаточный документ. null, если не виден.",
+    "values": [
+     "1",
+     "2"
+    ],
+    "required": false,
+    "columns": null,
+    "rules": []
+   },
+   {
+    "name": "supplier",
+    "type": "string",
+    "title": "Поставщик",
+    "description": "Продавец: наименование как написано, с формой собственности.",
+    "values": null,
+    "required": false,
+    "columns": null,
+    "rules": []
+   },
+   {
+    "name": "supplier_inn",
+    "type": "string",
+    "title": "ИНН поставщика",
+    "description": "ИНН продавца из строки «ИНН/КПП» — цифры до косой черты: 10 или 12 цифр без пробелов.",
+    "values": null,
+    "required": false,
+    "columns": null,
+    "rules": [
+     {
+      "kind": "inn",
+      "params": {}
+     }
+    ]
+   },
+   {
+    "name": "supplier_kpp",
+    "type": "string",
+    "title": "КПП поставщика",
+    "description": "КПП продавца: 9 цифр после косой черты в строке «ИНН/КПП». null у ИП.",
+    "values": null,
+    "required": false,
+    "columns": null,
+    "rules": [
+     {
+      "kind": "kpp",
+      "params": {}
+     }
+    ]
+   },
+   {
+    "name": "shipper",
+    "type": "string",
+    "title": "Грузоотправитель",
+    "description": "Грузоотправитель: наименование и адрес как написаны. Если написано «он же» — верни «он же». null, если не указан.",
+    "values": null,
+    "required": false,
+    "columns": null,
+    "rules": []
+   },
+   {
+    "name": "consignee",
+    "type": "string",
+    "title": "Грузополучатель",
+    "description": "Грузополучатель: наименование и адрес как написаны. Если «он же» — верни «он же». null, если не указан.",
+    "values": null,
+    "required": false,
+    "columns": null,
+    "rules": []
+   },
+   {
+    "name": "buyer",
+    "type": "string",
+    "title": "Покупатель",
+    "description": "Покупатель: наименование как написано.",
+    "values": null,
+    "required": false,
+    "columns": null,
+    "rules": []
+   },
+   {
+    "name": "buyer_inn",
+    "type": "string",
+    "title": "ИНН покупателя",
+    "description": "ИНН покупателя (цифры до косой черты в «ИНН/КПП»): 10 или 12 цифр.",
+    "values": null,
+    "required": false,
+    "columns": null,
+    "rules": [
+     {
+      "kind": "inn",
+      "params": {}
+     }
+    ]
+   },
+   {
+    "name": "buyer_kpp",
+    "type": "string",
+    "title": "КПП покупателя",
+    "description": "КПП покупателя: 9 цифр после косой черты. null у ИП.",
+    "values": null,
+    "required": false,
+    "columns": null,
+    "rules": [
+     {
+      "kind": "kpp",
+      "params": {}
+     }
+    ]
+   },
+   {
+    "name": "bik",
+    "type": "string",
+    "title": "БИК банка поставщика",
+    "description": "БИК банка продавца, если указан в реквизитах: 9 цифр. null, если банковских реквизитов нет.",
+    "values": null,
+    "required": false,
+    "columns": null,
+    "rules": [
+     {
+      "kind": "bik",
+      "params": {}
+     }
+    ]
+   },
+   {
+    "name": "account",
+    "type": "string",
+    "title": "Расчётный счёт поставщика",
+    "description": "Расчётный счёт продавца (р/с), 20 цифр без пробелов. null, если реквизитов нет.",
+    "values": null,
+    "required": false,
+    "columns": null,
+    "rules": []
+   },
+   {
+    "name": "items",
+    "type": "table",
+    "title": "Позиции",
+    "description": "Все строки таблицы товаров (работ, услуг) по порядку, без строки «Всего к оплате».",
+    "values": null,
+    "required": true,
+    "columns": [
+     {
+      "name": "name",
+      "type": "string",
+      "title": "Наименование",
+      "description": "Наименование товара (графа 1) целиком, как написано.",
+      "values": null
+     },
+     {
+      "name": "unit",
+      "type": "string",
+      "title": "Ед. изм.",
+      "description": "Единица измерения (графа 2/2а): «шт», «кг». null, если нет.",
+      "values": null
+     },
+     {
+      "name": "qty",
+      "type": "number",
+      "title": "Кол-во",
+      "description": "Количество (графа 3). «2,5» = 2.5. null, если не указано.",
+      "values": null
+     },
+     {
+      "name": "price",
+      "type": "number",
+      "title": "Цена",
+      "description": "Цена за единицу без НДС (графа 4) в рублях числом. null, если нет.",
+      "values": null
+     },
+     {
+      "name": "amount",
+      "type": "number",
+      "title": "Сумма без НДС",
+      "description": "Стоимость без налога, всего (графа 5), как напечатана. null, если нет.",
+      "values": null
+     },
+     {
+      "name": "vat_amount",
+      "type": "number",
+      "title": "Сумма НДС",
+      "description": "Сумма налога (графа 8) как напечатана. null при «без НДС».",
+      "values": null
+     },
+     {
+      "name": "amount_with_vat",
+      "type": "number",
+      "title": "Сумма с НДС",
+      "description": "Стоимость с налогом, всего (графа 9), как напечатана. null, если нет.",
+      "values": null
+     }
+    ],
+    "rules": []
+   },
+   {
+    "name": "total",
+    "type": "number",
+    "title": "Всего с НДС",
+    "description": "«Всего к оплате»: стоимость с налогом (графа 9) итоговой строки, ТАК, КАК НАПЕЧАТАНО. Не пересчитывай.",
+    "values": null,
+    "required": true,
+    "columns": null,
+    "rules": []
+   },
+   {
+    "name": "vat",
+    "type": "number",
+    "title": "НДС",
+    "description": "Сумма НДС (графа 8) итоговой строки «Всего к оплате». null, если «без НДС».",
+    "values": null,
+    "required": false,
+    "columns": null,
+    "rules": []
+   }
+  ],
+  "rules": [
+   {
+    "kind": "table_sum_equals",
+    "params": {
+     "table": "items",
+     "column": "amount_with_vat",
+     "total": "total",
+     "tolerance": 0.01
+    }
+   },
+   {
+    "kind": "table_row_product",
+    "params": {
+     "table": "items",
+     "qty": "qty",
+     "price": "price",
+     "amount": "amount"
+    }
+   }
+  ]
+ }
+}
