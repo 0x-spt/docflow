@@ -18,6 +18,7 @@ from docflow.db.models import (
     generate_api_key,
     hash_key,
 )
+from docflow.plans import apply_plan
 
 
 async def _tenant(session, name="acme"):
@@ -273,3 +274,13 @@ async def test_unlink_keeps_export_history(session):
     session.expire_all()
     export = (await session.execute(select(Export))).scalar_one()
     assert export.bot_chat_id is None
+
+
+async def test_unlimited_tenant_persists_null_limit(session):
+    t = Tenant(name="big")
+    apply_plan(t, "unlimited")
+    session.add(t)
+    await session.commit()
+    await session.refresh(t)
+    assert t.plan == "unlimited"
+    assert t.pages_limit is None

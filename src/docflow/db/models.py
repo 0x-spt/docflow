@@ -24,7 +24,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from docflow.plans import DEFAULT_PLAN
+from docflow.plans import DEFAULT_PLAN, PLANS
 
 # Явные имена ограничений: миграция и модели обязаны давать одинаковые имена
 NAMING_CONVENTION = {
@@ -84,6 +84,11 @@ def generate_api_key() -> tuple[str, str, str]:
     return plain, plain[:8], hash_key(plain)
 
 
+def _default_pages_limit(context) -> int | None:
+    """Лимит по тарифу тенанта: явный unlimited не должен получить 50 от значения по умолчанию."""
+    return PLANS[context.get_current_parameters().get("plan") or DEFAULT_PLAN].pages_limit
+
+
 class Tenant(Base):
     __tablename__ = "tenants"
     __table_args__ = (CheckConstraint("extractor IN ('claude', 'ollama')", name="extractor"),)
@@ -96,7 +101,7 @@ class Tenant(Base):
     auto_ok: Mapped[bool] = mapped_column(Boolean, default=True)
     # тариф и лимит страниц в месяц (None — без лимита); новые тенанты начинают с пробного
     plan: Mapped[str] = mapped_column(String, default=DEFAULT_PLAN)
-    pages_limit: Mapped[int | None] = mapped_column(Integer, nullable=True, default=50)
+    pages_limit: Mapped[int | None] = mapped_column(Integer, nullable=True, default=_default_pages_limit)
     created_at: Mapped[datetime] = _created()
 
 
