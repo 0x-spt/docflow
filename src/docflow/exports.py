@@ -8,6 +8,7 @@
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -20,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from docflow.config import Settings
 from docflow.connectors.base import REGISTRY, Connector, ConnectorError, DestCtx, ExportDoc, supports
 from docflow.db.models import Destination, Document, Export
+from docflow.labels import apply_labels, get_label_set
 from docflow.pdf.digital import render_digital_pdf
 from docflow.queue import DELIVER_EXPORT, Enqueuer
 from docflow.routing import RoutingDecision
@@ -183,8 +185,19 @@ def _number(value: Any) -> str | None:
     return text or None
 
 
-def build_export_doc(document: Document, schema: DocSchema, settings: Settings, blobs: BlobStore) -> ExportDoc:
-    """Документ для коннектора. PDF читаются лениво: коннектор, которому они не нужны, их не грузит."""
+def build_export_doc(
+    document: Document,
+    schema: DocSchema,
+    settings: Settings,
+    blobs: BlobStore,
+    labels: Mapping[str, str] | None = None,
+) -> ExportDoc:
+    """Документ для коннектора. PDF читаются лениво: коннектор, которому они не нужны, их не грузит.
+
+    schema — исходная; в `ExportDoc.schema` она уходит с названиями компании, исходная — в `base_schema`.
+    """
+    base_schema = schema
+    schema = apply_labels(base_schema, labels)
     doc_id = document.id
     data = dict(document.data or {})
     status, created_at, reviewed = document.status, document.created_at, document.reviewed_at is not None
@@ -227,6 +240,7 @@ def build_export_doc(document: Document, schema: DocSchema, settings: Settings, 
         issues=[dict(i) for i in document.issues or []],
         digital_loader=load_digital,
         scan_loader=load_scan,
+        base_schema=base_schema,
     )
 
 
@@ -278,7 +292,8 @@ async def _attempt(
         # частная сеть или не та схема — ошибка настройки, повтор не поможет
         raise _Permanent(f"адрес отклонён: {exc}") from None
     ctx = DestCtx(config=dest.config or {}, secrets=secrets, mapping=dest.mapping or {}, http=http)
-    doc = build_export_doc(document, schema, settings, blobs)
+    labels = (await get_label_set(session, document.tenant_id, document.schema_slug)).labels
+    doc = build_export_doc(document, schema, settings, blobs, labels)
     try:
         # свой дедлайн раньше job_timeout arq: иначе задачу отменят вне try и ошибка не попадёт в журнал
         async with asyncio.timeout(CONNECTOR_DEADLINE):

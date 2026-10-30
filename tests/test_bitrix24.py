@@ -8,7 +8,7 @@ import httpx
 import pytest
 import respx
 
-from docflow.connectors.base import REGISTRY, ConnectorError, DestCtx, ExportDoc
+from docflow.connectors.base import REGISTRY, ConnectorError, DestCtx, ExportDoc, RemoteField
 from docflow.schemas.library import builtin_schemas
 
 HOOK = "https://portal.bitrix24.ru/rest/1/s3cr3tk3y/"
@@ -375,3 +375,45 @@ async def test_missing_webhook_and_bad_numbers(http):
         with pytest.raises(ConnectorError) as err:
             await REGISTRY["bitrix24"].export(make_ctx(http, assigned_by_id="abc"), make_doc())
     assert not err.value.retryable
+
+
+async def test_bitrix_remote_fields_user_fields_only(http):
+    with respx.mock() as router:
+        route = router.post(f"{HOOK}crm.deal.fields.json").respond(
+            json={
+                "result": {
+                    "TITLE": {"type": "string", "title": "Название"},
+                    "UF_CRM_INN": {"type": "string", "title": "UF_CRM_INN", "listLabel": "ИНН", "formLabel": "ИНН"},
+                }
+            }
+        )
+        fields = await REGISTRY["bitrix24"].remote_fields(make_ctx(http))
+    assert fields == [RemoteField("UF_CRM_INN", "ИНН")]
+    assert route.call_count == 1
+
+
+async def test_bitrix_remote_fields_label_fallbacks(http):
+    with respx.mock() as router:
+        router.post(f"{HOOK}crm.deal.fields.json").respond(
+            json={
+                "result": {
+                    "UF_CRM_A": {"listLabel": "", "formLabel": "Форма\x07"},
+                    "UF_CRM_B": {"title": "Заголовок"},
+                    "UF_CRM_C": {},
+                }
+            }
+        )
+        fields = await REGISTRY["bitrix24"].remote_fields(make_ctx(http))
+    assert fields == [
+        RemoteField("UF_CRM_A", "Форма"),
+        RemoteField("UF_CRM_B", "Заголовок"),
+        RemoteField("UF_CRM_C", "UF_CRM_C"),
+    ]
+
+
+async def test_bitrix_remote_fields_auth_error(http):
+    with respx.mock() as router:
+        router.post(f"{HOOK}crm.deal.fields.json").respond(401, json={"error": "invalid_token"})
+        with pytest.raises(ConnectorError) as exc:
+            await REGISTRY["bitrix24"].remote_fields(make_ctx(http))
+    assert "s3cr3tk3y" not in exc.value.message

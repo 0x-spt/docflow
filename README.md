@@ -170,7 +170,33 @@ def verify(secret: str, body: bytes, signature: str) -> bool:
 
 Проверяйте подпись по полученным байтам, а не по заново сериализованному JSON. Неуспешные доставки повторяются
 через 10 с, 1 мин, 5 мин, 30 мин, 2 ч. Вебхуки на частные адреса запрещены (`DOCFLOW_WEBHOOK_ALLOW_PRIVATE=true`
-— только для dev и e2e).
+— только для dev, e2e и демо-оверлея `docker-compose.demo.yml`).
+
+## Демо для показа клиенту
+
+Готовый клиент «Демо» с 24 документами разных типов и статусов, цифровыми PDF и подключениями. Письма уходят в Mailpit.
+
+```
+docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d --build
+docker compose -f docker-compose.yml -f docker-compose.demo.yml run --rm worker docflow seed-demo
+```
+
+Команда печатает логин и пароль владельца и оператора и API-ключ — пароль и ключ показываются один раз. Кабинет:
+http://localhost:3000/login, письма (Mailpit): http://localhost:8025. Письма приходят, когда воркер доставит
+документы, обычно в пределах минуты. Повторный запуск: `seed-demo --reset` удаляет прежнего демо-клиента и создаёт заново.
+
+Каждый `--reset` выдаёт новые пароли и API-ключ, а письма прошлых запусков остаются в Mailpit. Перед показом
+очистите ящик, чтобы клиент не увидел старые письма:
+
+```
+curl -X DELETE http://localhost:8025/api/v1/messages
+```
+
+Внешние системы подключаются флагами `--google-key` и `--google-sheet`, `--bitrix-webhook`,
+`--telegram-token` и `--telegram-chat`; без них — только почта. Подробности — в [docs/connectors.md](docs/connectors.md).
+
+Оверлей разрешает вебхуки и подключения на частные адреса (`DOCFLOW_WEBHOOK_ALLOW_PRIVATE=true`) для всех
+клиентов этого стека, не только для демо, и поднимает Mailpit без авторизации — в проде не использовать.
 
 ## Порты
 

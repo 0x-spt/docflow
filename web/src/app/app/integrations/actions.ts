@@ -6,7 +6,7 @@ import { redirect, unstable_rethrow } from "next/navigation";
 import { ApiError } from "@/lib/api";
 import { isUuid } from "@/lib/ids";
 import { apiFetchAuthed } from "@/lib/session";
-import type { ConnectorInfo, Destination, TestResult } from "@/lib/types";
+import type { ConnectorInfo, Destination, RemoteField, RemoteFieldsResult, TestResult } from "@/lib/types";
 
 export type SaveState = {
   error?: string;
@@ -125,6 +125,23 @@ export async function testDestination(id: string): Promise<TestResult> {
     if (e instanceof ApiError && e.status === 404) return { ok: false, message: "Подключение не найдено." };
     console.error("проверка подключения не выполнена", e);
     return { ok: false, message: `Не удалось выполнить проверку. ${FAILED}` };
+  }
+}
+
+/** Поля системы по сохранённым настройкам подключения и подбор сопоставления для схемы slug. Ошибка API - текстом сервера. */
+export async function fetchRemoteFields(id: string, slug: string): Promise<RemoteFieldsResult> {
+  if (!isUuid(id)) return { ok: false, message: "Подключение не найдено." };
+  try {
+    const r = await apiFetchAuthed<{ fields: RemoteField[]; suggested: Record<string, string> }>(
+      `/v1/destinations/${id}/remote-fields?schema=${encodeURIComponent(slug)}`,
+      { method: "POST" },
+    );
+    return { ok: true, fields: r.fields ?? [], suggested: r.suggested ?? {} };
+  } catch (e) {
+    unstable_rethrow(e);
+    if (e instanceof ApiError) return { ok: false, message: e.detail };
+    console.error("поля системы не получены", e);
+    return { ok: false, message: "Не удалось получить поля: сервис недоступен." };
   }
 }
 

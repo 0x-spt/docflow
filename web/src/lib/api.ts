@@ -8,6 +8,8 @@ export class ApiError extends Error {
   constructor(
     public readonly status: number,
     public readonly detail: string,
+    /** Ошибки по полям формы: ключ поля («vat», «items.qty») или «queue_fields» -> текст. */
+    public readonly fieldErrors: Record<string, string> = {},
   ) {
     super(detail);
     this.name = "ApiError";
@@ -66,6 +68,21 @@ function detailOf(body: unknown, fallback: string): string {
   return fallback;
 }
 
+/** Ошибки валидации по полям: `loc` = [body, labels, <ключ>] или [body, queue_fields, …]. Строковый `detail` — пусто. */
+function fieldErrorsOf(body: unknown): Record<string, string> {
+  const detail = (body as { detail?: unknown } | null)?.detail;
+  const out: Record<string, string> = {};
+  if (!Array.isArray(detail)) return out;
+  for (const d of detail) {
+    if (!d || typeof d !== "object") continue;
+    const { loc, msg } = d as { loc?: unknown; msg?: unknown };
+    if (!Array.isArray(loc) || typeof msg !== "string") continue;
+    const key = loc.includes("labels") ? String(loc[loc.length - 1]) : loc.includes("queue_fields") ? "queue_fields" : null;
+    if (key && !(key in out)) out[key] = msg;
+  }
+  return out;
+}
+
 /** JSON-запрос: 204 → undefined, не-2xx → ApiError с `detail` из тела. */
 export async function apiFetch<T>(path: string, init: FetchInit = {}): Promise<T> {
   const res = await apiFetchRaw(path, init);
@@ -77,7 +94,7 @@ export async function apiFetch<T>(path: string, init: FetchInit = {}): Promise<T
     } catch {
       // тело не JSON — остаётся статусный текст
     }
-    throw new ApiError(res.status, detailOf(body, res.statusText || `ошибка ${res.status}`));
+    throw new ApiError(res.status, detailOf(body, res.statusText || `ошибка ${res.status}`), fieldErrorsOf(body));
   }
   return (await res.json()) as T;
 }

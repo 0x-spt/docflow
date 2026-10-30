@@ -1,6 +1,6 @@
 import type { InputHTMLAttributes, SelectHTMLAttributes, TextareaHTMLAttributes } from "react";
 
-type Shared = { label: string; name: string; error?: string; hint?: string };
+type Shared = { label: string; name: string; error?: string; hint?: string; hideLabel?: boolean };
 type InputProps = Shared & { as?: "input" } & Omit<InputHTMLAttributes<HTMLInputElement>, "name">;
 type TextareaProps = Shared & { as: "textarea" } & Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, "name">;
 type SelectProps = Shared & { as: "select" } & Omit<SelectHTMLAttributes<HTMLSelectElement>, "name">;
@@ -11,7 +11,7 @@ const CONTROL =
 
 /** Подпись + поле + текст ошибки, связанные через `htmlFor` и `aria-describedby`. */
 export function Field(props: InputProps | TextareaProps | SelectProps) {
-  const { label, name, error, hint } = props;
+  const { label, name, error, hint, hideLabel } = props;
   const id = `f-${name}`;
   const errId = `${id}-error`;
   const hintId = `${id}-hint`;
@@ -19,8 +19,8 @@ export function Field(props: InputProps | TextareaProps | SelectProps) {
   const common = { id, name, "aria-describedby": describedBy, "aria-invalid": error ? true : undefined };
 
   // собственные пропсы Field не должны попасть в DOM-элемент
-  const { label: _label, name: _name, error: _error, hint: _hint, ...rest } = props;
-  void [_label, _name, _error, _hint];
+  const { label: _label, name: _name, error: _error, hint: _hint, hideLabel: _hide, ...rest } = props;
+  void [_label, _name, _error, _hint, _hide];
   const { className = "", ...attrs } = rest as { className?: string };
   const cls = `${CONTROL} ${className}`;
 
@@ -41,7 +41,7 @@ export function Field(props: InputProps | TextareaProps | SelectProps) {
 
   return (
     <div className="flex flex-col gap-1.5">
-      <label htmlFor={id} className="font-mono text-sm font-medium">
+      <label htmlFor={id} className={hideLabel ? "sr-only" : "font-mono text-sm font-medium"}>
         {label}
       </label>
       {control}

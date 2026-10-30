@@ -75,7 +75,7 @@ from docflow.connectors import base as connectors_base  # noqa: E402
 class FakeConnector(connectors_base.BaseConnector):
     """Фиктивный получатель для тестов: помнит вызовы, ошибки можно подложить.
 
-    error — для test(); export_errors / notify_errors — очереди: каждый вызов забирает первую ошибку.
+    error — для test() и remote_fields(); export_errors / notify_errors — очереди: каждый вызов забирает первую ошибку.
     """
 
     kind = "test_fake"
@@ -98,6 +98,13 @@ class FakeConnector(connectors_base.BaseConnector):
         self.external_id: str | None = "ext-1"
         self.export_delay: float = 0
         self.docs = []
+        self.remote = [connectors_base.RemoteField("amount", "Сумма"), connectors_base.RemoteField("tax", "НДС")]
+
+    async def remote_fields(self, ctx):
+        self.calls.append(("remote_fields", dict(ctx.config), dict(ctx.secrets)))
+        if self.error:
+            raise self.error
+        return self.remote
 
     async def test(self, ctx):
         self.calls.append(("test", dict(ctx.config), dict(ctx.secrets)))

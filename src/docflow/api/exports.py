@@ -27,6 +27,7 @@ from docflow.api.deps import (
 from docflow.db.models import Destination, Document, Export
 from docflow.export_xlsx import build_registry
 from docflow.exports import build_export_doc, export_job_id
+from docflow.labels import apply_labels, get_label_set
 from docflow.queue import DELIVER_EXPORT
 from docflow.serializers import export_item
 
@@ -180,8 +181,9 @@ async def excel_registry(
     documents = (
         await session.execute(select(Document).where(*where).order_by(Document.created_at, Document.id))
     ).scalars().all()
-    docs = [build_export_doc(d, latest, settings, blobs) for d in documents]
-    content = await asyncio.to_thread(build_registry, latest, docs)
+    labels = (await get_label_set(session, tenant_id, schema)).labels
+    docs = [build_export_doc(d, latest, settings, blobs, labels) for d in documents]
+    content = await asyncio.to_thread(build_registry, apply_labels(latest, labels), docs)
     filename = f"docflow-{schema}-{date_from.isoformat()}-{date_to.isoformat()}.xlsx"
     return Response(
         content,

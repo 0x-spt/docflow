@@ -10,7 +10,15 @@ from typing import Any
 
 import httpx
 
-from docflow.connectors.base import REGISTRY, BaseConnector, ConnectorError, DestCtx, ExportDoc, FieldDef
+from docflow.connectors.base import (
+    REGISTRY,
+    BaseConnector,
+    ConnectorError,
+    DestCtx,
+    ExportDoc,
+    FieldDef,
+    RemoteField,
+)
 from docflow.connectors.crm_common import (
     clean,
     counterparty_side,
@@ -28,6 +36,7 @@ COMPANY_TYPE = 4  # ENTITY_TYPE_ID компании в реквизитах
 PRESET_ORG, PRESET_IP = 1, 2  # шаблоны реквизитов Битрикс24: «Организация» и «ИП»
 _AUTH_ERRORS = {"expired_token", "invalid_token", "no_auth_found", "insufficient_scope", "invalid_credentials"}
 _USER_FIELD = re.compile(r"UF_[A-Z0-9_]+")
+USER_FIELD_PREFIX = "UF_CRM_"
 
 
 def _transient(message: str) -> ConnectorError:
@@ -172,6 +181,20 @@ class Bitrix24(BaseConnector):
             clean(profile.get(k)) for k in ("NAME", "LAST_NAME") if isinstance(profile, dict) and profile.get(k)
         )
         return f"Портал доступен, пользователь {name}" if name else "Портал доступен"
+
+    async def remote_fields(self, ctx: DestCtx) -> list[RemoteField]:
+        """Пользовательские поля сделки (UF_CRM_…): только их можно сопоставлять при выгрузке."""
+        fields = await _Session(ctx).call("crm.deal.fields")
+        if not isinstance(fields, dict):
+            return []
+        out = []
+        for code, meta in fields.items():
+            if not (isinstance(code, str) and code.startswith(USER_FIELD_PREFIX) and _USER_FIELD.fullmatch(code)):
+                continue
+            meta = meta if isinstance(meta, dict) else {}
+            title = next((clean(meta.get(k)) for k in ("listLabel", "formLabel", "title") if clean(meta.get(k))), "")
+            out.append(RemoteField(code, title or code))
+        return out
 
     async def export(self, ctx: DestCtx, doc: ExportDoc) -> str | None:
         s = _Session(ctx)

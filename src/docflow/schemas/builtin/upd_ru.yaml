@@ -69,7 +69,7 @@ fields:
   - name: account
     title: Расчётный счёт поставщика
     type: string
-    description: "Корреспондентский счёт банка продавца (к/с), 20 цифр без пробелов. null, если реквизитов нет."
+    description: "Расчётный счёт продавца (р/с), 20 цифр без пробелов. null, если реквизитов нет."
   - name: items
     title: Позиции
     type: table
@@ -110,9 +110,9 @@ fields:
     required: true
     description: "«Всего к оплате»: стоимость с налогом (графа 9) итоговой строки, ТАК, КАК НАПЕЧАТАНО. Не пересчитывай."
   - name: vat
-    title: Всего НДС
+    title: НДС
     type: number
-    description: "«Всего к оплате»: сумма налога (графа 8) итоговой строки. null, если «без НДС»."
+    description: "Сумма НДС (графа 8) итоговой строки «Всего к оплате». null, если «без НДС»."
 rules:
   - kind: table_sum_equals
     params: {table: items, column: amount_with_vat, total: total, tolerance: 0.01}

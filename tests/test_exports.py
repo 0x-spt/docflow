@@ -10,11 +10,12 @@ from sqlalchemy import select
 
 from docflow.config import Settings
 from docflow.connectors.base import ConnectorError
-from docflow.db.models import Destination, Document, Export, Tenant
+from docflow.db.models import Destination, Document, Export, FieldLabels, Tenant
 from docflow.exports import (
     DESTINATION_OFF,
     RETRY_DELAYS,
     STALE_NOTIFICATION,
+    build_export_doc,
     deliver_export,
     enqueue_exports,
     enqueue_routed,
@@ -24,6 +25,7 @@ from docflow.exports import (
 from docflow.pipeline import SchemaResolver
 from docflow.queue import DELIVER_EXPORT, ListEnqueuer
 from docflow.routing import RoutingDecision
+from docflow.schemas.library import builtin_schemas
 from docflow.secrets import NO_KEY, encrypt_secrets
 from docflow.storage.blobs import LocalBlobStore, scan_key
 
@@ -524,3 +526,37 @@ async def test_email_host_ssrf_rechecked_at_delivery(session, settings, blobs):
     (row,) = await exports_of(session, doc.id)
     row, enq = await run(session, row.id, settings, blobs)
     assert row.status == "failed" and "не публичный" in row.last_error and enq.calls == []
+
+
+# --- названия компании ------------------------------------------------------
+
+
+def _vat_title(schema):
+    return next(f.title for f in schema.fields if f.name == "vat")
+
+
+def test_build_export_doc_applies_labels(settings, blobs):
+    schema = builtin_schemas()["invoice_ru"]
+    document = Document(
+        tenant_id=uuid.uuid4(), schema_slug="invoice_ru", schema_version=1, status="ok", files=[], mode="gray",
+        data={**DATA, "vat": 10}, issues=[], pages=1, id=uuid.uuid4(), created_at=datetime.now(UTC),
+    )
+    doc = build_export_doc(document, schema, settings, blobs, labels={"vat": "Налог"})
+    assert _vat_title(doc.schema) == "Налог"
+    assert _vat_title(doc.base_schema) == _vat_title(schema) != "Налог"
+    assert doc.default_schema is doc.base_schema
+    assert doc.data["vat"] == 10
+
+
+async def test_deliver_uses_tenant_labels(session, fake_connector, settings, blobs):
+    t, doc = await setup(session)
+    dest = await add_dest(session, t.id)
+    session.add(FieldLabels(tenant_id=t.id, schema_slug="invoice_ru", labels={"vat": "Налог"}, queue_fields=[]))
+    t2, doc2 = await setup(session)
+    dest2 = await add_dest(session, t2.id)
+    for d, de in ((doc, dest), (doc2, dest2)):
+        await enqueue_exports(session, d, "export", {de.id}, ListEnqueuer())
+        (row,) = await exports_of(session, d.id)
+        await run(session, row.id, settings, blobs)
+    assert _vat_title(fake_connector.docs[0].schema) == "Налог"
+    assert _vat_title(fake_connector.docs[1].schema) != "Налог"

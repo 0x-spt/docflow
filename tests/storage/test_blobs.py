@@ -31,6 +31,17 @@ async def test_put_overwrites_and_leaves_no_temp_files(tmp_path):
     assert [p.name for p in (tmp_path / "a").iterdir()] == ["b.bin"]
 
 
+async def test_delete_removes_and_ignores_missing(tmp_path):
+    store = LocalBlobStore(tmp_path)
+    await store.put("docs/1/scan.pdf", b"%PDF", "application/pdf")
+    await store.delete("docs/1/scan.pdf")
+    assert not await store.exists("docs/1/scan.pdf")
+    await store.delete("docs/1/scan.pdf")
+    await store.delete("nope/x")
+    with pytest.raises(ValueError):
+        await store.delete("../x")
+
+
 async def test_get_missing_raises_keyerror(tmp_path):
     with pytest.raises(KeyError):
         await LocalBlobStore(tmp_path).get("nope/x")
@@ -125,5 +136,8 @@ async def test_s3_roundtrip():
     assert await store.get(key) == b"%PDF"
     with pytest.raises(KeyError):
         await store.get("docs/none/scan.pdf")
+    await store.delete(key)
+    assert not await store.exists(key)
+    await store.delete(key)
     with pytest.raises(ValueError):
         await store.put("../x", b"x", "text/plain")

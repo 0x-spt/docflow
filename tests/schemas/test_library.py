@@ -39,3 +39,10 @@ def test_builtin_schemas_have_titles():
             assert f.title, f"{slug}.{f.name}: нет title"
             for c in f.columns or []:
                 assert c.title, f"{slug}.{f.name}.{c.name}: нет title"
+
+
+def test_upd_titles_fixed():
+    fields = {f.name: f for f in builtin_schemas()["upd_ru"].fields}
+    assert fields["vat"].title == "НДС"
+    assert "Расчётный счёт" in fields["account"].description
+    assert "Корреспондентский" not in fields["account"].description

@@ -1,12 +1,17 @@
 "use client";
 
-import { useActionState, useEffect, useMemo, useRef, useState } from "react";
+import { useActionState, useEffect, useMemo, useRef, useState, useTransition } from "react";
 
-import { saveDestination, type SaveState } from "@/app/app/integrations/actions";
+import { fetchRemoteFields, saveDestination, type SaveState } from "@/app/app/integrations/actions";
 import { Button, Field } from "@/components/ui";
-import type { ConnectorInfo, Destination, FieldDef, MappingSchema } from "@/lib/types";
+import type { ConnectorInfo, Destination, FieldDef, MappingSchema, RemoteField } from "@/lib/types";
 
 const INITIAL: SaveState = {};
+
+/** Подобранные автоматически значения: показываем как предложение, пока их не изменили или не сохранили. */
+type Applied = { slug: string; values: Record<string, string>; saveState: SaveState };
+
+const DATALIST_ID = "remote-fields-list";
 
 const LINK_BTN =
   "inline-flex min-h-11 items-center px-2 font-medium underline decoration-2 underline-offset-4 hover:text-accent-text";
@@ -162,6 +167,8 @@ function MappingEditor({
   onSlug,
   value,
   onChange,
+  remote,
+  suggestedValues,
 }: {
   connector: ConnectorInfo;
   schemas: MappingSchema[];
@@ -169,6 +176,9 @@ function MappingEditor({
   onSlug: (slug: string) => void;
   value: Record<string, string>;
   onChange: (next: Record<string, string>) => void;
+  remote: RemoteField[] | null;
+  /** ключ поля документа -> подобранное значение (бейдж «подобрано», пока значение не менялось) */
+  suggestedValues: Record<string, string>;
 }) {
   const free = FREE_TARGET[connector.kind];
   const withTables = connector.kind === "onec_odata";
@@ -201,11 +211,21 @@ function MappingEditor({
           ))}
         </Field>
       </div>
+      {remote ? (
+        <datalist id={DATALIST_ID}>
+          {remote.map((f) => (
+            <option key={f.code} value={f.code}>
+              {f.title}
+            </option>
+          ))}
+        </datalist>
+      ) : null}
       <ul className="flex flex-col border-2 border-ink bg-card">
         {rows.map((r, i) => {
           const id = `map-${i}`;
           const included = Object.hasOwn(value, r.key);
           const current = value[r.key] ?? "";
+          const suggested = Object.hasOwn(suggestedValues, r.key) && suggestedValues[r.key] === current && current !== "";
           const cell = "min-h-11 w-full border-2 border-ink bg-paper px-3 py-2 text-base";
           return (
             <li
@@ -246,6 +266,8 @@ function MappingEditor({
                   autoComplete="off"
                   disabled={sheets && !included}
                   placeholder={sheets ? `по умолчанию: ${r.label}` : free.placeholder}
+                  list={remote ? DATALIST_ID : undefined}
+                  aria-describedby={suggested ? `${id}-sug` : undefined}
                   aria-label={sheets ? `Название колонки для «${r.label}»` : undefined}
                   onChange={(e) => onChange({ ...value, [r.key]: e.target.value })}
                   className={`${cell} disabled:opacity-50`}
@@ -254,6 +276,7 @@ function MappingEditor({
                 <select
                   id={id}
                   value={current}
+                  aria-describedby={suggested ? `${id}-sug` : undefined}
                   onChange={(e) => onChange({ ...value, [r.key]: e.target.value })}
                   className={cell}
                 >
@@ -265,6 +288,11 @@ function MappingEditor({
                   ))}
                 </select>
               )}
+              {suggested ? (
+                <p id={`${id}-sug`} className="font-mono text-xs text-accent-text sm:col-start-2">
+                  Подобрано автоматически: проверьте и сохраните.
+                </p>
+              ) : null}
             </li>
           );
         })}
@@ -286,6 +314,15 @@ export function DestinationForm({
   const [state, action, pending] = useActionState(saveDestination, INITIAL);
   const [mapping, setMapping] = useState<Record<string, string>>(destination?.mapping ?? {});
   const [slug, setSlug] = useState(() => initialSchema(schemas, destination?.mapping ?? {}));
+  const [remote, setRemote] = useState<RemoteField[] | null>(null);
+  const [applied, setApplied] = useState<Applied | null>(null);
+  const [remoteMsg, setRemoteMsg] = useState<{ text: string; error: boolean } | null>(null);
+  const [loadingRemote, startRemote] = useTransition();
+  // актуальное сопоставление и схема для подстановки после ответа сервера (пока шёл запрос, пользователь мог править)
+  const latest = useRef({ mapping, slug });
+  useEffect(() => {
+    latest.current = { mapping, slug };
+  }, [mapping, slug]);
   const editing = Boolean(destination);
   const savedSecrets = Boolean(destination?.has_secrets);
 
@@ -308,6 +345,56 @@ export function DestinationForm({
   const mappingJson = JSON.stringify(
     Object.fromEntries(scoped.filter((k) => sheets || mapping[k].trim() !== "").map((k) => [k, mapping[k]])),
   );
+
+  const showMapping = hasMapping(connector);
+  const remoteLabel = connector.label;
+  // предложения подмешиваются в пустые строки текущей схемы; заполненные не трогаем
+  const pullFields = () => {
+    if (!destination) return;
+    const reqSlug = slug;
+    startRemote(async () => {
+      setRemoteMsg(null);
+      const res = await fetchRemoteFields(destination.id, reqSlug);
+      if (!res.ok) {
+        setRemoteMsg({ text: res.message, error: true });
+        return;
+      }
+      setRemote(res.fields);
+      const cur = latest.current;
+      if (cur.slug !== reqSlug) {
+        setRemoteMsg({ text: `Поля загружены (${res.fields.length}), но схема документа сменилась: нажмите кнопку ещё раз.`, error: false });
+        return;
+      }
+      const rows = (schemas.find((s) => s.slug === reqSlug)?.rows ?? []).filter(
+        (r) => connector.kind === "onec_odata" || !r.group,
+      );
+      const next = { ...cur.mapping };
+      const values: Record<string, string> = {};
+      // коды, уже занятые в форме (в том числе несохранёнными правками) или выданные в этом проходе
+      const used = new Set(Object.values(next).map((v) => v.trim()).filter(Boolean));
+      // Таблицы без отмеченных строк = «выгружать всё»: подбор не должен сужать выгрузку, отмечаем все поля схемы
+      const widen =
+        connector.kind === "google_sheets" && Object.keys(res.suggested).length > 0 && !rows.some((r) => Object.hasOwn(next, r.key));
+      if (widen) for (const r of rows) next[r.key] = "";
+      for (const r of rows) {
+        const code = res.suggested[r.key];
+        if (!code || used.has(code.trim())) continue;
+        // пустая строка: нет ключа, пустое значение или (Таблицы) поле отмечено без названия
+        if (Object.hasOwn(next, r.key) && next[r.key].trim() !== "") continue;
+        next[r.key] = code;
+        values[r.key] = code;
+        used.add(code.trim());
+      }
+      const n = Object.keys(values).length;
+      setMapping(next);
+      setApplied({ slug: reqSlug, values, saveState: state });
+      setRemoteMsg({
+        text: `Подобрано ${n} из ${rows.length}; полей в ${remoteLabel}: ${res.fields.length}.${widen ? " Отмечены все поля схемы, чтобы не сузить выгрузку." : ""}`,
+        error: false,
+      });
+    });
+  };
+  const suggestedValues = applied && applied.slug === slug && applied.saveState === state ? applied.values : {};
 
   return (
     <form action={action} aria-busy={pending} className="flex flex-col gap-8">
@@ -372,24 +459,53 @@ export function DestinationForm({
         ) : null}
       </section>
 
-      {hasMapping(connector) ? (
+      {showMapping ? (
         <section aria-labelledby="dest-map" className="flex flex-col gap-4">
           <h2 id="dest-map" className="text-2xl font-semibold tracking-tight">
             Сопоставление полей
           </h2>
+          {destination ? (
+            <div className="flex max-w-3xl flex-col gap-2">
+              <p className="text-sm text-muted">Берём поля по сохранённым настройкам подключения.</p>
+              <div>
+                <Button type="button" variant="ghost" onClick={pullFields} disabled={loadingRemote || pending}>
+                  {loadingRemote ? "Читаем поля…" : `Подтянуть поля из ${connector.label}`}
+                </Button>
+              </div>
+              <div role="alert">
+                {remoteMsg?.error ? (
+                  <p className="break-words border-2 border-accent-text bg-paper p-3 font-medium text-accent-text">
+                    {remoteMsg.text}
+                  </p>
+                ) : null}
+              </div>
+              <div role="status" aria-live="polite">
+                {remoteMsg && !remoteMsg.error ? <p className="border-2 border-ink bg-card p-3">{remoteMsg.text}</p> : null}
+              </div>
+            </div>
+          ) : (
+            <p className="max-w-3xl text-sm text-muted">
+              Чтобы подтянуть поля из системы, сначала сохраните подключение.
+            </p>
+          )}
           <MappingEditor
             connector={connector}
             schemas={schemas}
             slug={slug}
-            onSlug={setSlug}
+            onSlug={(v) => {
+              setSlug(v);
+              setRemoteMsg(null);
+            }}
             value={mapping}
             onChange={setMapping}
+            remote={remote}
+            suggestedValues={suggestedValues}
           />
         </section>
       ) : null}
 
       <div className="flex flex-wrap gap-3">
-        <Button type="submit" disabled={pending}>
+        <Button type="submit" disabled={pending || loadingRemote}>
           {pending ? "Сохраняем…" : editing ? "Сохранить" : "Подключить"}
         </Button>
         <Button href="/app/integrations" variant="ghost">

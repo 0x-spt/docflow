@@ -11,7 +11,7 @@ import httpx
 import pytest
 import respx
 
-from docflow.connectors.base import REGISTRY, ConnectorError, DestCtx, ExportDoc
+from docflow.connectors.base import REGISTRY, ConnectorError, DestCtx, ExportDoc, RemoteField
 from docflow.schemas.library import builtin_schemas
 
 ROOT = "https://1c.example.ru/base/odata/standard.odata/"
@@ -691,3 +691,27 @@ async def test_absurd_amount_is_permanent(http, amount):
             await REGISTRY["onec_odata"].export(make_ctx(http), make_doc(items=items))
     assert not err.value.retryable and err.value.message == "некорректная сумма в документе"
     assert not one.posts(PURCHASE)
+
+
+async def test_onec_remote_fields_and_default_mapping(http):
+    from docflow.connectors.onec_odata import ROLES, default_mapping
+
+    with respx.mock() as router:  # ни одного запроса: незамоканный адрес уронил бы тест
+        fields = await REGISTRY["onec_odata"].remote_fields(make_ctx(http))
+        assert len(router.calls) == 0
+    assert fields == [RemoteField(role, label) for role, label in ROLES.items()]
+
+    invoice = builtin_schemas()["invoice_ru"]
+    purchase = default_mapping(invoice, {})
+    assert purchase["supplier"] == "counterparty"
+    assert purchase["supplier_inn"] == "counterparty_inn"
+    assert purchase["supplier_kpp"] == "counterparty_kpp"
+    assert purchase["number"] == "incoming_number" and purchase["issued"] == "incoming_date"
+    assert purchase["items.name"] == "item_name" and purchase["items.amount"] == "item_amount"
+    assert "items.vat_amount" not in purchase  # в счёте нет такой колонки
+    assert REGISTRY["onec_odata"].suggest_mapping(invoice, {}) == purchase
+
+    sale = default_mapping(invoice, {"document_kind": "sale"})
+    assert sale["buyer"] == "counterparty" and sale["buyer_inn"] == "counterparty_inn"
+    assert "supplier" not in sale
+    assert "buyer_kpp" not in sale  # в счёте нет КПП покупателя

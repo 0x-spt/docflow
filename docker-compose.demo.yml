@@ -1,0 +1,18 @@
+# Демо для показа клиенту: письма уходят в Mailpit, вебхуки разрешены на частные адреса (всем клиентам стека).
+#   docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d --build
+#   docker compose -f docker-compose.yml -f docker-compose.demo.yml run --rm worker docflow seed-demo
+# Письма: http://localhost:8025. ТОЛЬКО для показа и разработки: в проде оверлей не использовать.
+x-demo-env: &demo-env
+  # почтовое подключение демо ведёт на mailpit во внутренней сети: адрес частный, без флага его отвергнут
+  DOCFLOW_WEBHOOK_ALLOW_PRIVATE: "true"
+
+services:
+  mailpit:
+    image: axllent/mailpit:v1.27
+    # веб-интерфейс только на loopback; SMTP (1025) доступен лишь внутри сети compose
+    ports: ["127.0.0.1:8025:8025"]
+    restart: unless-stopped
+  api:
+    environment: *demo-env
+  worker:
+    environment: *demo-env

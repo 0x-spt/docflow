@@ -38,6 +38,14 @@ class FieldDef:
     advanced: bool = False
 
 
+@dataclass(frozen=True)
+class RemoteField:
+    """Поле системы клиента для сопоставления: code — что пишется в mapping, title — что видит человек."""
+
+    code: str
+    title: str
+
+
 Loader = Callable[[], Awaitable[bytes | None]]
 
 
@@ -47,7 +55,7 @@ class ExportDoc:
 
     id: uuid.UUID
     tenant_id: uuid.UUID
-    schema: DocSchema
+    schema: DocSchema  # с названиями компании: то, что видит человек
     data: dict[str, Any]
     status: str
     created_at: datetime
@@ -61,6 +69,12 @@ class ExportDoc:
     issues: list[dict[str, Any]] = field(default_factory=list)
     digital_loader: Loader | None = field(default=None, repr=False)
     scan_loader: Loader | None = field(default=None, repr=False)
+    # схема без подписей компании (штатные названия); не задана — подписей нет, и это `schema`
+    base_schema: DocSchema | None = None
+
+    @property
+    def default_schema(self) -> DocSchema:
+        return self.base_schema or self.schema
 
     async def load_digital_pdf(self) -> bytes | None:
         return await self.digital_loader() if self.digital_loader else None
@@ -93,6 +107,10 @@ class Connector(Protocol):
 
     async def notify(self, ctx: DestCtx, doc: ExportDoc, purpose: str) -> None:
         """Уведомление (purpose: notify_review | notify_new)."""
+
+    # Необязательные методы (в BaseConnector их нет, наличие проверяется через getattr):
+    #   async remote_fields(ctx) -> list[RemoteField] — поля системы для сопоставления (без записи данных);
+    #   suggest_mapping(schema, config) -> dict[str, str] — свой подбор сопоставления вместо общего (1С).
 
 
 class BaseConnector:

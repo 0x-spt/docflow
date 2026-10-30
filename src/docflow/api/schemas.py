@@ -1,14 +1,25 @@
 """Схемы документов: встроенные и свои у каждого тенанта, с версиями."""
 
 import logging
-from typing import Any
+from datetime import UTC, datetime
+from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 
-from docflow.api.deps import ResolverDep, SessionDep, TenantDep
-from docflow.db.models import SchemaRecord
+from docflow.api.deps import Principal, ResolverDep, SessionDep, TenantDep, require_owner_or_key
+from docflow.db.models import FieldLabels, SchemaRecord
+from docflow.labels import (
+    LabelSet,
+    LabelsInvalid,
+    check_label_set,
+    get_label_set,
+    label_keys,
+    queue_fields_for,
+    resolve_labeled,
+)
 from docflow.schemas.library import builtin_schemas
 from docflow.schemas.llm import to_json_schema
 from docflow.schemas.model import DocSchema
@@ -18,6 +29,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/schemas", tags=["schemas"])
 
 SAVE_ATTEMPTS = 3
+
+ManagerDep = Annotated[Principal, Depends(require_owner_or_key)]
 
 
 @router.get(
@@ -102,10 +115,110 @@ async def _resolve(resolver, session, tenant_id, slug: str, version: int | None)
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from None
 
 
+class LabelsIn(BaseModel):
+    labels: dict[str, str] = Field(
+        default_factory=dict, max_length=500, description="Ключ поля («vat», «items.qty») -> название"
+    )
+    queue_fields: list[str] = Field(
+        default_factory=list, max_length=50, description="Поля верхнего уровня для очереди, до 3"
+    )
+
+
+def _labels_view(schema: DocSchema, stored: LabelSet) -> dict[str, Any]:
+    """Таблица подписей схемы: умолчание, подпись компании, вошло ли поле в очередь."""
+    specs: dict[str, tuple[Any, str | None]] = {}
+    for f in schema.fields:
+        specs[f.name] = (f, None)
+    for f in schema.fields:
+        for c in f.columns or []:
+            specs[f"{f.name}.{c.name}"] = (c, f.name)
+    queue = queue_fields_for(schema, stored.queue_fields)
+    top = {f.name for f in schema.fields if f.type != "table"}
+    rows = [
+        {
+            "key": key,
+            "type": specs[key][0].type,
+            "group": specs[key][1],
+            "default": specs[key][0].title or specs[key][0].name,
+            "label": stored.labels.get(key, ""),
+            "queue": key in queue,
+        }
+        for key in label_keys(schema)
+    ]
+    return {
+        "slug": schema.slug,
+        "title": schema.title,
+        "version": schema.version,
+        "rows": rows,
+        "queue_fields": queue,
+        # своего набора нет (или он целиком устарел): очередь по умолчанию
+        "queue_default": not any(k in top for k in stored.queue_fields),
+    }
+
+
+@router.get(
+    "/{slug}/labels",
+    summary="Названия полей компании",
+    description=(
+        "Все поля последней версии схемы: наше название (`default`), название компании (`label`, пусто — своего "
+        "нет) и входит ли поле в очередь. `queue_default` — набор полей очереди не задан, действует умолчание."
+    ),
+)
+async def get_labels(slug: str, tenant_id: TenantDep, session: SessionDep, resolver: ResolverDep) -> dict[str, Any]:
+    schema = await _resolve(resolver, session, tenant_id, slug, None)
+    return _labels_view(schema, await get_label_set(session, tenant_id, slug))
+
+
+@router.put(
+    "/{slug}/labels",
+    summary="Сохранить названия полей",
+    description=(
+        "Заменяет набор целиком: названия компании и до 3 полей очереди. Название — до 80 символов, без управляющих "
+        "символов, не повторяет название другого поля и не занимает служебную колонку таблиц. Проверка по последней "
+        "версии схемы; ответ как у GET. 422 — ошибки по полям. 403 — сессия оператора (нужен владелец или ключ API)."
+    ),
+)
+async def put_labels(
+    slug: str, body: LabelsIn, manager: ManagerDep, session: SessionDep, resolver: ResolverDep
+) -> dict[str, Any]:
+    tenant_id = manager.tenant_id
+    schema = await _resolve(resolver, session, tenant_id, slug, None)
+    try:
+        clean = check_label_set(schema, body.labels, body.queue_fields)
+    except LabelsInvalid as exc:
+        detail = [{"loc": ["body", *loc], "msg": msg, "type": "value_error"} for loc, msg in exc.errors]
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail) from None
+    for attempt in range(2):
+        row = (
+            await session.execute(
+                select(FieldLabels).where(FieldLabels.tenant_id == tenant_id, FieldLabels.schema_slug == slug)
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            row = FieldLabels(tenant_id=tenant_id, schema_slug=slug)
+            session.add(row)
+        row.labels = clean.labels
+        row.queue_fields = clean.queue_fields
+        row.updated_at = datetime.now(UTC)
+        try:
+            await session.commit()
+            break
+        except IntegrityError:
+            # параллельный PUT создал строку первым — перечитываем и обновляем её
+            await session.rollback()
+            if attempt:
+                raise HTTPException(status.HTTP_409_CONFLICT, "Названия одновременно меняют, повторите позже") from None
+    return _labels_view(schema, clean)
+
+
 @router.get(
     "/{slug}",
     summary="Схема по slug",
-    description="Своя схема тенанта, иначе встроенная. Без `version` — последняя версия. Нет такой — 404.",
+    description=(
+        "Своя схема тенанта, иначе встроенная. По умолчанию названия полей (`title`) — свои у компании, если "
+        "заданы. Клиенту, который правит схему и загружает её новой версией, нужен `raw=true`: без подписей "
+        "компании, иначе они попадут в саму схему. Без `version` — последняя версия. Нет такой — 404."
+    ),
 )
 async def get_schema(
     slug: str,
@@ -113,8 +226,16 @@ async def get_schema(
     session: SessionDep,
     resolver: ResolverDep,
     version: int | None = Query(None, description="Версия схемы"),
+    raw: bool = Query(False, description="Без подписей компании: схема, как она хранится"),
 ) -> dict[str, Any]:
-    return (await _resolve(resolver, session, tenant_id, slug, version)).model_dump(mode="json")
+    try:
+        if raw:
+            schema = await resolver.resolve(session, tenant_id, slug, version)
+        else:
+            schema = await resolve_labeled(resolver, session, tenant_id, slug, version)
+    except LookupError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from None
+    return schema.model_dump(mode="json")
 
 
 @router.get(

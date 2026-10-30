@@ -27,10 +27,12 @@ from docflow.api.deps import (
 from docflow.api.limits import request_limit_bytes
 from docflow.db.models import Document
 from docflow.imaging.load import UnsupportedFile, count_pages, detect_kind
+from docflow.labels import LabelSet, apply_labels, get_label_sets, queue_fields_for, resolve_labeled
 from docflow.pdf.digital import render_digital_pdf
 from docflow.pipeline import SchemaNotFound, process_job_id
 from docflow.queue import PROCESS_DOCUMENT
 from docflow.review import ReviewConflict, review_document, route_approved
+from docflow.schemas.model import DocSchema
 from docflow.serializers import document_exports, document_payload
 from docflow.storage.blobs import BlobNotFound, original_key, page_key, scan_key
 from docflow.validation.engine import INFO_CODES
@@ -242,21 +244,34 @@ async def upload_document(
     return _accepted(document)
 
 
-def _list_item(document: Document) -> dict:
+def _scalar(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, str | int | float):
+        return False
+    return not (isinstance(value, str) and not value.strip())
+
+
+def _list_item(document: Document, schema: DocSchema | None, label_set: LabelSet, titles: dict[str, str]) -> dict:
     data = document.data or {}
     number = data.get("number")
     has_number = isinstance(number, str | int | float) and not isinstance(number, bool) and str(number).strip()
     title = str(number) if has_number else str(document.id)[:8]
     summary = []
-    for field, value in data.items():
-        if field == "number" or isinstance(value, bool) or not isinstance(value, str | int | float):
-            continue
-        if isinstance(value, str) and not value.strip():
-            continue
-        summary.append({"field": field, "value": value})
-        if len(summary) == SUMMARY_FIELDS:
-            break
-    issue = next((i.get("message") for i in document.issues or [] if i.get("code") not in INFO_CODES), None)
+    if schema is not None:
+        # поля и подписи выбрала компания (или умолчание схемы); пустые значения пропускаем
+        for field in queue_fields_for(schema, label_set.queue_fields):
+            if _scalar(data.get(field)):
+                summary.append({"field": field, "label": titles.get(field, field), "value": data[field]})
+    else:
+        # схемы уже нет (удалена): первые поля данных как есть
+        for field, value in data.items():
+            if field == "number" or not _scalar(value):
+                continue
+            summary.append({"field": field, "label": field, "value": value})
+            if len(summary) == SUMMARY_FIELDS:
+                break
+    issue = None
+    if document.status in ("needs_review", "failed"):
+        issue = next((i.get("message") for i in document.issues or [] if i.get("code") not in INFO_CODES), None)
     return {
         "id": str(document.id),
         "status": document.status,
@@ -281,6 +296,7 @@ def _list_item(document: Document) -> dict:
 async def list_documents(
     tenant_id: TenantDep,
     session: SessionDep,
+    resolver: ResolverDep,
     status_filter: Annotated[DocStatus | None, Query(alias="status")] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     before: datetime | None = None,
@@ -299,7 +315,33 @@ async def list_documents(
     )
     page = rows[:limit]
     next_before = page[-1].created_at if len(rows) > limit else None
-    return {"items": [_list_item(d) for d in page], "next_before": next_before}
+    # каждая (slug, версия) страницы разрешается один раз, наборы подписей — одним запросом
+    schemas: dict[tuple[str, int], DocSchema | None] = {}
+    for d in page:
+        key = (d.schema_slug, d.schema_version)
+        if key not in schemas:
+            try:
+                schemas[key] = await resolver.resolve(session, tenant_id, *key)
+            except LookupError:
+                schemas[key] = None
+    label_sets = await get_label_sets(session, tenant_id, {d.schema_slug for d in page})
+    empty = LabelSet({}, [])
+    # названия полей с подписями компании — один раз на (slug, версию), а не на каждую строку
+    titles: dict[tuple[str, int], dict[str, str]] = {}
+    for key, schema in schemas.items():
+        if schema is not None:
+            labeled = apply_labels(schema, label_sets.get(key[0], empty).labels)
+            titles[key] = {f.name: f.title or f.name for f in labeled.fields}
+    items = [
+        _list_item(
+            d,
+            schemas[(d.schema_slug, d.schema_version)],
+            label_sets.get(d.schema_slug, empty),
+            titles.get((d.schema_slug, d.schema_version), {}),
+        )
+        for d in page
+    ]
+    return {"items": items, "next_before": next_before}
 
 
 @router.get(
@@ -371,7 +413,9 @@ async def get_document_digital_pdf(
     if document.status not in ("ok", "needs_review"):
         raise HTTPException(status.HTTP_409_CONFLICT, DIGITAL_CONFLICT)
     try:
-        schema = await schemas.resolve(session, document.tenant_id, document.schema_slug, document.schema_version)
+        schema = await resolve_labeled(
+            schemas, session, document.tenant_id, document.schema_slug, document.schema_version
+        )
     except SchemaNotFound as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from None
     try:

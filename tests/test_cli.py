@@ -304,3 +304,28 @@ def test_seed_schemas_updates_changed_builtin_body(db_url, capsys, monkeypatch):
 
     assert main(["seed-schemas"]) == 0
     assert "обновлено: 0" in capsys.readouterr().out
+
+
+def test_cli_seed_demo_parses(tmp_path):
+    from docflow.cli import build_parser, cmd_seed_demo
+
+    args = build_parser().parse_args(["seed-demo"])
+    assert args.func is cmd_seed_demo
+    assert (args.reset, args.smtp_host, args.smtp_port, args.google_key) == (False, "mailpit", 1025, None)
+    key = tmp_path / "key.json"
+    args = build_parser().parse_args([
+        "seed-demo", "--reset", "--smtp-host", "smtp.local", "--smtp-port", "2525",
+        "--google-key", str(key), "--google-sheet", "sheet1", "--bitrix-webhook", "https://b24.example/rest/1/k/",
+        "--telegram-token", "123:abc", "--telegram-chat", "-100",
+    ])
+    assert args.reset and args.smtp_host == "smtp.local" and args.smtp_port == 2525
+    assert args.google_key == key and args.google_sheet == "sheet1"
+    assert args.bitrix_webhook == "https://b24.example/rest/1/k/"
+    assert (args.telegram_token, args.telegram_chat) == ("123:abc", "-100")
+
+
+def test_cli_seed_demo_bad_google_key_exit_1(tmp_path, capsys):
+    bad = tmp_path / "key.json"
+    bad.write_text("[1]", encoding="utf-8")
+    assert main(["seed-demo", "--google-key", str(bad), "--google-sheet", "x"]) == 1
+    assert "ключ" in capsys.readouterr().err

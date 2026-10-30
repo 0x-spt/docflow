@@ -10,7 +10,15 @@ from typing import Any
 
 import httpx
 
-from docflow.connectors.base import REGISTRY, BaseConnector, ConnectorError, DestCtx, ExportDoc, FieldDef
+from docflow.connectors.base import (
+    REGISTRY,
+    BaseConnector,
+    ConnectorError,
+    DestCtx,
+    ExportDoc,
+    FieldDef,
+    RemoteField,
+)
 from docflow.connectors.crm_common import (
     clean,
     counterparty_side,
@@ -25,6 +33,8 @@ from docflow.connectors.crm_common import (
 
 DOMAINS = ("amocrm.ru", "amocrm.com", "kommo.com")
 TAG_NAME = "DocFlow"
+MAX_FIELD_PAGES = 20  # по 250 полей: больше 5000 полей сделки не бывает, а бесконечный next не зациклит
+FIELD_PAGE_LIMIT = 250
 _LABEL = re.compile(r"[a-z0-9][a-z0-9-]*")
 
 
@@ -194,6 +204,21 @@ class AmoCrm(BaseConnector):
         account = await _Session(ctx).call("GET", "/account")
         name = clean(account.get("name")) if isinstance(account, dict) else ""
         return f"Аккаунт «{name}» доступен" if name else "Аккаунт доступен"
+
+    async def remote_fields(self, ctx: DestCtx) -> list[RemoteField]:
+        """Дополнительные поля сделок (code — числовой ID) со всех страниц, не больше MAX_FIELD_PAGES."""
+        s = _Session(ctx)
+        out: list[RemoteField] = []
+        for page in range(1, MAX_FIELD_PAGES + 1):
+            data = await s.call("GET", "/leads/custom_fields", params={"page": page, "limit": FIELD_PAGE_LIMIT})
+            if not isinstance(data, dict):
+                break  # 204: полей нет
+            items = (data.get("_embedded") or {}).get("custom_fields") or []
+            items = [i for i in items if isinstance(i, dict) and i.get("id") is not None]
+            out.extend(RemoteField(str(i["id"]), clean(i.get("name"))) for i in items)
+            if not items or not (data.get("_links") or {}).get("next"):
+                break
+        return out
 
     async def export(self, ctx: DestCtx, doc: ExportDoc) -> str | None:
         s = _Session(ctx)
