@@ -1,9 +1,12 @@
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 import httpx
 import pytest
 from api_helpers import BASE_URL
 from cryptography.fernet import Fernet
+from fastapi import FastAPI
 from sqlalchemy import event
 
 from docflow.api.app import create_app
@@ -13,6 +16,9 @@ from docflow.db.session import make_engine, make_sessionmaker
 from docflow.queue import ListEnqueuer
 from docflow.storage.blobs import LocalBlobStore
 
+# общая заглушка Telegram лежит рядом с тестами каналов
+sys.path.insert(0, str(Path(__file__).parent.parent / "channels"))
+
 
 @dataclass
 class Api:
@@ -21,6 +27,7 @@ class Api:
     blobs: LocalBlobStore
     enqueuer: ListEnqueuer
     settings: Settings
+    app: FastAPI
 
 
 @pytest.fixture
@@ -46,7 +53,7 @@ async def api(tmp_path):
     )
     app = create_app(settings, sessionmaker=sm, blobs=blobs, enqueuer=enqueuer)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        yield Api(client, sm, blobs, enqueuer, settings)
+        yield Api(client, sm, blobs, enqueuer, settings, app)
     await engine.dispose()
 
 
@@ -74,3 +81,13 @@ def make_tenant(api):
 @pytest.fixture
 async def auth(make_tenant):
     return await make_tenant()
+
+
+@pytest.fixture
+def tg(api):
+    """Заглушка Telegram, подключённая вместо сети."""
+    from fake_telegram import FakeTelegram
+
+    fake = FakeTelegram()
+    api.app.state.bot_transport = fake.transport
+    return fake

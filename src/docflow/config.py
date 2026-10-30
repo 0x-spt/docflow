@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     # шрифт цифрового PDF (кириллица); жирный ищется рядом: DejaVuSans-Bold.ttf, arialbd.ttf
     pdf_font_path: str = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
+    # адрес Bot API; меняется только для заглушки на живой проверке
+    telegram_api_url: str = "https://api.telegram.org"
+
     # уведомления о заявках с сайта в Telegram; пусто = не отправлять
     leads_tg_token: str = ""
     leads_tg_chat: str = ""

@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from docflow.api import (
     apikeys,
     auth,
+    bot,
     destinations,
     dictionaries,
     documents,
@@ -80,6 +81,9 @@ async def _validation_error(request: Request, exc: RequestValidationError) -> JS
         cause = (err.get("ctx") or {}).get("error")
         if isinstance(cause, SchemaPathError):
             err = {**err, "loc": (*err["loc"], *cause.loc)}
+        if request.url.path.startswith("/v1/bot"):
+            # стандартный 422 возвращает принятое значение в input, а в теле запроса может быть токен бота
+            err = {k: v for k, v in err.items() if k not in ("input", "ctx")}
         errors.append(err)
     return await request_validation_exception_handler(request, RequestValidationError(errors, body=exc.body))
 
@@ -99,6 +103,8 @@ def create_app(
     app.state.blobs = blobs
     app.state.enqueuer = enqueuer
     app.state.schemas = SchemaResolver()
+    # транспорт httpx для запросов к Bot API; None — настоящая сеть, тесты подставляют MockTransport
+    app.state.bot_transport = None
     # попытки входа считаем в памяти процесса; у каждого приложения свои счётчики
     app.state.login_email_limiter = SlidingWindowLimiter(limit=5, window_s=900)
     app.state.login_ip_limiter = SlidingWindowLimiter(limit=20, window_s=900)
@@ -120,6 +126,7 @@ def create_app(
     app.include_router(usage.router)
     app.include_router(schemas.router)
     app.include_router(webhooks.router)
+    app.include_router(bot.router)
     app.include_router(destinations.router)
     app.include_router(destinations.catalog_router)
     app.include_router(routing.router)
