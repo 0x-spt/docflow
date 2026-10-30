@@ -24,6 +24,7 @@ from docflow.api import (
     documents,
     exports,
     leads,
+    mailbox,
     routing,
     schemas,
     stats,
@@ -32,6 +33,7 @@ from docflow.api import (
 )
 from docflow.api.limits import RequestSizeLimit
 from docflow.api.ratelimit import SlidingWindowLimiter
+from docflow.channels.mailbox import open_imap
 from docflow.config import Settings, get_settings
 from docflow.db.session import make_engine, make_sessionmaker
 from docflow.pipeline import SchemaResolver
@@ -40,6 +42,9 @@ from docflow.schemas.model import SchemaPathError
 from docflow.storage.blobs import BlobStore, blob_store_from_settings
 
 logger = logging.getLogger(__name__)
+
+# маршруты, в теле которых бывает секрет (токен бота, пароль ящика)
+SECRET_BODY_PREFIXES = ("/v1/bot", "/v1/mailbox")
 
 DESCRIPTION = (
     "Распознавание документов: загрузите скан или фото, получите PDF с текстовым слоем и данные по схеме "
@@ -74,6 +79,10 @@ async def _unhandled(request: Request, exc: Exception) -> JSONResponse:
     return JSONResponse({"detail": "внутренняя ошибка сервера"}, status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+def _carries_secret(path: str) -> bool:
+    return any(path == prefix or path.startswith(f"{prefix}/") for prefix in SECRET_BODY_PREFIXES)
+
+
 async def _validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
     """422 как обычно, но ошибка схемы указывает на поле или правило: к loc дописывается путь SchemaPathError."""
     errors = []
@@ -81,9 +90,9 @@ async def _validation_error(request: Request, exc: RequestValidationError) -> JS
         cause = (err.get("ctx") or {}).get("error")
         if isinstance(cause, SchemaPathError):
             err = {**err, "loc": (*err["loc"], *cause.loc)}
-        if request.url.path == "/v1/bot" or request.url.path.startswith("/v1/bot/"):
+        if _carries_secret(request.url.path):
             # стандартный 422 возвращает принятое значение в input, а лишний ключ тела попадает в loc:
-            # в теле запроса может быть токен бота, поэтому от пути оставляем только «body»/«query»
+            # в теле запроса может быть секрет, поэтому от пути оставляем только «body»/«query»
             err = {**{k: v for k, v in err.items() if k not in ("input", "ctx")}, "loc": err["loc"][:1]}
         errors.append(err)
     return await request_validation_exception_handler(request, RequestValidationError(errors, body=exc.body))
@@ -106,6 +115,8 @@ def create_app(
     app.state.schemas = SchemaResolver()
     # транспорт httpx для запросов к Bot API; None — настоящая сеть, тесты подставляют MockTransport
     app.state.bot_transport = None
+    # подключение к IMAP; тесты подставляют заглушку
+    app.state.imap_connect = open_imap
     # попытки входа считаем в памяти процесса; у каждого приложения свои счётчики
     app.state.login_email_limiter = SlidingWindowLimiter(limit=5, window_s=900)
     app.state.login_ip_limiter = SlidingWindowLimiter(limit=20, window_s=900)
@@ -128,6 +139,7 @@ def create_app(
     app.include_router(schemas.router)
     app.include_router(webhooks.router)
     app.include_router(bot.router)
+    app.include_router(mailbox.router)
     app.include_router(destinations.router)
     app.include_router(destinations.catalog_router)
     app.include_router(routing.router)
