@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 
 import { saveSchema } from "@/app/app/fields/actions";
+import { DocRulesList } from "@/components/app/DocRulesList";
 import { SchemaFieldCard } from "@/components/app/SchemaFieldCard";
 import { Button, Field } from "@/components/ui";
 import {
@@ -22,7 +23,6 @@ import {
   type EditorDoc,
   type EditorField,
 } from "@/lib/field-builder/model";
-import { rulePhrase } from "@/lib/field-builder/rules";
 import { changeSummary } from "@/lib/field-builder/summary";
 import { slugFromTitle } from "@/lib/field-builder/translit";
 import type { DocSchema } from "@/lib/types";
@@ -142,12 +142,6 @@ export function SchemaEditor({
 
   const companyLabel = (key: string): string | undefined =>
     Object.hasOwn(labels, key) ? labels[key] || undefined : undefined;
-  const ruleErrors = Object.entries(errors)
-    .filter(([k]) => k.startsWith("rules."))
-    .map(([k, msg]) => {
-      const rule = doc.rules[Number(k.slice("rules.".length))];
-      return rule ? `Правило «${rulePhrase(rule, titleOf)}»: ${msg}` : msg;
-    });
   const hasErrors = Boolean(error) || Object.keys(errors).length > 0;
   const cancelHref = initial ? `/app/fields?schema=${encodeURIComponent(initial.slug)}` : "/app/fields";
 
@@ -161,12 +155,6 @@ export function SchemaEditor({
           className="border-2 border-accent-text bg-paper p-4 font-medium text-accent-text"
         >
           <p>{error ?? errors.fields ?? "Исправьте отмеченное ниже."}</p>
-          {/* правила документа пока без своего списка: их ошибки — здесь */}
-          {ruleErrors.map((t, i) => (
-            <p key={i} className="mt-1 text-sm">
-              {t}
-            </p>
-          ))}
         </div>
       ) : null}
 
@@ -247,6 +235,13 @@ export function SchemaEditor({
             </Button>
           </div>
         </section>
+
+        <DocRulesList
+          doc={doc}
+          titleOf={titleOf}
+          errors={errors}
+          onChange={(rules) => update((d) => ({ ...d, rules }), true)}
+        />
       </fieldset>
 
       <div className="flex flex-col gap-3 border-t-2 border-ink pt-4">
