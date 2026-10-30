@@ -77,3 +77,31 @@ export async function saveSchema(schema: DocSchema, expectedVersion: number): Pr
   revalidatePath("/app/fields");
   redirect(`/app/fields?schema=${encodeURIComponent(saved.slug)}&saved=${saved.version}`);
 }
+
+export type ResetState = { error?: string };
+
+/** Вернуть стандартные поля: тело встроенной схемы сохраняется новой версией поверх перекрытия компании. */
+export async function resetSchema(slug: string, expectedVersion: number): Promise<ResetState> {
+  if (typeof slug !== "string" || !SCHEMA_SLUG_RE.test(slug)) return { error: "Некорректное служебное имя типа документа" };
+  if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
+    return { error: "Не удалось прочитать версию типа. Обновите страницу." };
+  }
+  let saved: DocSchema;
+  try {
+    const builtin = await apiFetchAuthed<DocSchema>(`/v1/schemas/${encodeURIComponent(slug)}?raw=true&builtin=true`);
+    saved = await apiFetchAuthed<DocSchema>(`/v1/schemas?expected_version=${expectedVersion}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(builtin),
+    });
+  } catch (e) {
+    unstable_rethrow(e);
+    if (e instanceof ApiError && (e.status === 409 || e.status === 404)) return { error: e.detail };
+    if (e instanceof ApiError && e.status === 422) return { error: e.detail || "Сервер не принял стандартную схему." };
+    if (e instanceof ApiError && e.status === 403) return { error: "Поля меняет владелец аккаунта." };
+    console.error("стандартные поля не возвращены", slug, e);
+    return { error: "Не удалось вернуть стандартные поля: сервис недоступен. Попробуйте ещё раз." };
+  }
+  revalidatePath("/app/fields");
+  redirect(`/app/fields?schema=${encodeURIComponent(saved.slug)}&saved=${saved.version}`);
+}

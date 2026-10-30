@@ -1,6 +1,9 @@
 import Link from "next/link";
 
 import { FieldLabelsForm } from "@/components/app/FieldLabelsForm";
+import { ResetSchemaButton } from "@/components/app/ResetSchemaButton";
+import { Button } from "@/components/ui";
+import { ApiError } from "@/lib/api";
 import { apiFetchAuthed, requireMe } from "@/lib/session";
 import type { FieldLabels, SchemaListItem } from "@/lib/types";
 
@@ -25,6 +28,18 @@ export default async function FieldsPage({
       )
     : null;
 
+  // откат есть только у встроенного типа, перекрытого компанией: смотрим, есть ли встроенное тело
+  let canReset = false;
+  if (isOwner && current && !current.builtin) {
+    try {
+      await apiFetchAuthed(`/v1/schemas/${encodeURIComponent(current.slug)}?raw=true&builtin=true`);
+      canReset = true;
+    } catch (e) {
+      if (!(e instanceof ApiError && e.status === 404)) throw e;
+    }
+  }
+  const saved = typeof sp.saved === "string" && /^\d+$/.test(sp.saved) ? sp.saved : null;
+
   return (
     <div className="flex flex-col gap-8">
       <div>
@@ -37,7 +52,13 @@ export default async function FieldsPage({
           по исходным полям. Пустое поле — название по умолчанию. Ничего не
           отмечено в «В очереди» — показываем контрагента, сумму и дату.
         </p>
-        {isOwner ? null : (
+        {isOwner ? (
+          <div className="mt-4">
+            <Button variant="ghost" href="/app/fields/new">
+              Новый тип документа
+            </Button>
+          </div>
+        ) : (
           <p className="mt-2 font-medium">Названия меняет владелец аккаунта.</p>
         )}
       </div>
@@ -69,12 +90,33 @@ export default async function FieldsPage({
 
       {labels ? (
         <section aria-labelledby="labels-title" className="flex flex-col gap-3">
-          <h2
-            id="labels-title"
-            className="text-2xl font-semibold tracking-tight"
-          >
-            {labels.title}
-          </h2>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+            <h2
+              id="labels-title"
+              className="text-2xl font-semibold tracking-tight"
+            >
+              {labels.title}
+            </h2>
+            {isOwner && current ? (
+              <>
+                <Button href={`/app/fields/${encodeURIComponent(current.slug)}/edit`}>
+                  Изменить поля
+                </Button>
+                {canReset ? (
+                  <ResetSchemaButton slug={current.slug} version={current.version} />
+                ) : null}
+              </>
+            ) : null}
+          </div>
+          {saved ? (
+            <p
+              role="status"
+              className="border-2 border-ink bg-card p-4 font-medium"
+            >
+              Сохранено: версия {saved}. Новые документы пойдут по ней,
+              обработанные остаются на своей версии.
+            </p>
+          ) : null}
           <FieldLabelsForm
             key={labels.slug}
             slug={labels.slug}
