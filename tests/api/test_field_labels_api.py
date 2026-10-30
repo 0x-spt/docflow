@@ -105,3 +105,35 @@ async def test_get_schema_raw_skips_labels(api, auth):
     assert _title((await api.client.get(URL, headers=auth)).json(), "vat") == "Налог"
     raw = (await api.client.get(f"{URL}?raw=true", headers=auth)).json()
     assert raw == base and _title(raw, "vat") != "Налог"
+
+
+async def test_save_schema_prunes_removed_labels(api, auth):
+    from sqlalchemy import select
+
+    from docflow.db.models import FieldLabels
+
+    def body(*names):
+        fields = [{"name": n, "type": "number" if n == "amount" else "string", "description": n} for n in names]
+        return {"slug": "my_doc", "title": "Мой", "description": "D", "fields": fields}
+
+    r = await api.client.post("/v1/schemas", headers=auth, json=body("number", "note", "amount"))
+    assert r.status_code == 201
+    url = "/v1/schemas/my_doc/labels"
+    r = await api.client.put(
+        url,
+        headers=auth,
+        json={"labels": {"note": "Примечание", "amount": "Сумма"}, "queue_fields": ["amount", "note"]},
+    )
+    assert r.status_code == 200, r.text
+    r = await api.client.post("/v1/schemas", headers=auth, json=body("number", "amount"))
+    assert r.status_code == 201
+    async with api.sessionmaker() as s:
+        row = (await s.execute(select(FieldLabels).where(FieldLabels.schema_slug == "my_doc"))).scalar_one()
+        assert row.labels == {"amount": "Сумма"}
+        assert row.queue_fields == ["amount"]
+    got = (await api.client.get(url, headers=auth)).json()
+    rows = {x["key"]: x for x in got["rows"]}
+    assert rows["amount"]["label"] == "Сумма" and "note" not in rows
+    r = await api.client.put(url, headers=auth, json={"labels": {"note": "x"}})
+    assert r.status_code == 422
+    assert r.json()["detail"][0]["loc"] == ["body", "labels", "note"]

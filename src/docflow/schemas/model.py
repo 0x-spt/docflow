@@ -59,9 +59,22 @@ class FieldSpec(ColumnSpec):
         return self
 
 
-def _check_columns(names: list[str], what: str) -> None:
-    if len(set(names)) != len(names):
-        raise ValueError(f"{what}: имена должны быть уникальны")
+class SchemaPathError(ValueError):
+    """Ошибка схемы с путём до места: ("fields", i), ("fields", i, "rules", k), ("rules", j)."""
+
+    def __init__(self, loc: tuple[str | int, ...], message: str) -> None:
+        super().__init__(message)
+        self.loc = loc
+
+
+def _first_duplicate(names: list[str]) -> int | None:
+    """Индекс первого повтора имени или None."""
+    seen: set[str] = set()
+    for i, name in enumerate(names):
+        if name in seen:
+            return i
+        seen.add(name)
+    return None
 
 
 # Какие параметры документных правил на что ссылаются: поля верхнего уровня / таблица / колонки таблицы.
@@ -150,17 +163,29 @@ class DocSchema(BaseModel):
 
     @model_validator(mode="after")
     def _validate(self):
-        _check_columns([f.name for f in self.fields], "поля")
-        for f in self.fields:
+        dup = _first_duplicate([f.name for f in self.fields])
+        if dup is not None:
+            raise SchemaPathError(("fields", dup), "поля: имена должны быть уникальны")
+        for i, f in enumerate(self.fields):
             if f.columns:
-                _check_columns([c.name for c in f.columns], f"колонки «{f.name}»")
-            for r in f.rules:
+                dup = _first_duplicate([c.name for c in f.columns])
+                if dup is not None:
+                    raise SchemaPathError(
+                        ("fields", i, "columns", dup), f"колонки «{f.name}»: имена должны быть уникальны"
+                    )
+            for k, r in enumerate(f.rules):
                 if r.kind not in FIELD_RULES:
-                    raise ValueError(f"«{f.name}»: неизвестное правило поля «{r.kind}»")
-                _check_field_rule(f, r)
+                    raise SchemaPathError(("fields", i, "rules", k), f"«{f.name}»: неизвестное правило поля «{r.kind}»")
+                try:
+                    _check_field_rule(f, r)
+                except ValueError as e:
+                    raise SchemaPathError(("fields", i, "rules", k), str(e)) from e
         by_name = {f.name: f for f in self.fields}
-        for r in self.rules:
+        for j, r in enumerate(self.rules):
             if r.kind not in DOC_RULES:
-                raise ValueError(f"неизвестное правило документа «{r.kind}»")
-            _check_doc_rule(r, by_name)
+                raise SchemaPathError(("rules", j), f"неизвестное правило документа «{r.kind}»")
+            try:
+                _check_doc_rule(r, by_name)
+            except ValueError as e:
+                raise SchemaPathError(("rules", j), str(e)) from e
         return self

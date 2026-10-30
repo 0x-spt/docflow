@@ -125,3 +125,31 @@ def test_date_rules_need_positive_days():
         rule = {"kind": "date_within", "params": {"earlier": "a", "later": "b", "max_days": max_days}}
         with pytest.raises(ValueError):
             DocSchema.model_validate({**base, "fields": fields, "rules": [rule]})
+
+
+def test_schema_path_error_points_to_doc_rule():
+    with pytest.raises(ValidationError) as ei:
+        _schema(
+            FieldSpec(name="number", type="string"),
+            FieldSpec(name="bik", type="string"),
+            rules=[{"kind": "account_matches_bik", "params": {"account": "number", "bik": "nope"}}],
+        )
+    err = ei.value.errors()[0]["ctx"]["error"]
+    assert err.loc == ("rules", 0)
+    assert "«nope»" in str(err)
+
+
+def test_schema_path_error_points_to_field_rule_and_duplicate():
+    with pytest.raises(ValidationError) as ei:
+        _schema(
+            FieldSpec(name="a", type="string"),
+            FieldSpec(name="b", type="string", rules=[{"kind": "regex", "params": {"pattern": "("}}]),
+        )
+    assert ei.value.errors()[0]["ctx"]["error"].loc == ("fields", 1, "rules", 0)
+    with pytest.raises(ValidationError) as ei:
+        _schema(
+            FieldSpec(name="number", type="string"),
+            FieldSpec(name="a", type="string"),
+            FieldSpec(name="number", type="string"),
+        )
+    assert ei.value.errors()[0]["ctx"]["error"].loc == ("fields", 2)

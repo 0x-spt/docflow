@@ -14,11 +14,12 @@ from docflow.db.models import FieldLabels, SchemaRecord
 from docflow.labels import (
     LabelSet,
     LabelsInvalid,
+    apply_labels,
     check_label_set,
     get_label_set,
     label_keys,
+    prune_label_set,
     queue_fields_for,
-    resolve_labeled,
 )
 from docflow.schemas.library import builtin_schemas
 from docflow.schemas.llm import to_json_schema
@@ -89,15 +90,40 @@ async def _latest_visible_version(session, tenant_id, slug: str) -> int:
         "Тело — схема документа (поля, правила проверки). Версия назначается сервером: следующая за последней "
         "видимой тенанту версией этого slug (своей или встроенной), 1 для нового slug; `version` из тела "
         "игнорируется. Можно перекрыть встроенную схему, взяв её slug: перекрытие встроенной v1 станет v2, "
-        "и `version=1` по-прежнему означает встроенную. Ошибка в схеме — 422."
+        "и `version=1` по-прежнему означает встроенную. Ошибка в схеме — 422, `loc` указывает на поле или правило. "
+        "`expected_version` — версия, которую видел редактор (`GET ...?raw=true`, 0 — схемы ещё нет): если схему "
+        "успели изменить, 409. Подписи и поля очереди удалённых полей убираются в той же транзакции. "
+        "403 — сессия оператора (нужен владелец или ключ API)."
     ),
 )
-async def create_schema(schema: DocSchema, tenant_id: TenantDep, session: SessionDep) -> dict[str, Any]:
+async def create_schema(
+    schema: DocSchema,
+    manager: ManagerDep,
+    session: SessionDep,
+    resolver: ResolverDep,
+    expected_version: int | None = Query(None, ge=0, description="Версия схемы, с которой начал редактор"),
+) -> dict[str, Any]:
+    tenant_id = manager.tenant_id
     for _ in range(SAVE_ATTEMPTS):
+        if expected_version is not None:
+            try:
+                seen = (await resolver.resolve(session, tenant_id, schema.slug, None)).version
+            except LookupError:
+                seen = 0
+            if seen != expected_version:
+                if expected_version == 0:
+                    msg = f"Тип документа «{schema.slug}» уже есть: выберите другое служебное имя"
+                else:
+                    msg = (
+                        f"Тип документа изменили после открытия редактора (сейчас версия {seen}): "
+                        "обновите страницу"
+                    )
+                raise HTTPException(status.HTTP_409_CONFLICT, msg)
         current = await _latest_visible_version(session, tenant_id, schema.slug)
         stored = schema.model_copy(update={"version": current + 1})
         body = stored.model_dump(mode="json")
         session.add(SchemaRecord(tenant_id=tenant_id, slug=stored.slug, version=stored.version, body=body))
+        await prune_label_set(session, tenant_id, stored)
         try:
             await session.commit()
         except IntegrityError:
@@ -217,7 +243,8 @@ async def put_labels(
     description=(
         "Своя схема тенанта, иначе встроенная. По умолчанию названия полей (`title`) — свои у компании, если "
         "заданы. Клиенту, который правит схему и загружает её новой версией, нужен `raw=true`: без подписей "
-        "компании, иначе они попадут в саму схему. Без `version` — последняя версия. Нет такой — 404."
+        "компании, иначе они попадут в саму схему. Без `version` — последняя версия. "
+        "`builtin=true` — встроенная схема без перекрытия тенанта (для отката к ней). Нет такой — 404."
     ),
 )
 async def get_schema(
@@ -227,12 +254,12 @@ async def get_schema(
     resolver: ResolverDep,
     version: int | None = Query(None, description="Версия схемы"),
     raw: bool = Query(False, description="Без подписей компании: схема, как она хранится"),
+    builtin: bool = Query(False, description="Встроенная схема без перекрытия тенанта"),
 ) -> dict[str, Any]:
     try:
-        if raw:
-            schema = await resolver.resolve(session, tenant_id, slug, version)
-        else:
-            schema = await resolve_labeled(resolver, session, tenant_id, slug, version)
+        schema = await resolver.resolve(session, None if builtin else tenant_id, slug, version)
+        if not raw:
+            schema = apply_labels(schema, (await get_label_set(session, tenant_id, slug)).labels)
     except LookupError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from None
     return schema.model_dump(mode="json")

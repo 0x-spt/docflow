@@ -7,6 +7,7 @@
 import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import select
@@ -242,3 +243,23 @@ async def resolve_labeled(
     """Схема нужной версии с названиями компании. `LookupError` (нет схемы) пробрасывается."""
     schema = await resolver.resolve(session, tenant_id, slug, version)
     return apply_labels(schema, (await get_label_set(session, tenant_id, slug)).labels)
+
+
+async def prune_label_set(session: AsyncSession, tenant_id: uuid.UUID, schema: DocSchema) -> None:
+    """Убирает из набора подписи и поля очереди, которых нет в схеме (поле удалили). Без commit."""
+    row = (
+        await session.execute(
+            select(FieldLabels).where(FieldLabels.tenant_id == tenant_id, FieldLabels.schema_slug == schema.slug)
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        return
+    known = set(label_keys(schema))
+    top = {f.name for f in _queueable(schema)}
+    old_labels, old_queue = dict(row.labels or {}), list(row.queue_fields or [])
+    labels = {k: v for k, v in old_labels.items() if k in known}
+    queue = [k for k in old_queue if k in top]
+    if labels != old_labels or queue != old_queue:
+        row.labels = labels
+        row.queue_fields = queue
+        row.updated_at = datetime.now(UTC)

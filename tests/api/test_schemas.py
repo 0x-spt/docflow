@@ -1,4 +1,5 @@
 import pytest
+from api_helpers import session_for
 
 from docflow.schemas.library import builtin_schemas
 
@@ -114,3 +115,77 @@ async def test_override_version_follows_builtin_seeded_in_db(api, auth):
     override = {**MY_SCHEMA, "slug": "invoice_ru", "title": "Наш счёт"}
     r = await api.client.post("/v1/schemas", headers=auth, json=override)
     assert r.json()["version"] == seeded.version + 1
+
+
+def _builtin_body(slug="invoice_ru"):
+    return builtin_schemas()[slug].model_dump(mode="json")
+
+
+async def test_post_422_points_to_rule(api, auth):
+    bad = {
+        **MY_SCHEMA,
+        "rules": [{"kind": "account_matches_bik", "params": {"account": "number", "bik": "nope"}}],
+    }
+    r = await api.client.post("/v1/schemas", headers=auth, json=bad)
+    assert r.status_code == 422
+    detail = r.json()["detail"]
+    assert detail[0]["loc"] == ["body", "rules", 0]
+    assert "«nope»" in detail[0]["msg"]
+
+
+async def test_post_422_points_to_field_rule(api, auth):
+    fields = [
+        {"name": "number", "type": "string", "description": "номер"},
+        {"name": "x", "type": "string", "description": "d", "rules": [{"kind": "regex", "params": {"pattern": "("}}]},
+    ]
+    r = await api.client.post("/v1/schemas", headers=auth, json={**MY_SCHEMA, "fields": fields})
+    assert r.status_code == 422
+    assert r.json()["detail"][0]["loc"] == ["body", "fields", 1, "rules", 0]
+
+
+async def test_post_expected_version_matches_creates(api, auth):
+    got = await api.client.get("/v1/schemas/invoice_ru", params={"raw": "true"}, headers=auth)
+    assert got.json()["version"] == 1
+    r = await api.client.post("/v1/schemas", params={"expected_version": 1}, headers=auth, json=_builtin_body())
+    assert r.status_code == 201, r.text
+    assert r.json()["version"] == 2
+
+
+async def test_post_expected_version_stale_409(api, auth):
+    url = "/v1/schemas"
+    first = await api.client.post(url, params={"expected_version": 1}, headers=auth, json=_builtin_body())
+    assert first.status_code == 201
+    r = await api.client.post(url, params={"expected_version": 1}, headers=auth, json=_builtin_body())
+    assert r.status_code == 409
+    assert "обновите страницу" in r.json()["detail"]
+
+
+async def test_post_expected_version_zero_rejects_existing(api, auth, make_tenant):
+    url = "/v1/schemas"
+    r = await api.client.post(url, params={"expected_version": 0}, headers=auth, json=MY_SCHEMA)
+    assert r.status_code == 201
+    r = await api.client.post(url, params={"expected_version": 0}, headers=auth, json=MY_SCHEMA)
+    assert r.status_code == 409
+    assert "уже есть" in r.json()["detail"]
+    r = await api.client.post(url, params={"expected_version": 0}, headers=auth, json=_builtin_body())
+    assert r.status_code == 409
+    other = await make_tenant("Другой")
+    items = {i["slug"]: i for i in (await api.client.get(url, headers=other)).json()}
+    assert items["invoice_ru"]["builtin"] is True and items["invoice_ru"]["version"] == 1
+
+
+async def test_operator_cannot_post_schema(api, auth):
+    operator, _ = await session_for(api, auth, role="operator")
+    r = await api.client.post("/v1/schemas", headers=operator, json=MY_SCHEMA)
+    assert r.status_code == 403
+
+
+async def test_get_builtin_ignores_override(api, auth):
+    override = {**_builtin_body(), "title": "Наш счёт"}
+    assert (await api.client.post("/v1/schemas", headers=auth, json=override)).status_code == 201
+    r = await api.client.get("/v1/schemas/invoice_ru", params={"raw": "true", "builtin": "true"}, headers=auth)
+    assert r.status_code == 200
+    assert r.json()["title"] == builtin_schemas()["invoice_ru"].title
+    assert r.json()["version"] == 1
+    await api.client.post("/v1/schemas", headers=auth, json=MY_SCHEMA)
+    assert (await api.client.get("/v1/schemas/my_doc", params={"builtin": "true"}, headers=auth)).status_code == 404

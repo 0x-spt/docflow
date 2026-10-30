@@ -10,6 +10,8 @@ from contextlib import asynccontextmanager
 from arq import create_pool
 from arq.connections import RedisSettings
 from fastapi import FastAPI, Request, status
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -32,6 +34,7 @@ from docflow.config import Settings, get_settings
 from docflow.db.session import make_engine, make_sessionmaker
 from docflow.pipeline import SchemaResolver
 from docflow.queue import ArqEnqueuer, Enqueuer
+from docflow.schemas.model import SchemaPathError
 from docflow.storage.blobs import BlobStore, blob_store_from_settings
 
 logger = logging.getLogger(__name__)
@@ -69,6 +72,17 @@ async def _unhandled(request: Request, exc: Exception) -> JSONResponse:
     return JSONResponse({"detail": "внутренняя ошибка сервера"}, status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+async def _validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """422 как обычно, но ошибка схемы указывает на поле или правило: к loc дописывается путь SchemaPathError."""
+    errors = []
+    for err in exc.errors():
+        cause = (err.get("ctx") or {}).get("error")
+        if isinstance(cause, SchemaPathError):
+            err = {**err, "loc": (*err["loc"], *cause.loc)}
+        errors.append(err)
+    return await request_validation_exception_handler(request, RequestValidationError(errors, body=exc.body))
+
+
 def create_app(
     settings: Settings | None = None,
     *,
@@ -90,6 +104,7 @@ def create_app(
     # заявки с сайта: 5 в час с одного адреса
     app.state.leads_limiter = SlidingWindowLimiter(limit=5, window_s=3600)
     app.add_exception_handler(Exception, _unhandled)
+    app.add_exception_handler(RequestValidationError, _validation_error)
     app.add_middleware(RequestSizeLimit)
 
     @app.get("/healthz", tags=["service"], summary="Проверка живости", description="Отвечает, пока процесс жив.")
