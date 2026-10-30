@@ -27,5 +27,16 @@
     ],
     "total": 999,
     "_uncertain": []
+  },
+  "waybill_ru": {
+    "number": "ПЛ-0007",
+    "issued": "2026-10-29",
+    "voditel": "Петров П. П.",
+    "avtomobil": "ГАЗель А123ВС",
+    "poezdki": [
+      {"punkt_naznacheniya": "Склад", "probeg_km": 12},
+      {"punkt_naznacheniya": "Магазин", "probeg_km": 30.5}
+    ],
+    "_uncertain": []
   }
 }
