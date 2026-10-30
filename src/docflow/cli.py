@@ -344,6 +344,16 @@ def cmd_seed_demo(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_channels(args: argparse.Namespace) -> int:
+    from docflow.channels.runner import run_channels
+
+    try:
+        asyncio.run(run_channels(get_settings()))
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="docflow", description="DocFlow: команды оператора")
     sub = parser.add_subparsers(dest="command", required=True, metavar="команда")
@@ -401,6 +411,9 @@ def build_parser() -> argparse.ArgumentParser:
     sd.add_argument("--telegram-token", help="токен бота Telegram (вместе с --telegram-chat)")
     sd.add_argument("--telegram-chat", help="ID чата Telegram")
     sd.set_defaults(func=cmd_seed_demo)
+
+    ch = sub.add_parser("channels", help="приём документов из Telegram-ботов и почты (долгоживущий процесс)")
+    ch.set_defaults(func=cmd_channels)
     return parser
 
 

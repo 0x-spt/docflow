@@ -17,3 +17,5 @@ services:
       - ./tests/e2e/fake_responses.json:/app/tests/e2e/fake_responses.json:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
+  channels:
+    environment: *e2e-env

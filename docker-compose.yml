@@ -128,6 +128,18 @@ services:
       retries: 3
     restart: unless-stopped
 
+  # приём из Telegram-ботов и почтовых ящиков клиентов; образ как у api: нужен разбор файлов и БД, OCR остаётся в worker
+  channels:
+    image: docflow-api
+    build: {context: ., dockerfile: docker/Dockerfile, target: api}
+    command: ["docflow", "channels"]
+    environment: *app-env
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      s3: {condition: service_healthy}
+    restart: unless-stopped
+
   # сайт (Next.js): ходит в API по внутренней сети, браузеру токены не отдаёт
   web:
     build: {context: ./web}

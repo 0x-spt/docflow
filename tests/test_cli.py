@@ -359,3 +359,9 @@ def test_create_tenant_with_plan(db_url):
     main(["create-tenant", "Ромашка", "--plan", "business"])
     tenant = _query(db_url, lambda s: s.scalar(select(Tenant)))
     assert (tenant.plan, tenant.pages_limit) == ("business", 3000)
+
+
+def test_channels_command_in_parser():
+    from docflow.cli import build_parser, cmd_channels
+
+    assert build_parser().parse_args(["channels"]).func is cmd_channels

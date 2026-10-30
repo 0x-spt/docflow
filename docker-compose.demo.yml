@@ -16,3 +16,5 @@ services:
     environment: *demo-env
   worker:
     environment: *demo-env
+  channels:
+    environment: *demo-env
