@@ -138,6 +138,13 @@ services:
       migrate: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
       s3: {condition: service_healthy}
+    healthcheck:
+      # цикл ботов обновляет файл каждые несколько секунд; порта у процесса нет, healthcheck образа api не подходит
+      test: ["CMD", "python", "-c", "import os,sys,tempfile,time; sys.exit(time.time()-os.path.getmtime(os.path.join(tempfile.gettempdir(),'docflow-channels-alive'))>60)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
     restart: unless-stopped
 
   # сайт (Next.js): ходит в API по внутренней сети, браузеру токены не отдаёт

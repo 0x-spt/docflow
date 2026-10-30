@@ -4,6 +4,8 @@ import asyncio
 import contextlib
 import logging
 import signal
+import tempfile
+from pathlib import Path
 from uuid import UUID
 
 import httpx
@@ -19,6 +21,8 @@ logger = logging.getLogger(__name__)
 
 BOT_REFRESH = 5.0  # как часто сверять список ботов с БД
 MAIL_INTERVAL = 60.0  # как часто обходить ящики
+# файл обновляется каждым тиком цикла ботов; healthcheck контейнера проверяет, что он свежий
+HEARTBEAT = Path(tempfile.gettempdir()) / "docflow-channels-alive"
 
 
 class BotSupervisor:
@@ -81,9 +85,22 @@ async def mail_pass(deps: ChannelDeps, poller: MailboxPoller) -> None:
 
 async def _every(interval: float, stop: asyncio.Event, work) -> None:
     while not stop.is_set():
-        await work()
+        try:
+            await work()
+        except Exception as exc:  # один сбой не должен останавливать процесс
+            logger.warning("сбой цикла каналов: %s", type(exc).__name__)
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(stop.wait(), interval)
+
+
+async def _bot_tick(supervisor: BotSupervisor) -> None:
+    try:
+        await supervisor.refresh()
+    finally:
+        try:
+            HEARTBEAT.touch()
+        except OSError:
+            pass
 
 
 async def run_channels(settings: Settings) -> None:
@@ -117,7 +134,7 @@ async def run_channels(settings: Settings) -> None:
                 loop.add_signal_handler(sig, stop.set)
         try:
             await asyncio.gather(
-                _every(BOT_REFRESH, stop, supervisor.refresh),
+                _every(BOT_REFRESH, stop, lambda: _bot_tick(supervisor)),
                 _every(MAIL_INTERVAL, stop, lambda: mail_pass(deps, mailboxes)),
             )
         finally:

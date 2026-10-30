@@ -203,3 +203,31 @@ async def test_mail_pass_survives_db_failure(caplog):
 
 def test_intervals():
     assert runner.BOT_REFRESH == 5.0 and runner.MAIL_INTERVAL == 60.0
+
+
+async def test_bot_tick_touches_heartbeat(env, tmp_path, monkeypatch):
+    beat = tmp_path / "alive"
+    monkeypatch.setattr(runner, "HEARTBEAT", beat)
+    await runner._bot_tick(env.sup)
+    assert beat.exists()
+
+
+async def test_bot_tick_tolerates_unwritable_heartbeat(env, tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "HEARTBEAT", tmp_path / "no-dir" / "alive")
+    await runner._bot_tick(env.sup)
+
+
+async def test_every_survives_failing_work(caplog):
+    stop = asyncio.Event()
+    calls = []
+
+    async def work():
+        calls.append(1)
+        if len(calls) == 1:
+            raise ValueError("secret")
+        stop.set()
+
+    with caplog.at_level(logging.WARNING):
+        await runner._every(0.01, stop, work)
+    assert len(calls) == 2
+    assert "ValueError" in caplog.text and "secret" not in caplog.text
