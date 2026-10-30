@@ -1,5 +1,6 @@
 import logging
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -635,6 +636,105 @@ async def test_redelivered_album_with_extra_part_logged(env, caplog):
     await second.poll_once()
     assert env.replies() == [ACCEPTED_ONE]
     assert "лишние части" in caplog.text
+
+
+# --- смена нумерации после долгого молчания ------------------------------------
+
+
+def _offsets(env) -> list:
+    return [payload.get("offset") for payload in env.methods("getUpdates")]
+
+
+async def test_silent_bot_forgets_offset_before_telegram_renumbers(env):
+    await env.link()
+    await env.set_bot(update_offset=900, last_update_at=datetime.now(UTC) - timedelta(days=6, minutes=1))
+    poller = env.poller()
+    await poller.poll_once()
+    assert _offsets(env) == [None]
+
+    # Telegram начал нумерацию заново: без offset новое сообщение доходит, хотя номер ниже сохранённого
+    env.pdf()
+    await poller.poll_once()
+    assert _offsets(env) == [None, None]
+    assert len(await env.docs()) == 1
+    bot = await env.bot()
+    assert bot.update_offset == 101
+    assert datetime.now(UTC) - bot.last_update_at < timedelta(minutes=1)
+
+    await poller.poll_once()
+    assert _offsets(env)[-1] == 101
+
+
+async def test_recent_update_keeps_offset(env):
+    await env.set_bot(update_offset=900, last_update_at=datetime.now(UTC) - timedelta(days=5))
+    await env.poller().poll_once()
+    assert _offsets(env) == [900]
+
+
+async def test_bot_without_updates_counts_from_creation(env):
+    await env.set_bot(update_offset=900, created_at=datetime.now(UTC) - timedelta(days=7))
+    await env.poller().poll_once()
+    assert _offsets(env) == [None]
+
+
+async def test_unrelated_writes_do_not_keep_offset_alive(env):
+    """updated_at двигают ошибки отправки и правки в кабинете: молчащий бот всё равно забывает offset."""
+    await env.set_bot(
+        update_offset=900, last_update_at=datetime.now(UTC) - timedelta(days=7), last_error="Отправка в Telegram: x"
+    )
+    assert datetime.now(UTC) - (await env.bot()).updated_at < timedelta(minutes=1)
+    await env.poller().poll_once()
+    assert _offsets(env) == [None]
+
+
+async def test_update_below_offset_resets_it(env):
+    await env.link()
+    await env.set_bot(update_offset=900)
+    env.pdf()  # update_id 100
+    env.tg.below_offset = list(env.tg.updates)
+    poller = env.poller()
+    await poller.poll_once()
+    assert len(await env.docs()) == 1
+    assert (await env.bot()).update_offset == 101  # ниже прежнего: условие «только растёт» здесь не действует
+
+    env.pdf("pdf2")
+    await poller.poll_once()
+    assert _offsets(env) == [900, 101]
+    assert len(await env.docs()) == 2
+    assert (await env.bot()).update_offset == 102
+
+
+async def test_failed_download_after_renumbering_is_retried(env):
+    await env.link()
+    await env.set_bot(update_offset=900)
+    env.pdf()
+    env.tg.below_offset = list(env.tg.updates)
+    env.tg.fail_with["getFile"] = 500
+    poller = env.poller()
+    await poller.poll_once()
+    assert (await env.bot()).update_offset == 100  # не дальше несделанного
+
+    del env.tg.fail_with["getFile"]
+    await poller.poll_once()
+    assert len(await env.docs()) == 1
+    assert (await env.bot()).update_offset == 101
+
+
+async def test_album_buffered_when_numbering_changes_keeps_nothing_stuck(env):
+    await env.link()
+    env.album_part("a1", 1)  # update_id 100
+    poller = env.poller()
+    await poller.poll_once()
+    assert (await env.bot()).update_offset == 100
+
+    env.pdf("pdf2", message_id=50)
+    new_number = {**env.tg.updates.pop(), "update_id": 40}
+    env.tg.below_offset = [new_number]
+    env.now += ALBUM_WAIT
+    env.tg.updates.clear()
+    await poller.poll_once()
+    assert (await env.bot()).update_offset == 41
+    assert len(await env.docs()) == 2
 
 
 # --- идемпотентность ----------------------------------------------------------

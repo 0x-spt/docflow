@@ -15,6 +15,7 @@ class FakeTelegram:
     fail_with: метод (или "*") → число (HTTP-статус), (статус, тело) или исключение, которое будет выброшено.
     fail_files: file_id, на которых getFile отвечает 500 (сбой одного файла, а не всего метода).
     on_call: вызывается с именем метода при каждом запросе, чтобы проверить состояние в этот момент.
+    below_offset: разовый ответ getUpdates мимо offset — так выглядит смена нумерации у Telegram.
     """
 
     def __init__(self, username: str = "acme_bot"):
@@ -27,6 +28,7 @@ class FakeTelegram:
         self.report_size = True
         self.fail_files: set[str] = set()
         self.on_call = None
+        self.below_offset: list[dict] = []
         self.transport = httpx.MockTransport(self._handle)
 
     def _failure(self, method: str):
@@ -71,6 +73,9 @@ class FakeTelegram:
         if method == "getMe":
             return {"id": 1, "is_bot": True, "username": self.username}
         if method == "getUpdates":
+            if self.below_offset:
+                batch, self.below_offset = self.below_offset, []
+                return batch
             return [u for u in self.updates if u["update_id"] >= payload.get("offset", 0)]
         if method == "getFile":
             file_id = payload["file_id"]

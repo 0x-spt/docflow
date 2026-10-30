@@ -68,6 +68,11 @@ async def test_429_retryable_403_not(bot, tg):
     assert not e.value.retryable
 
 
+async def test_get_updates_without_offset_omits_it(bot, tg):
+    await bot.get_updates(None, 0)
+    assert "offset" not in tg.calls[-1][1]
+
+
 async def test_get_updates_payload(bot, tg):
     tg.updates = [{"update_id": 5, "message": {}}, {"update_id": 7, "message": {}}]
     got = await bot.get_updates(6, 30)

@@ -345,6 +345,8 @@ class TenantBot(Base):
     update_offset: Mapped[int] = mapped_column(BigInteger, default=0)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     last_error: Mapped[str | None] = mapped_column(String, nullable=True)
+    # updated_at тут не годится: его двигают ошибки отправки и правки в кабинете, а бот при этом может молчать
+    last_update_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_now, onupdate=_now)
 

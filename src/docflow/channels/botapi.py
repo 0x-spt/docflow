@@ -91,12 +91,12 @@ class BotApi:
     async def delete_webhook(self) -> None:
         await self._call("deleteWebhook")
 
-    async def get_updates(self, offset: int, timeout: int) -> list[dict]:
-        result = await self._call(
-            "getUpdates",
-            {"offset": offset, "timeout": timeout, "allowed_updates": ["message"]},
-            timeout=timeout + 10,
-        )
+    async def get_updates(self, offset: int | None, timeout: int) -> list[dict]:
+        """offset None — без номера: Telegram отдаст самые ранние неподтверждённые обновления."""
+        payload = {"timeout": timeout, "allowed_updates": ["message"]}
+        if offset is not None:
+            payload["offset"] = offset
+        result = await self._call("getUpdates", payload, timeout=timeout + 10)
         return result  # type: ignore[return-value]
 
     async def download(self, file_id: str, limit: int = MAX_DOWNLOAD_BYTES) -> bytes:

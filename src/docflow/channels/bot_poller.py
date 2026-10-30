@@ -9,6 +9,7 @@ import re
 import secrets
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import httpx
@@ -40,6 +41,9 @@ ALBUM_TICK = 0.5
 CONFLICT_PAUSE = 30.0
 PAUSE_MIN = 5.0
 PAUSE_MAX = 60.0
+# Telegram: после недели без обновлений номер следующего выбирается случайно и может оказаться ниже нашего offset.
+# Такой getUpdates молчит вечно, поэтому забываем offset раньше, чем это случится
+OFFSET_TTL = timedelta(days=6)
 
 START_RE = re.compile(r"^/start(@(\w+))?(?:\s+(\S+))?")
 MB = 1024 * 1024
@@ -136,6 +140,8 @@ class BotPoller:
         self._api: BotApi | None = None
         self._offset = 0  # что сохранено в БД и передаётся в getUpdates
         self._next_offset = 0  # за последним пройденным обновлением
+        self._last_update_at: datetime | None = None
+        self._renumbered = False  # Telegram сменил нумерацию, новый offset ещё не сохранён
         self._seen: set[int] = set()
         self._albums: dict[tuple[int, str], _Album] = {}
         self._attempts: dict[str, int] = {}  # ключ идемпотентности → неудачные скачивания
@@ -179,10 +185,12 @@ class BotPoller:
                 self._stopped = True
                 return
             self._offset = self._next_offset = info.bot.update_offset
+            self._last_update_at = info.bot.last_update_at or info.bot.created_at
             token = decrypt_secrets(info.bot.token_enc, self._deps.settings.secrets_key)["token"]
             self._api = BotApi(self._http, token, self._deps.settings.telegram_api_url)
 
-        updates = await self._api.get_updates(self._offset, 0 if self._albums else timeout)
+        offset = None if datetime.now(UTC) - self._last_update_at >= OFFSET_TTL else self._offset
+        updates = await self._api.get_updates(offset, 0 if self._albums else timeout)
         # альбом готов, только если свежий опрос не принёс новых частей: время обработки пачки не считается
         polled_at = self._clock()
 
@@ -194,6 +202,10 @@ class BotPoller:
         if (info.bot.last_error or "").startswith(POLL_ERROR_PREFIX):
             own = TenantBot.last_error.startswith(POLL_ERROR_PREFIX, autoescape=True)
             await self._save_status(own, last_error=None)
+
+        first_id = min((u["update_id"] for u in updates), default=self._offset)
+        if first_id < self._offset:
+            self._start_numbering_from(first_id)
 
         self._retrying = False
         stopped_early = False
@@ -211,7 +223,7 @@ class BotPoller:
         # за остановившимся проходом могут лежать ещё не прочитанные части альбомов
         if not stopped_early:
             await self._flush_albums(info, polled_at)
-        await self._save_offset()
+        await self._save_offset(received=bool(updates))
 
         if self._retrying:
             self._pause = self._grow_backoff()
@@ -255,19 +267,35 @@ class BotPoller:
             return False
         return True
 
-    async def _save_offset(self) -> None:
-        pending = [min(album.update_ids) for album in self._albums.values()]
+    def _start_numbering_from(self, first_id: int) -> None:
+        """Номер ниже offset: нумерация началась заново. Обновления обрабатываем как обычно, дубли отсечёт ключ."""
+        logger.warning("бот %s: Telegram сменил нумерацию обновлений", self._bot_id)
+        self._offset = self._next_offset = first_id
+        self._renumbered = True
+        self._seen.clear()
+        for album in self._albums.values():
+            album.update_ids.clear()  # старые номера больше не держат offset
+
+    async def _save_offset(self, *, received: bool) -> None:
+        pending = [min(album.update_ids) for album in self._albums.values() if album.update_ids]
         offset = min([self._next_offset, *pending])
-        if offset > self._offset:
+        moved = self._renumbered or offset > self._offset
+        if received or moved:
+            now = datetime.now(UTC)
+            bot = update(TenantBot).where(TenantBot.id == self._bot_id).execution_options(synchronize_session=False)
             async with self._deps.sessionmaker() as session:
-                await session.execute(
-                    update(TenantBot)
-                    .where(TenantBot.id == self._bot_id, TenantBot.update_offset < offset)
-                    .values(update_offset=offset)
-                    .execution_options(synchronize_session=False)
-                )
+                if received:
+                    await session.execute(bot.values(last_update_at=now))
+                if self._renumbered:
+                    await session.execute(bot.values(update_offset=offset))
+                elif moved:
+                    await session.execute(bot.where(TenantBot.update_offset < offset).values(update_offset=offset))
                 await session.commit()
-            self._offset = offset
+            if received:
+                self._last_update_at = now
+            if moved:
+                self._offset = offset
+                self._renumbered = False
         self._seen = {u for u in self._seen if u >= self._offset}
 
     async def _take(self, info: _BotInfo, message: dict, update_id: int) -> bool:
