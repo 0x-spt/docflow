@@ -850,7 +850,7 @@ async def test_conflict_recorded_and_paused(env):
     env.tg.fail_with["getUpdates"] = 409
     await poller.run()
     assert pauses == [CONFLICT_PAUSE]
-    assert errors[0].startswith("Telegram getUpdates: 409")
+    assert errors[0].startswith("Опрос Telegram: Telegram getUpdates: 409")
 
 
 async def test_last_error_cleared_after_recovery(env):
@@ -861,6 +861,22 @@ async def test_last_error_cleared_after_recovery(env):
     del env.tg.fail_with["getUpdates"]
     await poller.poll_once()
     assert (await env.bot()).last_error is None
+
+
+async def test_stored_own_error_cleared_by_new_poller(env):
+    """Ошибка прошлого процесса: новый экземпляр о ней не помнит, но узнаёт свою по началу текста."""
+    env.tg.fail_with["getUpdates"] = 500
+    await env.poller().poll_once()
+    assert (await env.bot()).last_error.startswith("Опрос Telegram: ")
+    del env.tg.fail_with["getUpdates"]
+    await env.poller().poll_once()
+    assert (await env.bot()).last_error is None
+
+
+async def test_foreign_error_survives_new_poller(env):
+    await env.set_bot(last_error="не отправлено в чат")
+    await env.poller().poll_once()
+    assert (await env.bot()).last_error == "не отправлено в чат"
 
 
 async def test_foreign_last_error_survives_poll(env):
@@ -896,7 +912,7 @@ async def test_db_failure_on_link_check_keeps_update(env, monkeypatch):
     await poller.poll_once()
     assert env.replies() == []
     assert (await env.bot()).update_offset == 0
-    assert (await env.bot()).last_error == "Сбой опроса (OSError)"
+    assert (await env.bot()).last_error == "Опрос Telegram: сбой (OSError)"
 
     monkeypatch.setattr(poller, "_is_linked", real)
     await poller.poll_once()

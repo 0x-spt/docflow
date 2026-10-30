@@ -55,6 +55,8 @@ ALLOWED_MIME = {
 ALLOWED_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff", ".heic", ".heif", ".pdf")
 
 TOKEN_REVOKED = "токен больше не действует"
+# last_error общий с отправкой ответов (задача 9): по этому началу опрос узнаёт свои ошибки и после перезапуска
+POLL_ERROR_PREFIX = "Опрос Telegram: "
 ASK_FOR_LINK = "Попросите ссылку у администратора кабинета"
 ALREADY_LINKED = "Этот чат уже подключён, присылайте документы"
 NEED_FILE = "Пришлите фото или PDF документа"
@@ -138,8 +140,6 @@ class BotPoller:
         self._albums: dict[tuple[int, str], _Album] = {}
         self._attempts: dict[str, int] = {}  # ключ идемпотентности → неудачные скачивания
         self._retrying = False
-        # last_error общий с отправкой ответов (задача 9): снимаем только ошибку, записанную этим поллером
-        self._own_error: str | None = None
         self._stopped = False
         self._pause = 0.0
         self._backoff = PAUSE_MIN
@@ -168,7 +168,7 @@ class BotPoller:
         except Exception as exc:
             logger.warning("бот %s: сбой опроса: %s", self._bot_id, type(exc).__name__)
             # в тексте чужого исключения мог оказаться адрес с токеном; BotApiError уже очищен
-            text = exc.message if isinstance(exc, BotApiError) else f"Сбой опроса ({type(exc).__name__})"
+            text = exc.message if isinstance(exc, BotApiError) else f"сбой ({type(exc).__name__})"
             await self._record_error(text)
             self._pause = self._grow_backoff()
 
@@ -191,10 +191,9 @@ class BotPoller:
         if info is None:
             self._stopped = True
             return
-        if self._own_error is not None and await self._save_status(
-            TenantBot.last_error == self._own_error, last_error=None
-        ):
-            self._own_error = None
+        if (info.bot.last_error or "").startswith(POLL_ERROR_PREFIX):
+            own = TenantBot.last_error.startswith(POLL_ERROR_PREFIX, autoescape=True)
+            await self._save_status(own, last_error=None)
 
         self._retrying = False
         stopped_early = False
@@ -239,8 +238,7 @@ class BotPoller:
         return _BotInfo(row[0], row[1]) if row is not None else None
 
     async def _record_error(self, text: str) -> None:
-        await self._save_status(last_error=text)
-        self._own_error = text
+        await self._save_status(last_error=f"{POLL_ERROR_PREFIX}{text}")
 
     async def _save_status(self, *where, **values) -> bool:
         try:
