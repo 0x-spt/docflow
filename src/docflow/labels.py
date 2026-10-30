@@ -258,6 +258,7 @@ async def prune_label_set(session: AsyncSession, tenant_id: uuid.UUID, schema: D
     top = {f.name for f in _queueable(schema)}
     old_labels, old_queue = dict(row.labels or {}), list(row.queue_fields or [])
     labels = {k: v for k, v in old_labels.items() if k in known}
+    # пустая очередь после чистки читается как «умолчание» (queue_fields_for): выбор компании сбрасывается
     queue = [k for k in old_queue if k in top]
     if labels != old_labels or queue != old_queue:
         row.labels = labels

@@ -122,8 +122,9 @@ async def create_schema(
         current = await _latest_visible_version(session, tenant_id, schema.slug)
         stored = schema.model_copy(update={"version": current + 1})
         body = stored.model_dump(mode="json")
-        session.add(SchemaRecord(tenant_id=tenant_id, slug=stored.slug, version=stored.version, body=body))
+        # чистка до add: её SELECT сбросил бы INSERT вне try, и коллизия версии дала бы 500 вместо повтора
         await prune_label_set(session, tenant_id, stored)
+        session.add(SchemaRecord(tenant_id=tenant_id, slug=stored.slug, version=stored.version, body=body))
         try:
             await session.commit()
         except IntegrityError:

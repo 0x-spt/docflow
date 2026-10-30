@@ -141,6 +141,19 @@ async def test_post_422_points_to_field_rule(api, auth):
     r = await api.client.post("/v1/schemas", headers=auth, json={**MY_SCHEMA, "fields": fields})
     assert r.status_code == 422
     assert r.json()["detail"][0]["loc"] == ["body", "fields", 1, "rules", 0]
+    assert "pattern не компилируется" in r.json()["detail"][0]["msg"]
+
+
+async def test_post_422_points_to_duplicate_column(api, auth):
+    table = {
+        "name": "items",
+        "type": "table",
+        "description": "d",
+        "columns": [{"name": "a", "type": "string"}, {"name": "a", "type": "string"}],
+    }
+    r = await api.client.post("/v1/schemas", headers=auth, json={**MY_SCHEMA, "fields": [table]})
+    assert r.status_code == 422
+    assert r.json()["detail"][0]["loc"] == ["body", "fields", 0, "columns", 1]
 
 
 async def test_post_expected_version_matches_creates(api, auth):
@@ -189,3 +202,23 @@ async def test_get_builtin_ignores_override(api, auth):
     assert r.json()["version"] == 1
     await api.client.post("/v1/schemas", headers=auth, json=MY_SCHEMA)
     assert (await api.client.get("/v1/schemas/my_doc", params={"builtin": "true"}, headers=auth)).status_code == 404
+
+
+async def test_post_retries_version_collision_with_labels(api, auth, monkeypatch):
+    from docflow.api import schemas as schemas_api
+
+    assert (await api.client.post("/v1/schemas", headers=auth, json=MY_SCHEMA)).status_code == 201
+    r = await api.client.put("/v1/schemas/my_doc/labels", headers=auth, json={"labels": {"number": "Номер X"}})
+    assert r.status_code == 200, r.text
+    real = schemas_api._latest_visible_version
+    calls = []
+
+    async def stale_once(session, tenant_id, slug):
+        calls.append(1)
+        return 0 if len(calls) == 1 else await real(session, tenant_id, slug)
+
+    monkeypatch.setattr(schemas_api, "_latest_visible_version", stale_once)
+    r = await api.client.post("/v1/schemas", headers=auth, json={**MY_SCHEMA, "title": "v2"})
+    assert r.status_code == 201, r.text
+    assert r.json()["version"] == 2
+    assert len(calls) == 2
