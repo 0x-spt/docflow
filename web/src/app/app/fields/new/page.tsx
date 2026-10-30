@@ -1,5 +1,5 @@
 import { SchemaEditor } from "@/components/app/SchemaEditor";
-import { AUTO_SLUG } from "@/lib/doc-type";
+import { AUTO_SLUG, UNKNOWN_SLUG } from "@/lib/doc-type";
 import { apiFetchAuthed, requireMe } from "@/lib/session";
 import type { Dictionary, SchemaListItem } from "@/lib/types";
 
@@ -27,7 +27,7 @@ export default async function NewSchemaPage() {
         initial={null}
         labels={{}}
         dictionaries={dictionaries.map((d) => ({ name: d.name, title: d.title }))}
-        takenSlugs={[...schemas.map((s) => s.slug), AUTO_SLUG]}
+        takenSlugs={[...schemas.map((s) => s.slug), AUTO_SLUG, UNKNOWN_SLUG]}
       />
     </div>
   );

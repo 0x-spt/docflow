@@ -177,6 +177,10 @@ export function MailboxForm({
             Письма принимаются от всех: спам будет тратить страницы
           </p>
         ) : null}
+        <p role="status" className="border-2 border-ink bg-paper p-3 text-sm font-medium">
+          Все непрочитанные письма с вложениями в этой папке, в том числе старые, будут обработаны и помечены
+          прочитанными. Лучше подключить отдельный ящик или папку.
+        </p>
         <Field
           label="Тип документов по умолчанию"
           name="mail-schema"

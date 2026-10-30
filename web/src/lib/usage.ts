@@ -23,6 +23,6 @@ export function usageView(u: Usage): UsageView {
   if (raw >= OVER_AT) {
     return { text, percent, tone: "over", note: "Лимит страниц на месяц исчерпан: напишите нам, чтобы сменить тариф" };
   }
-  if (raw >= WARN_AT) return { text, percent, tone: "warn", note: "Использовано больше 80% лимита" };
+  if (raw >= WARN_AT) return { text, percent, tone: "warn", note: "Использовано 80% лимита или больше" };
   return { text, percent, tone: "ok", note: null };
 }

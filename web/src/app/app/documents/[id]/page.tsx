@@ -8,7 +8,7 @@ import { ReviewForm } from "@/components/app/ReviewForm";
 import { RetypeForm } from "@/components/app/RetypeForm";
 import { StatusBadge } from "@/components/ui";
 import { ApiError } from "@/lib/api";
-import { AUTO_SLUG, docTypeLabel } from "@/lib/doc-type";
+import { AUTO_SLUG, docTypeLabel, previewCount } from "@/lib/doc-type";
 import { fieldLabel, formatDateTime } from "@/lib/format";
 import { isDocId } from "@/lib/ids";
 import { INFO_CODES, notesByField } from "@/lib/review-form";
@@ -111,11 +111,11 @@ export default async function DocumentPage({ params }: { params: Promise<{ id: s
 
   const inWork = doc.status === "queued" || doc.status === "processing";
   const reviewable = doc.status === "needs_review";
-  // у failed PDF и превью бывают (упало извлечение, а не подготовка страниц), но `pages` тогда 0:
-  // ссылку на PDF даём, а превью пробуем с первой страницы — нет файла → плашка
+  // у failed PDF и превью бывают (упало извлечение, а не подготовка страниц): ссылку на PDF даём всегда,
+  // а нет файла страницы → плашка
   const pdfHref = inWork ? null : `/app/files/${encodeURIComponent(doc.id)}/pdf`;
   const digitalHref = doc.digital_pdf_url ? `/app/files/${encodeURIComponent(doc.id)}/digital` : null;
-  const pages = Math.max(doc.pages ?? 0, 1);
+  const pages = previewCount(doc.status, doc.model, doc.pages);
   const notes = notesByField(doc.issues);
   const data = doc.data ?? {};
 

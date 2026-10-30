@@ -373,6 +373,8 @@ export interface BotChatInfo {
 export interface BotInfo {
   username: string;
   active: boolean;
+  /** Локальный режим распознавания: ответы бота всё равно идут через серверы Telegram */
+  local_mode: boolean;
   last_error: string | null;
   /** null — определять тип автоматически */
   default_schema: string | null;

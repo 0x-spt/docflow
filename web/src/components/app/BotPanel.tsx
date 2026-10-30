@@ -48,6 +48,12 @@ export function BotPanel({ bot, schemas }: { bot: BotInfo; schemas: { slug: stri
         </Button>
       </div>
 
+      {bot.local_mode ? (
+        <p role="status" className="border-2 border-ink bg-paper p-4 font-medium">
+          У вас локальный режим распознавания: ответы бота и уведомления уходят через серверы Telegram. Уведомления обо
+          всех документах выключены по умолчанию.
+        </p>
+      ) : null}
       {!bot.active ? (
         <p role="alert" className={ALERT}>
           Токен больше не действует. Отключите бота и подключите заново.
@@ -99,7 +105,7 @@ export function BotPanel({ bot, schemas }: { bot: BotInfo; schemas: { slug: stri
         <SecretBox
           title="Ссылка для группы"
           value={bot.group_invite_link}
-          note="Telegram предложит выбрать группу. Чтобы бот видел сообщения, сделайте его администратором группы или отключите privacy mode у @BotFather."
+          note="Telegram предложит выбрать группу. Чтобы бот видел сообщения, сделайте его администратором группы или отключите privacy mode у @BotFather. Смена privacy mode подействует, когда бота добавят в группу заново."
         />
         <div className="flex flex-col items-start gap-1">
           <Button

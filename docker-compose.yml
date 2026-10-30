@@ -16,6 +16,9 @@ x-app-env: &app-env
   DOCFLOW_PUBLIC_BASE_URL: ${DOCFLOW_PUBLIC_BASE_URL:-http://localhost:8000}
   DOCFLOW_PUBLIC_SITE_URL: ${DOCFLOW_PUBLIC_SITE_URL:-http://localhost:3000}
   DOCFLOW_ANTHROPIC_MODEL: ${DOCFLOW_ANTHROPIC_MODEL:-claude-opus-5-5}
+  DOCFLOW_ANTHROPIC_CLASSIFY_MODEL: ${DOCFLOW_ANTHROPIC_CLASSIFY_MODEL:-claude-haiku-5-5}
+  # другой адрес нужен только для заглушки или своего сервера Bot API
+  DOCFLOW_TELEGRAM_API_URL: ${DOCFLOW_TELEGRAM_API_URL:-https://api.telegram.org}
   # ключ берётся с хоста; без него работают только fake-экстрактор и Ollama
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
   # локальный режим (152-ФЗ): Ollama на хосте; в проде — адрес GPU-сервера внутри периметра клиента

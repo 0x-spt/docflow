@@ -7,7 +7,7 @@ import type { SchemaListItem } from "@/lib/types";
 
 /** Документ, у которого не удалось определить тип: выбрать тип самому и распознать заново. */
 export function RetypeForm({ id, schemas }: { id: string; schemas: SchemaListItem[] }) {
-  const [schema, setSchema] = useState(schemas[0]?.slug ?? "");
+  const [schema, setSchema] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [pending, start] = useTransition();
   const selectId = useId();
@@ -35,8 +35,10 @@ export function RetypeForm({ id, schemas }: { id: string; schemas: SchemaListIte
           id={selectId}
           value={schema}
           onChange={(e) => setSchema(e.target.value)}
+          required
           className="min-h-11 min-w-0 border-2 border-ink bg-card px-3 text-base"
         >
+          <option value="">Выберите тип</option>
           {schemas.map((s) => (
             <option key={s.slug} value={s.slug}>
               {s.title}
@@ -45,7 +47,7 @@ export function RetypeForm({ id, schemas }: { id: string; schemas: SchemaListIte
         </select>
         <button
           type="submit"
-          disabled={pending}
+          disabled={pending || !schema}
           className="inline-flex min-h-11 items-center border-2 border-ink bg-card px-5 font-semibold shadow-hard active:translate-x-1.5 active:translate-y-1.5 active:shadow-none disabled:opacity-50"
         >
           {pending ? "Ставим в очередь…" : "Распознать заново"}
