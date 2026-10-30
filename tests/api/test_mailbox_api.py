@@ -111,7 +111,7 @@ async def test_put_keeps_password_when_empty(api, owner):
         r = await put(api, owner, folder="Bills", **over)
         assert r.status_code == 200, r.text
         assert (await row(api)).password_enc == first
-    assert (await row(api)).folder == "Счета"
+    assert (await row(api)).folder == "Bills"
     await put(api, owner, password="synthetic-new-pass")
     saved = (await row(api)).password_enc
     assert decrypt_secrets(saved, api.settings.secrets_key) == {"password": "synthetic-new-pass"}
