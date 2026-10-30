@@ -9,6 +9,8 @@ from docflow.schemas.llm import to_json_schema
 from docflow.schemas.model import DocSchema
 
 _BETAS = ["server-side-fallback-2026-07-01"]
+# предел structured outputs: не больше 16 параметров с union-типом (nullable) на схему
+MAX_UNIONS = 16
 # Бюджет одного запроса должен укладываться в job_timeout воркера (300 с, см. worker.JOB_TIMEOUT):
 # по умолчанию SDK ждёт до 10 минут и делает 2 повтора — задачу убил бы arq, а поток с запросом жил бы дальше.
 # Один повтор оставлен для быстрых отказов (429/529/обрыв соединения); повтор после таймаута в бюджет
@@ -40,7 +42,7 @@ class ClaudeExtractor:
                 messages=[{"role": "user", "content": content}],
                 output_config={
                     "effort": self.effort,
-                    "format": {"type": "json_schema", "schema": to_json_schema(schema)},
+                    "format": {"type": "json_schema", "schema": to_json_schema(schema, max_unions=MAX_UNIONS)},
                 },
                 betas=_BETAS,
                 fallbacks="default",
