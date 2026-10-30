@@ -102,6 +102,11 @@ _DOC_RULE_OPTIONAL: dict[str, frozenset[str]] = {
 }
 
 
+# защита от ReDoS: правило из кабинета выполняется в воркере без таймаута
+REGEX_PATTERN_MAX = 200
+REGEX_VALUE_MAX = 1000
+
+
 def _positive_int(v: Any) -> bool:
     return isinstance(v, int) and not isinstance(v, bool) and v > 0
 
@@ -119,6 +124,8 @@ def _check_field_rule(field: "FieldSpec", rule: RuleSpec) -> None:
         pattern = rule.params.get("pattern")
         if not isinstance(pattern, str):
             raise ValueError(f"«{field.name}»: правилу regex нужен параметр pattern")
+        if len(pattern) > REGEX_PATTERN_MAX:
+            raise ValueError(f"«{field.name}»: pattern длиннее {REGEX_PATTERN_MAX} символов")
         try:
             re.compile(pattern)
         except re.error as e:

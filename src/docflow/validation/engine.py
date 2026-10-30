@@ -11,7 +11,7 @@ from datetime import date
 from typing import Any, Literal
 
 from docflow.schemas.llm import UNCERTAIN
-from docflow.schemas.model import DOC_RULES, FIELD_RULES, DocSchema, FieldSpec
+from docflow.schemas.model import DOC_RULES, FIELD_RULES, REGEX_VALUE_MAX, DocSchema, FieldSpec
 from docflow.validation import checksums
 
 Status = Literal["ok", "needs_review", "failed"]
@@ -56,7 +56,8 @@ def _checksum_rule(label: str, check: Callable[[str], bool]) -> FieldRule:
 
 
 def _regex_rule(name: str, value: Any, params: dict[str, Any], today: date) -> list[Issue]:
-    if re.search(params["pattern"], str(value)):
+    # значение режем: на длинной строке катастрофический шаблон держал бы воркер
+    if re.search(params["pattern"], str(value)[:REGEX_VALUE_MAX]):
         return []
     return [Issue(name, "pattern", f"значение «{value}» не соответствует формату {params['pattern']}")]
 

@@ -153,3 +153,12 @@ def test_schema_path_error_points_to_field_rule_and_duplicate():
             FieldSpec(name="number", type="string"),
         )
     assert ei.value.errors()[0]["ctx"]["error"].loc == ("fields", 2)
+
+
+def test_regex_pattern_length_capped():
+    def rule(p):
+        return FieldSpec(name="a", type="string", rules=[{"kind": "regex", "params": {"pattern": p}}])
+
+    assert _schema(rule("a" * 200))
+    with pytest.raises(ValidationError, match="длиннее 200"):
+        _schema(rule("a" * 201))

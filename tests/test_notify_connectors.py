@@ -13,6 +13,7 @@ import respx
 from docflow.connectors import email as email_mod
 from docflow.connectors.base import REGISTRY, ConnectorError, DestCtx, ExportDoc, supports
 from docflow.schemas.library import builtin_schemas
+from docflow.schemas.model import DocSchema
 
 TOKEN = "123456:SECRET-token"
 API = f"https://api.telegram.org/bot{TOKEN}"
@@ -419,3 +420,29 @@ def test_notify_new_without_total_does_not_crash():
     text = notification_text(make_doc(total=None), "notify_new")
     assert text.splitlines()[1] == "ООО Ромашка"
     assert "₽" not in text
+
+
+def _custom_total_doc(fields, rules, data) -> ExportDoc:
+    from docflow.connectors.crm_common import total_of
+
+    schema = DocSchema.model_validate(
+        {"slug": "doc_x", "title": "T", "description": "d", "fields": fields, "rules": rules}
+    )
+    doc = make_doc()
+    doc = ExportDoc(**{**doc.__dict__, "schema": schema, "data": data})
+    return doc, total_of
+
+
+def test_total_of_uses_total_field_of_schema():
+    fields = [
+        {"name": "itogo", "type": "number"},
+        {"name": "summa", "type": "number"},
+    ]
+    rules = [{"kind": "total_consistent", "params": {"total": "itogo"}}]
+    doc, total_of = _custom_total_doc(fields, rules, {"itogo": 100.0, "summa": 5})
+    assert total_of(doc) == 100
+
+
+def test_total_of_none_without_total():
+    doc, total_of = _custom_total_doc([{"name": "name", "type": "string"}], [], {"name": "x"})
+    assert total_of(doc) is None

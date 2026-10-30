@@ -39,7 +39,7 @@ export default async function EditFieldsPage({ params }: { params: Promise<{ slu
       <div>
         <h1 className="text-4xl font-semibold tracking-tight">Поля: {schema.title}</h1>
         <p className="mt-1 max-w-3xl text-muted">
-          Сохранение создаёт версию {schema.version + 1}. Обработанные документы остаются на своей версии.
+          Сохранение создаёт новую версию типа. Обработанные документы остаются на своей версии.
         </p>
       </div>
       <SchemaEditor

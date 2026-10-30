@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime
 from typing import Any
 
 from docflow.connectors.base import ConnectorError, DestCtx, ExportDoc
+from docflow.labels import total_field
 from docflow.schemas.model import ColumnSpec
 from docflow.tabular import clean_text
 
@@ -73,7 +74,8 @@ def deal_title(doc: ExportDoc, max_len: int = 250) -> str:
 
 
 def total_of(doc: ExportDoc) -> float | None:
-    value = doc.data.get("total")
+    # поле «итого» у типов из кабинета называется по-своему (itogo, summa): ищем по сырой схеме, без подписей
+    value = doc.data.get(total_field(doc.default_schema) or "total")
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return int(value) if float(value).is_integer() else float(value)

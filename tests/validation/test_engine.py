@@ -343,3 +343,11 @@ def test_dictionary_rule_is_applied_outside_evaluate():
 def test_corrected_is_informational():
     assert decide_status([Issue("clinic", "corrected", "…")]) == "ok"
     assert decide_status([Issue("clinic", "corrected", "…"), Issue("x", "uncertain", "…")]) == "needs_review"
+
+
+def test_regex_rule_truncates_long_value():
+    from docflow.schemas.model import REGEX_VALUE_MAX
+
+    s = schema([{"name": "f", "type": "string", "rules": [{"kind": "regex", "params": {"pattern": r"^a+$"}}]}])
+    # хвост за пределом среза не виден шаблону
+    assert evaluate(s, {"f": "a" * REGEX_VALUE_MAX + "!"}, today=TODAY) == []
