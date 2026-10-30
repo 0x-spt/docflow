@@ -445,11 +445,14 @@ async def review_document_endpoint(
     except Exception:
         # проверка уже записана; закоммиченные доставки поднимет requeue_stale
         logger.exception("не удалось поставить вебхуки документа %s", document.id)
+    doc_id = document.id
     try:
         await enqueue_bot_messages(session, document, "bot_reviewed", enqueuer)
     except Exception:
         # проверка уже записана; закоммиченные сообщения поднимет requeue_stale_exports
-        logger.exception("не удалось поставить сообщения бота о документе %s", document.id)
+        logger.exception("не удалось поставить сообщения бота о документе %s", doc_id)
+        await session.rollback()  # дальше на этой сессии ставятся выгрузки и читается ответ
+        document = await session.get(Document, doc_id, populate_existing=True)
     if body.decision == "approve":
         try:
             await route_approved(session, document, schemas, enqueuer)

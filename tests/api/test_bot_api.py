@@ -4,10 +4,10 @@ import uuid
 import httpx
 import pytest
 from api_helpers import session_for
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from docflow.channels import botapi
-from docflow.db.models import BotChat, TenantBot, hash_key
+from docflow.db.models import BotChat, Tenant, TenantBot, hash_key
 from docflow.secrets import decrypt_secrets
 
 TOKEN = "123456:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
@@ -55,6 +55,15 @@ async def test_connect_saves_encrypted_and_clears_webhook(api, owner, tg):
     assert out["group_invite_link"] == f"https://t.me/acme_bot?startgroup={row.invite_code}"
     got = (await api.client.get("/v1/bot", headers=owner)).json()
     assert got == {"bot": out}
+
+
+@pytest.mark.parametrize(("extractor", "expected"), [("ollama", True), ("claude", False)])
+async def test_local_mode_reported(api, owner, tg, extractor, expected):
+    assert (await connect(api, owner)).status_code == 201
+    async with api.sessionmaker() as s:
+        await s.execute(update(Tenant).values(extractor=extractor))
+        await s.commit()
+    assert (await api.client.get("/v1/bot", headers=owner)).json()["bot"]["local_mode"] is expected
 
 
 async def test_get_without_bot(api, owner, tg):

@@ -2,10 +2,12 @@
 
 from datetime import date
 
+from sqlalchemy import and_
+
 from docflow.channels.botapi import BotApi
 from docflow.connectors.base import ExportDoc
 from docflow.connectors.notify_common import TEXT_MAX, clip, doc_ref, first_reason, money, notification_text, one_line
-from docflow.db.models import Document
+from docflow.db.models import BotChat, Document, TenantBot
 from docflow.labels import total_field
 from docflow.serializers import digital_filename
 
@@ -20,11 +22,35 @@ REJECTED_TEXT = "Документ отклонён"
 # схема удалена — подписей и заголовка нет, остаётся сказать главное
 READY_NO_SCHEMA = "Документ распознан"
 REVIEW_NO_SCHEMA = "Нужна проверка"
+# last_error бота общий с опросом: по этому началу отправка узнаёт свои ошибки
+SEND_ERROR_PREFIX = "Отправка в Telegram: "
+CHAT_ERROR_PREFIX = f"{SEND_ERROR_PREFIX}чат «"
+CHAT_TITLE_MAX = 100
 
 
-def _with_link(lines: list[str], doc: ExportDoc | None, limit: int) -> str:
+def chat_unavailable_text(chat: BotChat) -> str:
+    """Название чата задаёт его участник: в одну строку и не длиннее предела.
+
+    Номер — в самом конце: по нему last_error узнают свой чат, даже если названия совпали или название сменилось.
+    """
+    title = one_line(chat.title or chat.chat_id)[:CHAT_TITLE_MAX]
+    return (
+        f"чат «{title}» недоступен: бота заблокировали или удалили из чата. "
+        f"Верните бота или отвяжите чат (id {chat.chat_id})"
+    )
+
+
+def last_error_about_chat(chat_id: int):
+    """last_error бота говорит о недоступности этого чата. Такую ошибку снимают только успех в нём и его отвязка."""
+    return and_(
+        TenantBot.last_error.startswith(CHAT_ERROR_PREFIX, autoescape=True),
+        TenantBot.last_error.endswith(f"(id {chat_id})", autoescape=True),
+    )
+
+
+def _with_link(lines: list[str], url: str | None, limit: int) -> str:
     """Режется только текст: ссылка в кабинет остаётся целой при любой длине значений."""
-    link = f"Открыть в кабинете: {doc.cabinet_url}" if doc and doc.cabinet_url else ""
+    link = f"Открыть в кабинете: {url}" if url else ""
     if not link:
         return clip("\n".join(lines), limit)
     body = clip("\n".join(lines), limit - len(link) - 1)
@@ -52,17 +78,17 @@ def result_text(doc: ExportDoc, queue_fields: list[str]) -> str:
     for key in queue_fields:
         if key not in HEADER_FIELDS and (value := _value(doc, key)):
             lines.append(f"{one_line(titles.get(key, key))}: {value}")
-    return _with_link(lines, doc, CAPTION_MAX)
+    return _with_link(lines, doc.cabinet_url, CAPTION_MAX)
 
 
 def review_text(doc: ExportDoc) -> str:
     lines = [f"Нужна проверка: {doc_ref(doc)}"]
     if why := first_reason(doc):
         lines.append(why)
-    return _with_link(lines, doc, CAPTION_MAX)
+    return _with_link(lines, doc.cabinet_url, CAPTION_MAX)
 
 
-def failed_text(error: str | None, doc: ExportDoc | None) -> str:
+def failed_text(error: str | None, cabinet_url: str | None) -> str:
     if error is None:
         text = FAILED_TEXT
     elif error.startswith(MODEL_ERROR_PREFIX):
@@ -70,18 +96,18 @@ def failed_text(error: str | None, doc: ExportDoc | None) -> str:
         text = MODEL_ERROR_TEXT
     else:
         text = f"{FAILED_TEXT}: {error}"
-    return _with_link([text], doc, TEXT_MAX)
+    return _with_link([text], cabinet_url, TEXT_MAX)
 
 
 def reviewed_text(doc: ExportDoc, status: str) -> str:
     return clip(f"{APPROVED_TEXT if status == 'ok' else REJECTED_TEXT}: {doc_ref(doc)}")
 
 
-def _text_without_schema(document: Document, purpose: str) -> str:
+def _text_without_schema(document: Document, purpose: str, cabinet_url: str) -> str:
     if purpose == "bot_reviewed":
         return APPROVED_TEXT if document.status == "ok" else REJECTED_TEXT
     if document.status == "failed":
-        return failed_text(document.error, None)
+        return failed_text(document.error, cabinet_url)  # тип выбирают в кабинете: без ссылки туда не попасть
     return READY_NO_SCHEMA if document.status == "ok" else REVIEW_NO_SCHEMA
 
 
@@ -95,15 +121,16 @@ async def send_bot_export(
     *,
     full: bool,
     queue_fields: list[str],
+    cabinet_url: str,
 ) -> None:
     """full — чат, из которого прислан документ: ему реплай и PDF; остальным короткое уведомление."""
     reply = reply_to if full else None
     if doc is None:
-        return await api.send_message(chat_id, _text_without_schema(document, purpose), reply)
+        return await api.send_message(chat_id, _text_without_schema(document, purpose, cabinet_url), reply)
     if purpose == "bot_reviewed":
         return await api.send_message(chat_id, reviewed_text(doc, document.status), reply)
     if document.status == "failed":
-        return await api.send_message(chat_id, failed_text(document.error, doc), reply)
+        return await api.send_message(chat_id, failed_text(document.error, cabinet_url), reply)
     approved = document.status == "ok"
     if not full:
         return await api.send_message(chat_id, notification_text(doc, "notify_new" if approved else "notify_review"))

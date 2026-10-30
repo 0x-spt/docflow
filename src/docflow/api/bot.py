@@ -13,12 +13,13 @@ from typing import Annotated
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, ConfigDict, StrictBool
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 
 from docflow.api.deps import Principal, SessionDep, SettingsDep, parse_id, require_owner
+from docflow.channels.bot_messages import last_error_about_chat
 from docflow.channels.botapi import TOKEN_RE, BotApi, BotApiError, BotTokenRevoked
-from docflow.db.models import BotChat, TenantBot, hash_key
+from docflow.db.models import LOCAL_EXTRACTOR, BotChat, Tenant, TenantBot, hash_key
 from docflow.schemas.catalog import AUTO_SLUG, list_doc_types
 from docflow.secrets import SecretsKeyMissing, encrypt_secrets
 
@@ -80,10 +81,12 @@ async def _out(session, bot: TenantBot) -> dict:
         .scalars()
         .all()
     )
+    tenant = await session.get(Tenant, bot.tenant_id)
     base = f"https://t.me/{bot.username}"
     return {
         "username": bot.username,
         "active": bot.active,
+        "local_mode": tenant.extractor == LOCAL_EXTRACTOR,
         "last_error": bot.last_error,
         "default_schema": bot.default_schema,
         "invite_link": f"{base}?start={bot.invite_code}",
@@ -208,6 +211,11 @@ async def patch_chat(chat_id: str, body: ChatPatch, principal: OwnerDep, session
 @router.delete("/chats/{chat_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Отвязать чат")
 async def unlink_chat(chat_id: str, principal: OwnerDep, session: SessionDep) -> Response:
     chat = await _own_chat(session, principal.tenant_id, chat_id)
+    await session.execute(
+        update(TenantBot)
+        .where(TenantBot.id == chat.bot_id, last_error_about_chat(chat.chat_id))
+        .values(last_error=None)
+    )
     await session.delete(chat)
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -26,7 +26,7 @@ from docflow.channels.botapi import (
     BotTokenRevoked,
 )
 from docflow.channels.deps import ChannelDeps
-from docflow.db.models import BotChat, Document, Tenant, TenantBot
+from docflow.db.models import LOCAL_EXTRACTOR, BotChat, Document, Tenant, TenantBot
 from docflow.intake import IntakeError, IntakeFile, accept_document
 from docflow.schemas.catalog import AUTO_SLUG, list_doc_types, match_doc_type
 from docflow.secrets import decrypt_secrets
@@ -75,6 +75,7 @@ class _BotInfo:
 
     bot: TenantBot
     tenant_name: str
+    extractor: str
 
 
 @dataclass(frozen=True)
@@ -242,12 +243,12 @@ class BotPoller:
         async with self._deps.sessionmaker() as session:
             row = (
                 await session.execute(
-                    select(TenantBot, Tenant.name)
+                    select(TenantBot, Tenant.name, Tenant.extractor)
                     .join(Tenant, Tenant.id == TenantBot.tenant_id)
                     .where(TenantBot.id == self._bot_id, TenantBot.active.is_(True))
                 )
             ).first()
-        return _BotInfo(row[0], row[1]) if row is not None else None
+        return _BotInfo(row[0], row[1], row[2]) if row is not None else None
 
     async def _record_error(self, text: str) -> None:
         await self._save_status(last_error=f"{POLL_ERROR_PREFIX}{text}")
@@ -363,7 +364,8 @@ class BotPoller:
             # байты: compare_digest не принимает строки не из ASCII, а код присылает кто угодно
             if code and secrets.compare_digest(code.encode(), info.bot.invite_code.encode()):
                 if row is None:
-                    row = BotChat(bot_id=self._bot_id, chat_id=chat_id)
+                    # локальный режим: уведомления обо всех документах уйдут через серверы Telegram, включает владелец
+                    row = BotChat(bot_id=self._bot_id, chat_id=chat_id, all_documents=info.extractor != LOCAL_EXTRACTOR)
                     session.add(row)
                 row.title = _chat_title(chat)
                 row.username = chat.get("username")

@@ -14,6 +14,7 @@ MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
 DEFAULT_TIMEOUT = 20.0
 DOWNLOAD_CHUNK = 64 * 1024
 TOKEN_REVOKED = "токен больше не действует"
+SEND_METHODS = ("sendMessage", "sendDocument")
 
 
 class BotApiError(Exception):
@@ -35,6 +36,10 @@ class BotConflict(BotApiError):
 
 class BotFileTooBig(BotApiError):
     """Файл больше допустимого."""
+
+
+class BotChatUnavailable(BotApiError):
+    """403 или 400 «chat not found» при отправке: бота заблокировали или удалили из чата, повтор не поможет."""
 
 
 class BotApi:
@@ -81,8 +86,11 @@ class BotApi:
             return BotTokenRevoked(text)
         if status == 409:
             return BotConflict(text)
-        if status == 400 and isinstance(description, str) and "file is too big" in description.casefold():
+        lowered = description.casefold() if isinstance(description, str) else ""
+        if status == 400 and "file is too big" in lowered:
             return BotFileTooBig(text)
+        if method in SEND_METHODS and (status == 403 or (status == 400 and "chat not found" in lowered)):
+            return BotChatUnavailable(text)
         return BotApiError(text, retryable=status == 429 or status >= 500)
 
     async def get_me(self) -> dict:

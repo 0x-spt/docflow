@@ -638,6 +638,33 @@ async def test_redelivered_album_with_extra_part_logged(env, caplog):
     assert "лишние части" in caplog.text
 
 
+# --- локальный режим и недоступный чат -------------------------------------------
+
+
+async def _set_extractor(env, extractor: str) -> None:
+    async with env.sm() as s:
+        await s.execute(update(Tenant).where(Tenant.id == env.tenant_id).values(extractor=extractor))
+        await s.commit()
+
+
+@pytest.mark.parametrize(("extractor", "expected"), [("ollama", False), ("claude", True)])
+async def test_new_chat_notifications_follow_tenant_mode(env, extractor, expected):
+    await _set_extractor(env, extractor)
+    env.push(text=f"/start {CODE}")
+    await env.poller().poll_once()
+    [chat] = await env.chats()
+    assert chat.all_documents is expected
+
+
+async def test_relink_keeps_chat_notifications_choice(env):
+    await _set_extractor(env, "ollama")
+    await env.link()  # привязан раньше, флаг по умолчанию включён
+    env.push(text=f"/start {CODE}")
+    await env.poller().poll_once()
+    [chat] = await env.chats()
+    assert chat.all_documents is True
+
+
 # --- смена нумерации после долгого молчания ------------------------------------
 
 

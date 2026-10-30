@@ -89,6 +89,10 @@ def _default_pages_limit(context) -> int | None:
     return PLANS[context.get_current_parameters().get("plan") or DEFAULT_PLAN].pages_limit
 
 
+# локальный режим (152-ФЗ): распознавание не уходит в облако
+LOCAL_EXTRACTOR = "ollama"
+
+
 class Tenant(Base):
     __tablename__ = "tenants"
     __table_args__ = (CheckConstraint("extractor IN ('claude', 'ollama')", name="extractor"),)

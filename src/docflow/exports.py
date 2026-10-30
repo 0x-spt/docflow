@@ -14,12 +14,18 @@ from typing import Any
 from uuid import UUID
 
 import httpx
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from docflow.channels.bot_messages import send_bot_export
-from docflow.channels.botapi import TOKEN_REVOKED, BotApi, BotApiError, BotTokenRevoked
+from docflow.channels.bot_messages import (
+    CHAT_ERROR_PREFIX,
+    SEND_ERROR_PREFIX,
+    chat_unavailable_text,
+    last_error_about_chat,
+    send_bot_export,
+)
+from docflow.channels.botapi import TOKEN_REVOKED, BotApi, BotApiError, BotChatUnavailable, BotTokenRevoked
 from docflow.config import Settings
 from docflow.connectors.base import REGISTRY, Connector, ConnectorError, DestCtx, ExportDoc, supports
 from docflow.db.models import BOT_PURPOSES, BotChat, Destination, Document, Export, TenantBot
@@ -55,8 +61,6 @@ TIMED_OUT = "внешняя система не ответила вовремя"
 
 BOT_CHAT_GONE = "чат отвязан"
 BOT_OFF = "бот отключён"
-# last_error бота общий с опросом: успешная отправка снимает только свои ошибки (см. POLL_ERROR_PREFIX у опроса)
-BOT_ERROR_PREFIX = "Отправка в Telegram: "
 
 PURPOSES = ("export", "notify_review", "notify_new")
 
@@ -240,6 +244,10 @@ def _number(value: Any) -> str | None:
     return text or None
 
 
+def cabinet_url(settings: Settings, document_id: UUID) -> str:
+    return f"{settings.public_site_url.rstrip('/')}/app/documents/{document_id}"
+
+
 def build_export_doc(
     document: Document,
     schema: DocSchema,
@@ -289,7 +297,7 @@ def build_export_doc(
         title=schema.title,
         number=_number(data.get("number")),
         issued=_issued(data.get("issued")),
-        cabinet_url=f"{site}/app/documents/{doc_id}",
+        cabinet_url=cabinet_url(settings, doc_id),
         digital_pdf_url=f"{site}/app/files/{doc_id}/digital" if ready else None,
         scan_pdf_url=f"{site}/app/files/{doc_id}/pdf" if ready else None,
         issues=[dict(i) for i in document.issues or []],
@@ -316,6 +324,10 @@ async def _check_urls(connector: Connector, config: dict, secrets: dict, *, allo
 
 class _Permanent(Exception):
     """Сбой, который повтор не исправит: нет ключа шифрования, нет схемы, запрещённый адрес."""
+
+
+class _Undeliverable(Exception):
+    """Получатель недоступен, и это не ошибка системы: выгрузка пропускается, без повторов и кнопки «Повторить»."""
 
 
 async def _attempt(
@@ -364,6 +376,8 @@ def _stale(export: Export, document: Document) -> str | None:
     """Почему доставка уже не нужна: документ ушёл из статуса, для которого она ставилась."""
     if export.purpose in BOT_PURPOSES and document.status in ("queued", "processing"):
         return STALE_NOTIFICATION  # распознаётся заново: о результате сообщит новый прогон
+    if export.purpose == "bot_ready" and document.reviewed_at is not None:
+        return STALE_NOTIFICATION  # уже проверен: чату напишет bot_reviewed, иначе отказ выглядел бы как сбой
     if export.purpose == "export" and document.status != "ok":
         # анти-цель: неподтверждённый документ не уходит в учётную систему клиента
         return NOT_APPROVED.format(status=document.status)
@@ -402,6 +416,9 @@ async def _finish_attempt(
     external_id: str | None = None
     try:
         external_id = await work()
+    except _Undeliverable as exc:
+        await _skip(session, export, str(exc))
+        return True, str(exc)
     except _Permanent as exc:
         error, retryable = str(exc), False
     except ConnectorError as exc:
@@ -466,30 +483,53 @@ async def _bot_attempt(
     ref = _own_source(document, bot.id)
     full = ref is not None and ref.get("chat_id") == chat.chat_id
     reply_to = ref.get("message_id") if full else None
+    link = cabinet_url(settings, document.id)
     await session.commit()  # на время PDF и вызова Telegram транзакция закрыта
     api = BotApi(http, token, settings.telegram_api_url)
     try:
         async with asyncio.timeout(CONNECTOR_DEADLINE):
             await send_bot_export(
-                api, chat.chat_id, reply_to, doc, document, export.purpose, full=full, queue_fields=queue_fields
+                api,
+                chat.chat_id,
+                reply_to,
+                doc,
+                document,
+                export.purpose,
+                full=full,
+                queue_fields=queue_fields,
+                cabinet_url=link,
             )
     except TimeoutError:
         raise ConnectorError(TIMED_OUT, retryable=True) from None
     except BotTokenRevoked:
         raise _Permanent(TOKEN_REVOKED) from None
+    except BotChatUnavailable:
+        raise _Undeliverable(chat_unavailable_text(chat)) from None
     except BotApiError as exc:
         raise ConnectorError(exc.message, retryable=exc.retryable) from None
 
 
-async def _save_bot_status(session: AsyncSession, bot_id: UUID, error: str | None) -> None:
-    """Итог отправки в last_error бота. Запросом с условием: чужие ошибки опроса и отзыв токена не перетираем."""
+async def _save_bot_status(session: AsyncSession, bot_id: UUID, error: str | None, chat_id: int) -> None:
+    """Итог отправки в чат chat_id. Запросом с условием: чужие ошибки опроса и отзыв токена не перетираем.
+
+    Ошибку недоступного чата не стирает ни успех в другом чате, ни его сбой: иначе владелец не узнал бы, что один из
+    чатов больше не получает документы.
+    """
     query = update(TenantBot).where(TenantBot.id == bot_id).execution_options(synchronize_session=False)
+    about_chat = TenantBot.last_error.startswith(CHAT_ERROR_PREFIX, autoescape=True)
     if error is None:
-        query = query.where(TenantBot.last_error.startswith(BOT_ERROR_PREFIX, autoescape=True)).values(last_error=None)
+        query = query.where(
+            TenantBot.last_error.startswith(SEND_ERROR_PREFIX, autoescape=True),
+            or_(~about_chat, last_error_about_chat(chat_id)),
+        ).values(last_error=None)
     elif error == TOKEN_REVOKED:
         query = query.values(active=False, last_error=TOKEN_REVOKED)
     else:
-        query = query.where(TenantBot.active.is_(True)).values(last_error=f"{BOT_ERROR_PREFIX}{error}"[:MAX_ERROR])
+        text = f"{SEND_ERROR_PREFIX}{error}"
+        query = query.where(TenantBot.active.is_(True))
+        if not text.startswith(CHAT_ERROR_PREFIX):
+            query = query.where(or_(TenantBot.last_error.is_(None), ~about_chat))
+        query = query.values(last_error=text[:MAX_ERROR])
     await session.execute(query)
     await session.commit()
 
@@ -518,7 +558,8 @@ async def _deliver_bot(
     if reason := _out_of_attempts(export):
         return await _fail(session, export, reason)
 
-    bot_id = bot.id  # после отката сессии объект бота уже не прочитать
+    # после отката сессии объекты бота и чата уже не прочитать
+    bot_id, telegram_chat_id = bot.id, chat.chat_id
 
     async def work() -> None:
         await _bot_attempt(
@@ -527,7 +568,7 @@ async def _deliver_bot(
 
     mine, error = await _finish_attempt(session, export, enqueuer, work, kind="tenant_bot")
     if mine:
-        await _save_bot_status(session, bot_id, error)
+        await _save_bot_status(session, bot_id, error, telegram_chat_id)
 
 
 async def deliver_export(

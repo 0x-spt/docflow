@@ -1,6 +1,7 @@
 """Ответы и уведомления в бот через очередь выгрузок: кому, что, повторы, отключённый бот, токен в ошибках."""
 
 import sys
+import types
 import uuid
 from datetime import UTC, datetime, timedelta
 from email import message_from_bytes
@@ -14,6 +15,7 @@ from test_pipeline import INVOICE, make_deps, make_doc
 
 from docflow.api.app import create_app
 from docflow.channels.bot_messages import failed_text, result_text
+from docflow.channels.botapi import BotApi, BotChatUnavailable
 from docflow.config import Settings
 from docflow.db.models import ApiKey, BotChat, Document, Export, FieldLabels, Tenant, TenantBot, generate_api_key
 from docflow.exports import (
@@ -31,6 +33,8 @@ from docflow.secrets import encrypt_secrets
 from docflow.storage.blobs import LocalBlobStore
 
 sys.path.insert(0, str(Path(__file__).parent / "channels"))
+sys.path.insert(0, str(Path(__file__).parent / "api"))
+from api_helpers import session_for  # noqa: E402
 from fake_telegram import FakeTelegram  # noqa: E402
 
 TOKEN = "123456:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
@@ -244,8 +248,18 @@ async def test_failed_auto_no_schema_no_crash(env):
 
     [msg] = env.texts()
     assert "Не удалось определить тип документа" in msg["text"]
+    assert f"Открыть в кабинете: {SITE}/app/documents/{doc_id}" in msg["text"]
     assert msg["reply_parameters"]["message_id"] == MESSAGE_ID
     assert (await env.exports(doc_id))[0].status == "done"
+
+
+async def test_failed_with_deleted_schema_keeps_link(env):
+    await linked(env)
+    doc_id = await env.add_doc(status="failed", slug="gone_type", error="сбой", data={})
+    await env.enqueue(doc_id)
+    await env.send_all(doc_id)
+    [msg] = env.texts()
+    assert f"{SITE}/app/documents/{doc_id}" in msg["text"]
 
 
 async def test_deleted_schema_sends_text_without_crash(env):
@@ -324,6 +338,49 @@ async def test_reviewed_message_same_chat(env):
     for msg in (first, second):
         assert msg["chat_id"] == SOURCE_CHAT
         assert msg["reply_parameters"]["message_id"] == MESSAGE_ID
+
+
+@pytest.mark.parametrize(
+    ("decision", "text"), [("reject", "Документ отклонён: "), ("approve", "Документ проверен и подтверждён: ")]
+)
+async def test_delayed_ready_after_review_skipped(env, decision, text):
+    await linked(env)
+    headers = await env.headers()
+    doc_id = await env.add_doc(status="needs_review", issues=ISSUES)
+    await env.enqueue(doc_id)  # bot_ready ещё в очереди, а оператор уже решил
+
+    r = await env.client.post(f"/v1/documents/{doc_id}/review", headers=headers, json={"decision": decision})
+    assert r.status_code == 200, r.text
+    await env.send_all(doc_id)
+
+    exports = {e.purpose: e for e in await env.exports(doc_id)}
+    assert exports["bot_ready"].status == "skipped"
+    assert exports["bot_reviewed"].status == "done"
+    assert env.documents() == []
+    [msg] = env.texts()
+    assert msg["text"].startswith(text)
+
+
+async def test_review_survives_broken_session_in_bot_enqueue(env, monkeypatch):
+    """Настоящий сбой транзакции: без отката сессия не отдала бы ни выгрузки, ни ответ."""
+    await linked(env)
+    headers = await env.headers()
+    doc_id = await env.add_doc(status="needs_review", issues=ISSUES)
+    routed = []
+
+    async def broken(session, document, purpose, enqueuer):
+        session.add(Export(tenant_id=None, document_id=document.id, purpose=purpose))
+        await session.flush()
+
+    async def route(session, document, schemas, enqueuer):
+        routed.append((document.id, document.status))
+
+    monkeypatch.setattr("docflow.api.documents.enqueue_bot_messages", broken)
+    monkeypatch.setattr("docflow.api.documents.route_approved", route)
+    r = await env.client.post(f"/v1/documents/{doc_id}/review", headers=headers, json={"decision": "approve"})
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "ok" and r.json()["exports"] == []
+    assert routed == [(doc_id, "ok")]
 
 
 async def test_review_survives_bot_enqueue_failure(env, monkeypatch):
@@ -496,14 +553,130 @@ async def test_permanent_telegram_error_no_retry(env):
     doc_id = await env.add_doc(status="failed", error="x", data={})
     await env.enqueue(doc_id)
     [export] = await env.exports(doc_id)
-    env.tg.fail_with["*"] = (403, {"ok": False, "description": "Forbidden: bot was blocked by the user"})
+    env.tg.fail_with["*"] = (400, {"ok": False, "description": "Bad Request: message is too long"})
     queued = len(env.enq.calls)
 
     after = await env.deliver(export.id)
-    assert after.status == "failed" and "blocked" in after.last_error
+    assert after.status == "failed" and "too long" in after.last_error
     bot = await env.bot()
     assert bot.active is True and bot.last_error.startswith(PREFIX)
     assert len(env.enq.calls) == queued
+
+
+# --- чат заблокировал или удалил бота ------------------------------------------
+
+BLOCKED = (403, {"ok": False, "description": "Forbidden: bot was blocked by the user"})
+GONE = (400, {"ok": False, "description": "Bad Request: chat not found"})
+UNAVAILABLE = (
+    "чат «Чат» недоступен: бота заблокировали или удалили из чата. "
+    f"Верните бота или отвяжите чат (id {SOURCE_CHAT})"
+)
+
+
+async def _deliver_one(env, failure=None, *, doc_chat=SOURCE_CHAT) -> Export:
+    """Документ из чата doc_chat: одна доставка, по желанию со сбоем Telegram."""
+    doc_id = await env.add_doc(source_ref=env.source_ref(doc_chat))
+    await env.enqueue(doc_id)
+    [export] = await env.exports(doc_id)
+    if failure is not None:
+        env.tg.fail_with["*"] = failure
+    after = await env.deliver(export.id)
+    env.tg.fail_with.pop("*", None)
+    return after
+
+
+async def session_headers(env) -> dict[str, str]:
+    headers, _ = await session_for(types.SimpleNamespace(sessionmaker=env.sm), await env.headers())
+    return headers
+
+
+@pytest.mark.parametrize("failure", [BLOCKED, GONE])
+async def test_unavailable_chat_skipped_without_retries(env, failure):
+    await linked(env)
+    doc_id = await env.add_doc()
+    await env.enqueue(doc_id)
+    [export] = await env.exports(doc_id)
+    env.tg.fail_with["*"] = failure
+    queued = len(env.enq.calls)
+
+    after = await env.deliver(export.id)
+    assert after.status == "skipped" and after.last_error == UNAVAILABLE and after.next_attempt_at is None
+    assert len(env.enq.calls) == queued
+    bot = await env.bot()
+    assert bot.active is True and bot.last_error == PREFIX + UNAVAILABLE
+
+
+def test_only_sending_can_mean_unavailable_chat():
+    api = BotApi(None, TOKEN)
+    assert isinstance(api._error("sendDocument", 403, None), BotChatUnavailable)
+    assert not isinstance(api._error("getFile", 403, None), BotChatUnavailable)
+    assert not isinstance(api._error("sendMessage", 400, {"description": "message is too long"}), BotChatUnavailable)
+
+
+async def test_unavailable_chat_title_is_untrusted(env):
+    await env.add_bot()
+    async with env.sm() as s:
+        s.add(BotChat(bot_id=env.bot_id, chat_id=SOURCE_CHAT, title="А\nБ\x07" + "я" * 300))
+        await s.commit()
+    after = await _deliver_one(env, BLOCKED)
+    title = after.last_error.split("«")[1].split("»")[0]
+    assert "\n" not in title and "\x07" not in title and title.startswith("А Б") and len(title) == 100
+
+
+async def test_success_elsewhere_keeps_unavailable_chat_error(env):
+    await linked(env)
+    await env.add_chat(OTHER_CHAT)
+    assert (await _deliver_one(env, BLOCKED)).status == "skipped"
+
+    assert (await _deliver_one(env, doc_chat=OTHER_CHAT)).status == "done"
+    assert (await env.bot()).last_error == PREFIX + UNAVAILABLE
+
+
+async def test_success_in_same_chat_clears_error(env):
+    chat_id = await linked(env)
+    await _deliver_one(env, BLOCKED)
+    async with env.sm() as s:
+        (await s.get(BotChat, chat_id)).title = "Новое название"  # привязали заново, и чат теперь называется иначе
+        await s.commit()
+    assert (await _deliver_one(env)).status == "done"
+    assert (await env.bot()).last_error is None
+
+
+async def test_title_cannot_pose_as_another_chat(env):
+    await env.add_bot()
+    async with env.sm() as s:
+        s.add(BotChat(bot_id=env.bot_id, chat_id=SOURCE_CHAT, title=f"(id {OTHER_CHAT})"))
+        await s.commit()
+    await env.add_chat(OTHER_CHAT)
+    await _deliver_one(env, BLOCKED)
+    assert (await _deliver_one(env, doc_chat=OTHER_CHAT)).status == "done"
+    assert (await env.bot()).last_error.endswith(f"(id {SOURCE_CHAT})")
+
+
+async def test_other_send_failure_does_not_hide_unavailable_chat(env):
+    await linked(env)
+    await _deliver_one(env, BLOCKED)
+    after = await _deliver_one(env, (400, {"ok": False, "description": "Bad Request: message is too long"}))
+    assert after.status == "failed"
+    assert (await env.bot()).last_error == PREFIX + UNAVAILABLE
+
+
+async def test_unlink_clears_unavailable_chat_error(env):
+    chat_id = await linked(env)
+    await _deliver_one(env, BLOCKED)
+    headers = await session_headers(env)
+    r = await env.client.delete(f"/v1/bot/chats/{chat_id}", headers=headers)
+    assert r.status_code == 204, r.text
+    assert (await env.bot()).last_error is None
+
+
+async def test_unlink_other_chat_keeps_error(env):
+    await linked(env)
+    other = await env.add_chat(OTHER_CHAT)
+    await _deliver_one(env, BLOCKED)
+    r = await env.client.delete(f"/v1/bot/chats/{other}", headers=await session_headers(env))
+    assert r.status_code == 204, r.text
+    assert (await env.bot()).last_error == PREFIX + UNAVAILABLE
 
 
 async def test_attempts_exhausted_fails(env):
