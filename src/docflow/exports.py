@@ -376,8 +376,9 @@ def _stale(export: Export, document: Document) -> str | None:
     """Почему доставка уже не нужна: документ ушёл из статуса, для которого она ставилась."""
     if export.purpose in BOT_PURPOSES and document.status in ("queued", "processing"):
         return STALE_NOTIFICATION  # распознаётся заново: о результате сообщит новый прогон
-    if export.purpose == "bot_ready" and document.reviewed_at is not None:
-        return STALE_NOTIFICATION  # уже проверен: чату напишет bot_reviewed, иначе отказ выглядел бы как сбой
+    if export.purpose == "bot_ready" and document.reviewed_at is not None and document.status != "ok":
+        # отклонён: чату напишет bot_reviewed, иначе отказ выглядел бы как сбой. Одобренный PDF и ссылку получит
+        return STALE_NOTIFICATION
     if export.purpose == "export" and document.status != "ok":
         # анти-цель: неподтверждённый документ не уходит в учётную систему клиента
         return NOT_APPROVED.format(status=document.status)

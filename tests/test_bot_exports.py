@@ -340,25 +340,37 @@ async def test_reviewed_message_same_chat(env):
         assert msg["reply_parameters"]["message_id"] == MESSAGE_ID
 
 
-@pytest.mark.parametrize(
-    ("decision", "text"), [("reject", "Документ отклонён: "), ("approve", "Документ проверен и подтверждён: ")]
-)
-async def test_delayed_ready_after_review_skipped(env, decision, text):
+async def _review_with_ready_delayed(env, decision: str) -> dict[str, Export]:
+    """bot_ready ещё в очереди (сбой Telegram, ожидание повтора), а оператор уже решил."""
     await linked(env)
     headers = await env.headers()
     doc_id = await env.add_doc(status="needs_review", issues=ISSUES)
-    await env.enqueue(doc_id)  # bot_ready ещё в очереди, а оператор уже решил
+    await env.enqueue(doc_id)
 
     r = await env.client.post(f"/v1/documents/{doc_id}/review", headers=headers, json={"decision": decision})
     assert r.status_code == 200, r.text
     await env.send_all(doc_id)
+    return {e.purpose: e for e in await env.exports(doc_id)}
 
-    exports = {e.purpose: e for e in await env.exports(doc_id)}
+
+async def test_delayed_ready_after_reject_skipped(env):
+    exports = await _review_with_ready_delayed(env, "reject")
     assert exports["bot_ready"].status == "skipped"
     assert exports["bot_reviewed"].status == "done"
     assert env.documents() == []
     [msg] = env.texts()
-    assert msg["text"].startswith(text)
+    assert msg["text"].startswith("Документ отклонён: ")
+
+
+async def test_delayed_ready_after_approve_delivers_pdf(env):
+    exports = await _review_with_ready_delayed(env, "approve")
+    assert exports["bot_ready"].status == "done"
+    assert exports["bot_reviewed"].status == "done"
+    [parts] = env.documents()
+    assert parts["document"].startswith(b"%PDF")
+    assert f"{SITE}/app/documents/".encode() in parts["caption"]
+    [msg] = env.texts()
+    assert msg["text"].startswith("Документ проверен и подтверждён: ")
 
 
 async def test_review_survives_broken_session_in_bot_enqueue(env, monkeypatch):
