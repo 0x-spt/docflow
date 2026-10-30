@@ -359,3 +359,44 @@ export interface FieldLabels {
   queue_fields: string[];
   queue_default: boolean;
 }
+
+/** Чат, привязанный к Telegram-боту компании (GET /v1/bot) */
+export interface BotChatInfo {
+  id: string;
+  title: string | null;
+  username: string | null;
+  all_documents: boolean;
+  linked_at: string | null;
+}
+
+/** GET /v1/bot -> {bot: BotInfo | null}. Токена в ответе нет. */
+export interface BotInfo {
+  username: string;
+  active: boolean;
+  last_error: string | null;
+  /** null — определять тип автоматически */
+  default_schema: string | null;
+  invite_link: string;
+  group_invite_link: string;
+  chats: BotChatInfo[];
+}
+
+/** GET /v1/mailbox -> {mailbox: MailboxInfo | null}. Пароля в ответе нет. */
+export interface MailboxInfo {
+  host: string;
+  port: number;
+  username: string;
+  folder: string;
+  allowed_senders: string[];
+  default_schema: string | null;
+  active: boolean;
+  last_error: string | null;
+  last_checked_at: string | null;
+}
+
+/** POST /v1/mailbox/test */
+export interface MailboxTestResult {
+  ok: boolean;
+  message: string;
+  unseen: number | null;
+}

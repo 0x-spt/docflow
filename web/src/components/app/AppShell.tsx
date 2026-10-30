@@ -12,6 +12,8 @@ const NAV = [
   { href: "/app/dictionaries", label: "Справочники" },
   { href: "/app/fields", label: "Поля" },
   { href: "/app/integrations", label: "Подключения" },
+  { href: "/app/bot", label: "Telegram-бот" },
+  { href: "/app/mail", label: "Почта" },
   { href: "/app/rules", label: "Правила" },
   { href: "/app/settings", label: "API и вебхуки" },
 ];
