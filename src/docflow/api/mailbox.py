@@ -74,7 +74,8 @@ def _out(box: Mailbox) -> dict:
 
 def _clean_senders(senders: list[str]) -> list[str]:
     cleaned = [s.strip().lower() for s in senders]
-    if not all(SENDER_RE.fullmatch(s) for s in cleaned):
+    # NUL и прочие управляющие символы не примет JSONB
+    if not all(SENDER_RE.fullmatch(s) and not CONTROL_RE.search(s) for s in cleaned):
         raise _unprocessable("Разрешённые отправители — адреса вида имя@домен или домены вида @домен")
     return cleaned
 
@@ -92,6 +93,9 @@ def _check_fields(body: MailboxIn) -> None:
         raise _unprocessable("Пароль содержит недопустимые символы")
     if not body.folder or BAD_FOLDER_RE.search(body.folder):
         raise _unprocessable("Название папки указано неверно")
+    # imaplib шлёт команды в ASCII, а кодировку имён папок IMAP (modified UTF-7) мы не поддерживаем
+    if not body.folder.isascii():
+        raise _unprocessable("Папка должна быть указана латиницей, как на почтовом сервере")
 
 
 async def _mailbox_of(session, tenant_id: uuid.UUID) -> Mailbox | None:
@@ -124,6 +128,9 @@ async def put_mailbox(body: MailboxIn, principal: OwnerDep, session: SessionDep,
     box = await _mailbox_of(session, principal.tenant_id)
     if box is None and not body.password:
         raise _unprocessable("Укажите пароль")
+    # сохранённый пароль нельзя отправить на другой сервер: иначе его заберёт любой, кто вошёл в кабинет
+    if box is not None and not body.password and (body.host, body.port) != (box.host, box.port):
+        raise _unprocessable("Укажите пароль: адрес сервера изменился")
     password_enc = None
     if body.password:
         try:

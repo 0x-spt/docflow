@@ -108,13 +108,26 @@ async def test_put_keeps_password_when_empty(api, owner):
     await put(api, owner)
     first = (await row(api)).password_enc
     for over in ({"password": ""}, {"password": None}):
-        r = await put(api, owner, folder="Счета", **over)
+        r = await put(api, owner, folder="Bills", **over)
         assert r.status_code == 200, r.text
         assert (await row(api)).password_enc == first
     assert (await row(api)).folder == "Счета"
     await put(api, owner, password="synthetic-new-pass")
     saved = (await row(api)).password_enc
     assert decrypt_secrets(saved, api.settings.secrets_key) == {"password": "synthetic-new-pass"}
+
+
+async def test_put_empty_password_with_new_address_422(api, owner):
+    await put(api, owner)
+    first = (await row(api)).password_enc
+    for over in ({"host": "1.1.1.1"}, {"port": 1143}):
+        r = await put(api, owner, password="", **over)
+        assert r.status_code == 422, over
+        assert r.json()["detail"] == "Укажите пароль: адрес сервера изменился"
+    box = await row(api)
+    assert (box.host, box.port, box.password_enc) == (HOST, 993, first)
+    r = await put(api, owner, host="1.1.1.1", password="synthetic-new-pass")
+    assert r.status_code == 200, r.text
 
 
 async def test_put_resets_error_and_active(api, owner):
@@ -137,14 +150,14 @@ async def test_delete(api, owner):
 
 
 async def test_test_reports_unseen(api, owner, imap):
-    await put(api, owner, port=1143, folder="Счета")
+    await put(api, owner, port=1143, folder="Bills")
     r = await api.client.post("/v1/mailbox/test", headers=owner)
     assert r.status_code == 200, r.text
     out = r.json()
     assert out["ok"] is True and out["unseen"] == 3 and "3" in out["message"]
     assert imap.session.closed == 1
     creds = imap.creds[0]
-    assert (creds.host, creds.port, creds.username, creds.folder) == (HOST, 1143, "in@acme.example", "Счета")
+    assert (creds.host, creds.port, creds.username, creds.folder) == (HOST, 1143, "in@acme.example", "Bills")
     assert creds.password == PASSWORD
 
 
@@ -222,9 +235,20 @@ async def test_bad_port_422(api, owner, port):
 
 
 async def test_bad_folder_and_senders_422(api, owner):
-    for folder in ('IN"BOX', "IN\\BOX", "IN\rBOX", "IN\nBOX", "\x00", "\x7f", ""):
+    for folder in ('IN"BOX', "IN\\BOX", "IN\rBOX", "IN\nBOX", "\x00", "\x7f", "", "Счета"):
         assert (await put(api, owner, folder=folder)).status_code == 422, repr(folder)
-    for senders in (["firma.example"], ["a@"], ["@"], ["a@b@c.example"], ["a b@c.example"], ["@c"], ["@.c"], [""]):
+    for senders in (
+        ["firma.example"],
+        ["a@"],
+        ["@"],
+        ["a@b@c.example"],
+        ["a b@c.example"],
+        ["@c"],
+        ["@.c"],
+        [""],
+        ["a\x00b@c.example"],
+        ["@c\x01.example"],
+    ):
         assert (await put(api, owner, allowed_senders=senders)).status_code == 422, senders
     async with api.sessionmaker() as s:
         assert (await s.execute(select(Mailbox))).first() is None

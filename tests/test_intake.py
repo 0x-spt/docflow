@@ -134,6 +134,24 @@ async def test_enqueue_failure_frees_key(sm, deps, tenant_id):
     assert doc.idempotency_key is None
 
 
+async def test_enqueue_failure_keeps_queued_when_asked(sm, deps, tenant_id):
+    async def fail(*args, **kwargs):
+        raise RuntimeError("redis down")
+
+    deps.enqueuer.enqueue = fail
+    args = {"tenant_id": tenant_id, "schema_slug": "invoice_ru", "idempotency_key": "k"}
+    async with sm() as s:
+        result = await accept_document(s, deps, files=[png()], keep_queued_on_enqueue_failure=True, **args)
+    assert result.created is True
+    async with sm() as s:
+        doc = (await s.execute(select(Document))).scalar_one()
+    assert doc.status == "queued" and doc.idempotency_key == "k"
+    async with sm() as s:
+        again = await accept_document(s, deps, files=[png()], keep_queued_on_enqueue_failure=True, **args)
+    assert again.created is False and again.document.id == doc.id
+    assert await doc_count(sm) == 1
+
+
 async def test_storage_failure_leaves_no_document(sm, deps, tenant_id):
     async def fail(*args, **kwargs):
         raise OSError("disk full")

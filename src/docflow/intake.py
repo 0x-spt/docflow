@@ -139,7 +139,11 @@ async def accept_document(
     idempotency_key: str | None = None,
     source: str = "api",
     source_ref: dict | None = None,
+    keep_queued_on_enqueue_failure: bool = False,
 ) -> IntakeResult:
+    """keep_queued_on_enqueue_failure — для каналов, которые сами повторяют приём (почта): документ остаётся queued
+    со своим ключом и ждёт перепостановки кроном. Иначе каждый повтор при упавшем Redis плодил бы failed-документы.
+    """
     settings = deps.settings
     if schema_slug == AUTO_SLUG:
         # тип определит воркер; версия из запроса не имеет смысла
@@ -229,6 +233,8 @@ async def accept_document(
     except Exception:
         # без задачи queued-документ ждал бы крона перепостановки; failed сразу честнее — клиент повторит загрузку
         logger.exception("не удалось поставить документ %s в очередь", doc_id)
+        if keep_queued_on_enqueue_failure:
+            return IntakeResult(document, created=True)
         # Ошибка enqueue не значит, что задачи нет: Redis мог принять её и оборвать ответ, а воркер — уже
         # забрать документ. Поэтому failed только из queued, условным UPDATE, а не перезаписью статуса.
         res = await session.execute(

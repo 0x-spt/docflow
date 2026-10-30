@@ -26,7 +26,6 @@ from docflow.connectors.notify_common import one_line
 from docflow.db.models import Mailbox
 from docflow.imaging.load import detect_kind
 from docflow.intake import (
-    IntakeEnqueueFailed,
     IntakeError,
     IntakeFile,
     IntakeLimitExceeded,
@@ -43,13 +42,16 @@ logger = logging.getLogger(__name__)
 MAX_LETTERS_PER_PASS = 20
 IMAP_TIMEOUT = 20
 MAX_ERROR = 500
-MB = 1024 * 1024
+MAX_LETTER_ATTEMPTS = 3
 
 AUTH_ERROR = "Почта не приняла логин или пароль"
 NETWORK_ERROR = "Не удалось подключиться к почте"
 HOST_REFUSED = "Адрес почтового сервера не разрешён: он должен быть публичным"
 SECRETS_ERROR = "Не удалось расшифровать пароль почты: проверьте ключ DOCFLOW_SECRETS_KEY на сервере"
 ACCEPT_FAILED = "не удалось принять документ, повторим при следующей проверке"
+ACCEPT_GAVE_UP = "не удалось принять документ, письмо пропущено и осталось непрочитанным"
+LETTER_GAVE_UP = "Почта не отдаёт письмо: после нескольких попыток оно пропущено и осталось непрочитанным"
+PARSE_FAILED = "не удалось разобрать письмо, оно пропущено и осталось непрочитанным"
 # ошибки подключения: их снимает удачный вход, а ошибки писем остаются на виду, пока письмо не пройдёт
 CONNECTION_ERRORS = (NETWORK_ERROR, HOST_REFUSED, SECRETS_ERROR)
 
@@ -260,6 +262,13 @@ def _letter_error(subject: str, message: str) -> str:
     return f"{_letter_name(subject)}: {message}"
 
 
+def _subject_if_known(raw: bytes) -> str:
+    try:
+        return _parse_subject(raw)
+    except Exception:
+        return ""
+
+
 def _digest(letter: Letter, raw: bytes) -> str:
     return hashlib.sha256(letter.message_id.encode() if letter.message_id else raw).hexdigest()
 
@@ -275,6 +284,8 @@ class MailboxPoller:
         # письма, которые оставили непрочитанными: без памяти их пришлось бы качать каждую минуту
         self._skipped: dict[UUID, set[str]] = {}
         self._skipped_filter: dict[UUID, tuple] = {}
+        # неудачные попытки по письму: письмо, которое не проходит раз за разом, не качаем каждую минуту вечно
+        self._attempts: dict[UUID, dict[str, int]] = {}
 
     async def poll(self, mailbox_id: UUID) -> None:
         """Один проход. Сбои почты и отдельных писем не выбрасывает: пишет last_error."""
@@ -282,6 +293,7 @@ class MailboxPoller:
         if box is None:
             self._skipped.pop(mailbox_id, None)
             self._skipped_filter.pop(mailbox_id, None)
+            self._attempts.pop(mailbox_id, None)
             return
         if not box.active:
             return
@@ -354,9 +366,10 @@ class MailboxPoller:
                 error = NETWORK_ERROR
                 break
             except Exception as exc:
-                # сервер не отдаёт письмо или оно не разбирается: повторять каждую минуту незачем
-                logger.warning("ящик %s: письмо %s пропущено: %s", box.id, uid, type(exc).__name__)
-                skipped.add(uid)
+                # сервер не отдал письмо: возможно, временно, поэтому несколько попыток в следующих проходах
+                logger.warning("ящик %s: письмо %s не получено: %s", box.id, uid, type(exc).__name__)
+                if self._out_of_attempts(box.id, uid, skipped):
+                    error = LETTER_GAVE_UP
                 continue
             accepted = accepted or letter_accepted
             error = letter_error or error
@@ -374,9 +387,21 @@ class MailboxPoller:
         if self._skipped_filter.get(box.id) != current:
             self._skipped[box.id] = set()
             self._skipped_filter[box.id] = current
+            self._attempts[box.id] = {}
         skipped = self._skipped[box.id] & set(unseen)
         self._skipped[box.id] = skipped
+        attempts = self._attempts.setdefault(box.id, {})
+        self._attempts[box.id] = {uid: n for uid, n in attempts.items() if uid in unseen}
         return skipped
+
+    def _out_of_attempts(self, mailbox_id: UUID, uid: str, skipped: set[str]) -> bool:
+        """Считает неудачную попытку. True — попытки кончились, письмо больше не трогаем до перезапуска."""
+        attempts = self._attempts[mailbox_id]
+        attempts[uid] = attempts.get(uid, 0) + 1
+        if attempts[uid] < MAX_LETTER_ATTEMPTS:
+            return False
+        skipped.add(uid)
+        return True
 
     async def _process(
         self, box: Mailbox, session: MailSession, uid: str, skipped: set[str]
@@ -389,36 +414,47 @@ class MailboxPoller:
             await asyncio.to_thread(session.mark_seen, uid)
             return False, f"{_letter_name(subject)} больше {settings.max_request_mb} МБ"
         raw = await asyncio.to_thread(session.fetch, uid)
-        letter = await asyncio.to_thread(parse_letter, raw)
+        try:
+            letter = await asyncio.to_thread(parse_letter, raw)
+        except Exception as exc:
+            # одни и те же байты не разберутся и в следующий раз: повторять незачем
+            logger.warning("ящик %s: письмо %s не разобрано: %s", box.id, uid, type(exc).__name__)
+            skipped.add(uid)
+            return False, _letter_error(_subject_if_known(raw), PARSE_FAILED)
         if not sender_allowed(letter.sender, box.allowed_senders or []) or not (letter.pdfs or letter.images):
             skipped.add(uid)
             return False, None
         digest = await asyncio.to_thread(_digest, letter, raw)
-        error, retry = await self._accept_letter(box, letter, digest)
+        error, retry, unexpected = await self._accept_letter(box, letter, digest)
+        if unexpected and self._out_of_attempts(box.id, uid, skipped):
+            return False, _letter_error(letter.subject, ACCEPT_GAVE_UP)
         if not retry:
             await asyncio.to_thread(session.mark_seen, uid)
         return error is None, error
 
-    async def _accept_letter(self, box: Mailbox, letter: Letter, digest: str) -> tuple[str | None, bool]:
-        """(текст ошибки, письмо надо повторить). Сбой одного вложения не отменяет остальные: повтор отсечёт ключ."""
+    async def _accept_letter(self, box: Mailbox, letter: Letter, digest: str) -> tuple[str | None, bool, bool]:
+        """(текст ошибки, письмо надо повторить, сбой неожиданный — у таких повторов есть предел).
+
+        Сбой одного вложения не отменяет остальные: повтор отсечёт ключ.
+        """
         parts = [(f"pdf:{n}", [pdf]) for n, pdf in enumerate(letter.pdfs)]
         if letter.images:
             parts.append(("images", letter.images))
         error: str | None = None
-        retry = False
+        retry = unexpected = False
         for ref, attachments in parts:
             try:
                 await self._accept_part(box, letter, digest, ref, attachments)
             except IntakeLimitExceeded as exc:
                 error = exc.message
-            except (IntakeStorageFailed, IntakeEnqueueFailed) as exc:
+            except IntakeStorageFailed as exc:
                 error, retry = _letter_error(letter.subject, exc.message), True
             except IntakeError as exc:
                 error = _letter_error(letter.subject, exc.message)
             except Exception as exc:
                 logger.warning("ящик %s: не принят документ: %s", box.id, type(exc).__name__)
-                error, retry = _letter_error(letter.subject, ACCEPT_FAILED), True
-        return error, retry
+                error, retry, unexpected = _letter_error(letter.subject, ACCEPT_FAILED), True, True
+        return error, retry, unexpected
 
     async def _accept_part(
         self, box: Mailbox, letter: Letter, digest: str, ref: str, attachments: list[Attachment]
@@ -434,6 +470,8 @@ class MailboxPoller:
                 idempotency_key=f"mail:{box.id}:{digest}:{ref}",
                 source="email",
                 source_ref={"message_id": letter.message_id, "attachment": ref},
+                # проход повторяет только письма без пометки; повтор при упавшем Redis плодил бы failed-документы
+                keep_queued_on_enqueue_failure=True,
             )
 
     async def _save(self, mailbox_id: UUID, *where, **values) -> None:

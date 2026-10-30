@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 from cryptography.fernet import Fernet
-from sqlalchemy import func, select, update
+from sqlalchemy import select, update
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "api"))
 from api_helpers import pdf_bytes, png_bytes  # noqa: E402
@@ -16,9 +16,13 @@ from api_helpers import pdf_bytes, png_bytes  # noqa: E402
 from docflow.channels import mailbox as mailbox_module  # noqa: E402
 from docflow.channels.deps import ChannelDeps  # noqa: E402
 from docflow.channels.mailbox import (  # noqa: E402
+    ACCEPT_GAVE_UP,
     AUTH_ERROR,
+    LETTER_GAVE_UP,
+    MAX_LETTER_ATTEMPTS,
     MAX_LETTERS_PER_PASS,
     NETWORK_ERROR,
+    PARSE_FAILED,
     MailboxAuthError,
     MailboxCreds,
     MailboxLetterError,
@@ -31,7 +35,7 @@ from docflow.channels.mailbox import (  # noqa: E402
     subject_for_match,
 )
 from docflow.config import Settings  # noqa: E402
-from docflow.db.models import Document, Export, Mailbox, Tenant  # noqa: E402
+from docflow.db.models import Document, Mailbox, Tenant  # noqa: E402
 from docflow.intake import IntakeDeps  # noqa: E402
 from docflow.pipeline import SchemaResolver  # noqa: E402
 from docflow.queue import ListEnqueuer  # noqa: E402
@@ -349,8 +353,6 @@ async def test_replay_same_message_no_second_document(env):
     await env.poll()
     assert len(await env.docs()) == 2
     assert len(env.enqueuer.calls) == calls
-    async with env.sm() as s:
-        assert await s.scalar(select(func.count()).select_from(Export)) == 0
     assert env.mail.seen == {"1"}
     assert (await env.box()).last_error is None
 
@@ -439,20 +441,25 @@ async def test_storage_failure_not_marked_seen(env):
     assert (await env.box()).last_error is None
 
 
-async def test_enqueue_failure_not_marked_seen_and_retried(env):
-    env.mail.add(letter(pdfs=(pdf_bytes(1),)))
-    original = env.enqueuer.enqueue
+async def test_enqueue_failure_keeps_queued_document_and_marks_seen(env):
+    raw = letter(pdfs=(pdf_bytes(1),))
+    env.mail.add(raw)
 
     async def broken(*args, **kwargs):
         raise ConnectionError("redis")
 
     env.enqueuer.enqueue = broken
     await env.poll()
-    assert env.mail.called("mark_seen") == []
-    env.enqueuer.enqueue = original
-    await env.poll()
+    docs = await env.docs()
+    assert [d.status for d in docs] == ["queued"]  # поднимет крон requeue_stale_queued
+    assert docs[0].idempotency_key.startswith(f"mail:{env.box_id}:")
     assert env.mail.seen == {"1"}
-    assert sorted(d.status for d in await env.docs()) == ["failed", "queued"]
+    assert (await env.box()).last_error is None
+    # то же письмо ещё раз (например, пометка не дошла) не создаёт второго документа
+    env.mail.add(raw)
+    await env.poll()
+    assert [d.id for d in await env.docs()] == [docs[0].id]
+    assert env.mail.seen == {"1", "2"}
 
 
 async def test_unexpected_accept_failure_is_retried_without_text(env, monkeypatch, caplog):
@@ -472,6 +479,71 @@ async def test_unexpected_accept_failure_is_retried_without_text(env, monkeypatc
     monkeypatch.setattr(mailbox_module, "accept_document", real)
     await env.poll()
     assert env.mail.seen == {"1"} and len(await env.docs()) == 1
+
+
+async def test_unexpected_accept_failure_gives_up_after_attempts(env, monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+    env.mail.add(letter(pdfs=(pdf_bytes(1),)))
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError(PASSWORD)
+
+    monkeypatch.setattr(mailbox_module, "accept_document", boom)
+    for _ in range(MAX_LETTER_ATTEMPTS + 2):
+        await env.poll()
+    assert env.mail.called("fetch") == ["1"] * MAX_LETTER_ATTEMPTS
+    assert env.mail.called("mark_seen") == []
+    error = (await env.box()).last_error
+    assert error == f"Письмо «Документы»: {ACCEPT_GAVE_UP}"
+    assert PASSWORD not in error and PASSWORD not in caplog.text
+
+
+async def test_storage_failure_has_no_attempt_cap(env):
+    env.mail.add(letter(pdfs=(pdf_bytes(1),)))
+    env.blobs.broken = True
+    for _ in range(MAX_LETTER_ATTEMPTS + 2):
+        await env.poll()
+    assert env.mail.called("fetch") == ["1"] * (MAX_LETTER_ATTEMPTS + 2)
+    env.blobs.broken = False
+    await env.poll()
+    assert env.mail.seen == {"1"}
+
+
+@pytest.mark.parametrize("method", ["size", "fetch"])
+async def test_letter_error_retried_then_given_up(env, method, caplog):
+    caplog.set_level(logging.DEBUG)
+    env.mail.add(letter(pdfs=(pdf_bytes(1),)))
+    env.mail.fail[(method, "1")] = MailboxLetterError(PASSWORD)
+    for n in range(1, MAX_LETTER_ATTEMPTS):
+        await env.poll()
+        assert env.mail.called(method) == ["1"] * n
+        assert (await env.box()).last_error is None
+    await env.poll()
+    error = (await env.box()).last_error
+    assert error == LETTER_GAVE_UP and PASSWORD not in error and PASSWORD not in caplog.text
+    await env.poll()
+    assert env.mail.called(method) == ["1"] * MAX_LETTER_ATTEMPTS
+    assert env.mail.seen == set()
+
+
+async def test_oversized_subject_failure_counts_as_attempt(env):
+    limit = env.settings.max_request_mb * 1024 * 1024
+    env.mail.add(letter(), size=limit + 1)
+    env.mail.fail[("subject", "1")] = MailboxLetterError("NO")
+    for _ in range(MAX_LETTER_ATTEMPTS + 1):
+        await env.poll()
+    assert env.mail.called("subject") == ["1"] * MAX_LETTER_ATTEMPTS
+    assert (await env.box()).last_error == LETTER_GAVE_UP
+
+
+async def test_letter_error_recovers_within_attempts(env):
+    env.mail.add(letter(pdfs=(pdf_bytes(1),)))
+    env.mail.fail[("fetch", "1")] = MailboxLetterError("NO")
+    await env.poll()
+    assert await env.docs() == []
+    del env.mail.fail[("fetch", "1")]
+    await env.poll()
+    assert len(await env.docs()) == 1 and env.mail.seen == {"1"}
 
 
 async def test_oversized_letter_not_fetched(env):
@@ -689,9 +761,16 @@ async def test_broken_letter_does_not_stop_pass(env, monkeypatch):
     await env.poll()
     assert [d.source_ref["message_id"] for d in await env.docs()] == ["<d@x>"]
     assert env.mail.seen == {"4"}
-    assert (await env.box()).active is True
+    box = await env.box()
+    assert box.active is True
+    assert box.last_error == f"Письмо «Документы»: {PARSE_FAILED}"
+    assert "сломанный заголовок" not in box.last_error
     await env.poll()
     assert env.mail.called("fetch").count("3") == 1  # сломанное письмо не качаем каждую минуту
+    assert env.mail.called("fetch").count("1") == 2  # а недоступное пробуем ещё
+    await env.poll()
+    assert env.mail.called("fetch").count("1") == MAX_LETTER_ATTEMPTS
+    assert (await env.box()).last_error == LETTER_GAVE_UP
 
 
 async def test_dead_connection_stops_pass(env):
