@@ -98,3 +98,67 @@ def test_migration_upgrade():
         return diff
 
     assert asyncio.run(check()) == []
+
+
+def _sqlite_engine(tmp_path, name):
+    return create_engine(f"sqlite:///{(tmp_path / name).as_posix()}")
+
+
+def test_existing_tenants_unlimited_after_upgrade(tmp_path):
+    db = tmp_path / "u.db"
+    cfg = _config(f"sqlite+aiosqlite:///{db.as_posix()}")
+    command.upgrade(cfg, "0010")
+    engine = _sqlite_engine(tmp_path, "u.db")
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO tenants (id, name, extractor, auto_ok, created_at)"
+                " VALUES ('t1', 'old', 'claude', 1, '2026-01-01')"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO documents (id, tenant_id, schema_slug, schema_version, status, files, mode, input_tokens,"
+                " output_tokens, pages, created_at)"
+                " VALUES ('d1', 't1', 'invoice', 1, 'ok', '[]', 'fast', 0, 0, 1, '2026-01-01')"
+            )
+        )
+    command.upgrade(cfg, "head")
+    with engine.connect() as conn:
+        plan, limit = conn.execute(text("SELECT plan, pages_limit FROM tenants")).one()
+        source = conn.scalar(text("SELECT source FROM documents"))
+    engine.dispose()
+    assert plan == "unlimited"
+    assert limit is None
+    assert source == "api"
+
+
+def test_downgrade_0011_drops_bot_exports(tmp_path):
+    db = tmp_path / "x.db"
+    cfg = _config(f"sqlite+aiosqlite:///{db.as_posix()}")
+    command.upgrade(cfg, "head")
+    engine = _sqlite_engine(tmp_path, "x.db")
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO tenants (id, name, extractor, auto_ok, created_at, plan)"
+                " VALUES ('t1', 'n', 'claude', 1, '2026-01-01', 'trial')"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO documents (id, tenant_id, schema_slug, schema_version, status, files, mode, input_tokens,"
+                " output_tokens, pages, created_at, source)"
+                " VALUES ('d1', 't1', 'invoice', 1, 'ok', '[]', 'fast', 0, 0, 1, '2026-01-01', 'api')"
+            )
+        )
+        conn.execute(
+            text(
+                "INSERT INTO exports (id, tenant_id, document_id, purpose, status, attempt, created_at, updated_at)"
+                " VALUES ('e1', 't1', 'd1', 'bot_ready', 'pending', 0, '2026-01-01', '2026-01-01')"
+            )
+        )
+    command.downgrade(cfg, "0010")
+    with engine.connect() as conn:
+        assert conn.scalar(text("SELECT count(*) FROM exports")) == 0
+    engine.dispose()

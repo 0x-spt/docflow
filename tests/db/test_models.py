@@ -7,9 +7,12 @@ from sqlalchemy.exc import IntegrityError
 
 from docflow.db.models import (
     ApiKey,
+    BotChat,
     Document,
+    Export,
     SchemaRecord,
     Tenant,
+    TenantBot,
     WebhookDelivery,
     WebhookEndpoint,
     generate_api_key,
@@ -185,3 +188,88 @@ def test_exports_tenant_created_index():
 
     idx = {i.name: [c.name for c in i.columns] for i in Export.__table__.indexes}
     assert idx.get("ix_exports_tenant_id_created_at") == ["tenant_id", "created_at"]
+
+
+async def test_new_tenant_defaults_to_trial(session):
+    t = await _tenant(session)
+    await session.refresh(t)
+    assert t.plan == "trial"
+    assert t.pages_limit == 50
+
+
+_TOKEN_ENC = "enc-token"
+
+
+async def _bot(session, tenant, token_hash="h1", **kw):
+    bot = TenantBot(
+        tenant_id=tenant.id,
+        token_enc=_TOKEN_ENC,
+        token_hash=token_hash,
+        username="acme_bot",
+        invite_code="inv" + token_hash,
+        **kw,
+    )
+    session.add(bot)
+    await session.commit()
+    return bot
+
+
+async def test_one_bot_per_tenant(session):
+    t = await _tenant(session)
+    await _bot(session, t)
+    session.add(TenantBot(tenant_id=t.id, token_enc="e", token_hash="h2", username="b", invite_code="i2"))
+    with pytest.raises(IntegrityError):
+        await session.commit()
+
+
+async def test_token_hash_unique(session):
+    a, b = await _tenant(session, "a"), await _tenant(session, "b")
+    await _bot(session, a)
+    session.add(TenantBot(tenant_id=b.id, token_enc="e", token_hash="h1", username="b", invite_code="i2"))
+    with pytest.raises(IntegrityError):
+        await session.commit()
+
+
+async def test_bot_chat_unique(session):
+    t = await _tenant(session)
+    bot = await _bot(session, t)
+    session.add(BotChat(bot_id=bot.id, chat_id=42, title="Бухгалтерия"))
+    await session.commit()
+    assert bot.update_offset == 0 and bot.active is True
+    session.add(BotChat(bot_id=bot.id, chat_id=42, title="Ещё раз"))
+    with pytest.raises(IntegrityError):
+        await session.commit()
+
+
+async def _export(session, doc, chat, purpose):
+    session.add(Export(tenant_id=doc.tenant_id, document_id=doc.id, bot_chat_id=chat.id, purpose=purpose))
+    await session.commit()
+
+
+async def _doc_and_chat(session):
+    t = await _tenant(session)
+    bot = await _bot(session, t)
+    chat = BotChat(bot_id=bot.id, chat_id=7, title="Чат")
+    doc = _doc(t)
+    session.add_all([chat, doc])
+    await session.commit()
+    return doc, chat
+
+
+async def test_export_unique_per_chat_purpose(session):
+    doc, chat = await _doc_and_chat(session)
+    await _export(session, doc, chat, "bot_ready")
+    await _export(session, doc, chat, "bot_reviewed")
+    session.add(Export(tenant_id=doc.tenant_id, document_id=doc.id, bot_chat_id=chat.id, purpose="bot_ready"))
+    with pytest.raises(IntegrityError):
+        await session.commit()
+
+
+async def test_unlink_keeps_export_history(session):
+    doc, chat = await _doc_and_chat(session)
+    await _export(session, doc, chat, "bot_ready")
+    await session.delete(chat)
+    await session.commit()
+    session.expire_all()
+    export = (await session.execute(select(Export))).scalar_one()
+    assert export.bot_chat_id is None

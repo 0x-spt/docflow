@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -22,6 +23,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+from docflow.plans import DEFAULT_PLAN
 
 # Явные имена ограничений: миграция и модели обязаны давать одинаковые имена
 NAMING_CONVENTION = {
@@ -91,6 +94,9 @@ class Tenant(Base):
     # Можно ли ставить ok без человека. Модель без подтверждённой эталонным прогоном точности
     # уверенно ошибается в фамилиях и названиях — тогда всё уходит в needs_review как черновик
     auto_ok: Mapped[bool] = mapped_column(Boolean, default=True)
+    # тариф и лимит страниц в месяц (None — без лимита); новые тенанты начинают с пробного
+    plan: Mapped[str] = mapped_column(String, default=DEFAULT_PLAN)
+    pages_limit: Mapped[int | None] = mapped_column(Integer, nullable=True, default=50)
     created_at: Mapped[datetime] = _created()
 
 
@@ -181,6 +187,7 @@ class Document(Base):
         CheckConstraint("status IN ('queued', 'processing', 'ok', 'needs_review', 'failed')", name="status"),
         UniqueConstraint("tenant_id", "idempotency_key", name="tenant_idempotency_key"),
         Index("ix_documents_tenant_id_created_at", "tenant_id", "created_at"),
+        CheckConstraint("source IN ('api', 'cabinet', 'telegram', 'email')", name="source"),
     )
 
     id: Mapped[uuid.UUID] = _id()
@@ -206,6 +213,9 @@ class Document(Base):
     reviewed_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     reviewed_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
     review_note: Mapped[str | None] = mapped_column(String, nullable=True)
+    # откуда пришёл документ и пометки канала (чат, сообщение, письмо)
+    source: Mapped[str] = mapped_column(String, default="api", server_default="api")
+    source_ref: Mapped[dict | None] = mapped_column(JsonType, nullable=True)
 
 
 class WebhookEndpoint(Base):
@@ -308,18 +318,94 @@ class FieldLabels(Base):
     updated_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_now, onupdate=_now)
 
 
+BOT_PURPOSES = ("bot_ready", "bot_reviewed")
+
+
+class TenantBot(Base):
+    """Свой Telegram-бот тенанта. Токен — Fernet, для поиска дублей хранится sha256."""
+
+    __tablename__ = "tenant_bots"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", name="tenant"),
+        UniqueConstraint("token_hash", name="token_hash"),
+    )
+
+    id: Mapped[uuid.UUID] = _id()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"))
+    token_enc: Mapped[str] = mapped_column(String)
+    token_hash: Mapped[str] = mapped_column(String)
+    username: Mapped[str] = mapped_column(String)
+    invite_code: Mapped[str] = mapped_column(String)
+    default_schema: Mapped[str | None] = mapped_column(String, nullable=True)
+    update_offset: Mapped[int] = mapped_column(BigInteger, default=0)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_error: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = _created()
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_now, onupdate=_now)
+
+
+class BotChat(Base):
+    """Чат, подключённый к боту по пригласительной ссылке."""
+
+    __tablename__ = "bot_chats"
+    __table_args__ = (UniqueConstraint("bot_id", "chat_id", name="bot_chat"),)
+
+    id: Mapped[uuid.UUID] = _id()
+    bot_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenant_bots.id", ondelete="CASCADE"))
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    title: Mapped[str] = mapped_column(String)
+    username: Mapped[str | None] = mapped_column(String, nullable=True)
+    # присылать ли в чат результаты всех документов тенанта, а не только присланных из этого чата
+    all_documents: Mapped[bool] = mapped_column(Boolean, default=True)
+    linked_at: Mapped[datetime] = _created()
+
+
+class Mailbox(Base):
+    """Почтовый ящик тенанта (IMAP). Пароль — Fernet."""
+
+    __tablename__ = "mailboxes"
+    __table_args__ = (UniqueConstraint("tenant_id", name="tenant"),)
+
+    id: Mapped[uuid.UUID] = _id()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"))
+    host: Mapped[str] = mapped_column(String)
+    port: Mapped[int] = mapped_column(Integer, default=993)
+    username: Mapped[str] = mapped_column(String)
+    password_enc: Mapped[str] = mapped_column(String)
+    folder: Mapped[str] = mapped_column(String, default="INBOX")
+    allowed_senders: Mapped[list] = mapped_column(JsonType, default=list)
+    default_schema: Mapped[str | None] = mapped_column(String, nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_error: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    created_at: Mapped[datetime] = _created()
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_now, onupdate=_now)
+
+
 class Export(Base):
     """Доставка документа получателю (выгрузка или уведомление). История переживает удаление получателя."""
 
     __tablename__ = "exports"
     __table_args__ = (
-        CheckConstraint("purpose IN ('export', 'notify_review', 'notify_new')", name="purpose"),
+        CheckConstraint(
+            "purpose IN ('export', 'notify_review', 'notify_new', 'bot_ready', 'bot_reviewed')", name="purpose"
+        ),
         # skipped — доставка больше не нужна (уведомление устарело): не ошибка, «Повторить» нет
         CheckConstraint("status IN ('pending', 'done', 'failed', 'skipped')", name="status"),
         UniqueConstraint("document_id", "destination_id", "purpose", name="document_destination_purpose"),
         Index("ix_exports_status_next_attempt_at", "status", "next_attempt_at"),
         # журнал тенанта «новые сверху»; покрывает и выборки по одному tenant_id
         Index("ix_exports_tenant_id_created_at", "tenant_id", "created_at"),
+        # одно сообщение бота на документ, чат и повод; у выгрузок bot_chat_id пуст
+        Index(
+            "uq_exports_document_chat_purpose",
+            "document_id",
+            "bot_chat_id",
+            "purpose",
+            unique=True,
+            postgresql_where=text("bot_chat_id IS NOT NULL"),
+            sqlite_where=text("bot_chat_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = _id()
@@ -327,6 +413,10 @@ class Export(Base):
     document_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"))
     destination_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("destinations.id", ondelete="SET NULL"), nullable=True
+    )
+    # чат бота, куда ушло сообщение; отвязка чата оставляет историю
+    bot_chat_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("bot_chats.id", ondelete="SET NULL"), nullable=True
     )
     purpose: Mapped[str] = mapped_column(String, default="export")
     status: Mapped[str] = mapped_column(String, default="pending")
