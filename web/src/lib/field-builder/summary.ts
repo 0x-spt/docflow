@@ -15,10 +15,34 @@ const FIELD_FORMS: [string, string, string] = ["поле", "поля", "поле
 
 const ruleKey = (r: RuleSpec, owner: string): string => `${owner}|${r.kind}|${JSON.stringify(r.params)}`;
 
-function ruleKeys(s: DocSchema): string[] {
+/** Правила документа и правила полей из `common`: у добавленных и удалённых полей правила уходят вместе с полем. */
+function ruleKeys(s: DocSchema, common: ReadonlySet<string>): string[] {
   const keys = (s.rules ?? []).map((r) => ruleKey(r, ""));
-  for (const f of s.fields) for (const r of f.rules ?? []) keys.push(ruleKey(r, f.name));
+  for (const f of s.fields) {
+    if (common.has(f.name)) for (const r of f.rules ?? []) keys.push(ruleKey(r, f.name));
+  }
   return keys;
+}
+
+/** Порядок общих имён в a и b различается. */
+function reordered(a: readonly string[], b: readonly string[]): boolean {
+  const inB = new Set(b);
+  const inA = new Set(a);
+  const x = a.filter((n) => inB.has(n));
+  const y = b.filter((n) => inA.has(n));
+  return x.some((n, i) => n !== y[i]);
+}
+
+/** JSON с отсортированными ключами; null и отсутствие ключа равны. */
+function canonical(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(canonical).join(",")}]`;
+  if (v && typeof v === "object") {
+    const entries = Object.entries(v as Record<string, unknown>)
+      .filter(([, x]) => x !== null && x !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return `{${entries.map(([k, x]) => `${JSON.stringify(k)}:${canonical(x)}`).join(",")}}`;
+  }
+  return JSON.stringify(v ?? null);
 }
 
 /** Мультимножественная разница: сколько ключей из a нет в b. */
@@ -38,12 +62,14 @@ function labelsDiffer(a: SchemaColumn | SchemaField, b: SchemaColumn | SchemaFie
   return (a.title ?? "") !== (b.title ?? "") || (a.description ?? "") !== (b.description ?? "");
 }
 
-/** Прочие настройки поля, кроме названий и правил: обязательность, варианты, колонки. */
+/** Прочие настройки поля, кроме названий и правил: обязательность, варианты, колонки (порядок колонок — отдельно). */
 function settings(f: SchemaField): string {
   return JSON.stringify({
     required: !!f.required,
     values: f.values ?? null,
-    columns: (f.columns ?? []).map((c) => [c.name, c.type, c.values ?? null]),
+    columns: (f.columns ?? [])
+      .map((c) => [c.name, c.type, c.values ?? null] as const)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
   });
 }
 
@@ -59,6 +85,7 @@ export function changeSummary(before: DocSchema | null, after: DocSchema): strin
   let retyped = 0;
   let labels = before.title !== after.title || before.description !== after.description;
   let other = false;
+  let columnsMoved = false;
   for (const f of after.fields) {
     const o = old.get(f.name);
     if (!o) {
@@ -68,6 +95,7 @@ export function changeSummary(before: DocSchema | null, after: DocSchema): strin
     if (o.type !== f.type) retyped++;
     else if (settings(o) !== settings(f)) other = true;
     if (labelsDiffer(o, f)) labels = true;
+    if (reordered((o.columns ?? []).map((c) => c.name), (f.columns ?? []).map((c) => c.name))) columnsMoved = true;
     const prevCols = new Map((o.columns ?? []).map((c) => [c.name, c]));
     for (const c of f.columns ?? []) {
       const prev = prevCols.get(c.name);
@@ -76,8 +104,9 @@ export function changeSummary(before: DocSchema | null, after: DocSchema): strin
   }
   for (const f of before.fields) if (!now.has(f.name)) removed++;
 
-  const rulesAdded = missing(ruleKeys(after), ruleKeys(before));
-  const rulesRemoved = missing(ruleKeys(before), ruleKeys(after));
+  const common = new Set(after.fields.filter((f) => old.has(f.name)).map((f) => f.name));
+  const rulesAdded = missing(ruleKeys(after, common), ruleKeys(before, common));
+  const rulesRemoved = missing(ruleKeys(before, common), ruleKeys(after, common));
 
   const parts: string[] = [];
   let nounUsed = false;
@@ -93,5 +122,9 @@ export function changeSummary(before: DocSchema | null, after: DocSchema): strin
   if (rulesRemoved) parts.push(`удалено правил: ${rulesRemoved}`);
   if (labels) parts.push("изменены названия и подсказки");
   if (other) parts.push("изменены настройки полей");
+  if (reordered(before.fields.map((f) => f.name), after.fields.map((f) => f.name))) parts.push("изменён порядок полей");
+  if (columnsMoved) parts.push("изменён порядок колонок");
+  // всё, что сводка не называет поимённо, — одной строкой: иначе «Сохранить» недоступна при настоящей правке
+  if (!parts.length && canonical(before) !== canonical(after)) parts.push("изменены другие настройки");
   return parts.length ? parts.join(", ") : "изменений нет";
 }

@@ -50,3 +50,31 @@ test("plural", () => {
   assert.equal(plural(21, forms), "поле");
   assert.equal(plural(12, forms), "полей");
 });
+
+test("changeSummary: порядок полей и колонок", () => {
+  const cols = (...names: string[]) => names.map((name) => ({ name, type: "string" as const }));
+  const before = schema([f("a"), f("b"), f("t", "table", { columns: cols("x", "y") })]);
+  assert.equal(changeSummary(before, schema([f("b"), f("a"), before.fields[2]])), "изменён порядок полей");
+  assert.equal(
+    changeSummary(before, schema([f("a"), f("b"), f("t", "table", { columns: cols("y", "x") })])),
+    "изменён порядок колонок",
+  );
+  // удаление поля само по себе не перестановка
+  assert.equal(changeSummary(before, schema([f("b"), before.fields[2]])), "удалено 1 поле");
+});
+
+test("changeSummary: правила добавленных и удалённых полей не считаются правилами", () => {
+  const inn = { kind: "inn", params: {} };
+  const before = schema([f("a"), f("b", "string", { rules: [inn] })]);
+  assert.equal(changeSummary(before, schema([f("a"), f("c", "string", { rules: [inn] })])), "добавлено 1 поле, удалено 1");
+  // у общего поля — по-прежнему считаются
+  assert.equal(changeSummary(before, schema([f("a", "string", { rules: [inn] }), before.fields[1]])), "добавлено правил: 1");
+});
+
+test("changeSummary: прочие отличия не дают «изменений нет»", () => {
+  const before = schema([f("a")]);
+  assert.equal(changeSummary(before, { ...before, slug: "doc_y" }), "изменены другие настройки");
+  assert.equal(changeSummary(before, schema([f("a", "string", { columns: [] })])), "изменены другие настройки");
+  // null и отсутствие ключа — одно и то же
+  assert.equal(changeSummary(before, schema([f("a", "string", { title: null, values: undefined })])), "изменений нет");
+});

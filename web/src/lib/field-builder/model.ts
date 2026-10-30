@@ -391,7 +391,7 @@ export function validateDoc(doc: EditorDoc, takenSlugs: readonly string[]): Reco
 export function titleResolver(doc: EditorDoc, labels: Record<string, string>): (key: string) => string {
   const d = withNames(doc);
   return (key: string): string => {
-    if (labels[key]) return labels[key];
+    if (Object.hasOwn(labels, key) && labels[key]) return labels[key];
     const dot = key.indexOf(".");
     const fname = dot >= 0 ? key.slice(0, dot) : key;
     const f = d.fields.find((x) => x.name === fname);

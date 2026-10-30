@@ -57,7 +57,11 @@ export function SchemaEditor({
 
   const schema = useMemo(() => toSchema(doc), [doc]);
   const summary = changeSummary(initial, schema);
-  const dirty = summary !== NO_CHANGES;
+  // новый тип: правка — всё, что отличается от заготовки (иначе предупреждение было бы сразу при открытии)
+  const pristine = useMemo(() => (initial ? null : toSchema(withNames(newDoc()))), [initial]);
+  const dirty = pristine
+    ? changeSummary(pristine, { ...schema, slug: pristine.slug }) !== NO_CHANGES
+    : summary !== NO_CHANGES;
   const titleOf = useMemo(() => titleResolver(doc, labels), [doc, labels]);
 
   useEffect(() => {
@@ -89,8 +93,8 @@ export function SchemaEditor({
     }
   }
 
-  const setField = (i: number, f: EditorField) =>
-    update((d) => ({ ...d, fields: d.fields.map((x, k) => (k === i ? f : x)) }));
+  const setField = (i: number, f: EditorField, shifts = false) =>
+    update((d) => ({ ...d, fields: d.fields.map((x, k) => (k === i ? f : x)) }), shifts);
 
   function addField() {
     const [next, f] = newField(doc);
@@ -136,7 +140,8 @@ export function SchemaEditor({
     });
   }
 
-  const companyLabel = (key: string): string | undefined => labels[key] || undefined;
+  const companyLabel = (key: string): string | undefined =>
+    Object.hasOwn(labels, key) ? labels[key] || undefined : undefined;
   const ruleErrors = Object.entries(errors)
     .filter(([k]) => k.startsWith("rules."))
     .map(([k, msg]) => {
@@ -223,7 +228,7 @@ export function SchemaEditor({
                   companyLabel={companyLabel}
                   dictionaries={dictionaries}
                   tableTaken={doc.fields.some((x, k) => k !== i && x.type === "table")}
-                  onChange={(next) => setField(i, next)}
+                  onChange={(next, shifts) => setField(i, next, shifts)}
                   onMove={(delta) => update((d) => ({ ...d, fields: move(d.fields, i, delta) }), true)}
                   onDelete={() => update((d) => removeField(d, i), true)}
                   onAddColumn={() => addColumn(i)}
@@ -249,10 +254,16 @@ export function SchemaEditor({
           Изменения: {summary}
         </p>
         <div className="flex flex-wrap items-center gap-4">
-          <Button onClick={save} disabled={pending || !dirty} aria-busy={pending}>
+          <Button onClick={save} disabled={pending || summary === NO_CHANGES} aria-busy={pending}>
             {pending ? "Сохраняем…" : "Сохранить"}
           </Button>
-          <Link href={cancelHref} className={`inline-flex min-h-11 items-center font-medium ${LINK}`}>
+          <Link
+            href={cancelHref}
+            className={`inline-flex min-h-11 items-center font-medium ${LINK}`}
+            onClick={(e) => {
+              if (dirty && !window.confirm("Уйти без сохранения? Правки пропадут.")) e.preventDefault();
+            }}
+          >
             Отмена
           </Link>
         </div>

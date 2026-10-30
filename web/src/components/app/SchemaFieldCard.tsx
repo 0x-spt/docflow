@@ -26,6 +26,13 @@ const SPECIAL: Record<string, string> = {
   issued: " Без него документ в очереди и выгрузках будет без даты.",
 };
 
+/** После сдвига кнопка на краю становится disabled и теряет фокус: фокус — на ту же или парную кнопку строки. */
+function refocus(uid: string, to: number, count: number, delta: -1 | 1) {
+  const atEdge = delta < 0 ? to === 0 : to === count - 1;
+  const which = atEdge ? (delta < 0 ? "down" : "up") : delta < 0 ? "up" : "down";
+  setTimeout(() => document.getElementById(`${uid}-${which}`)?.focus());
+}
+
 const shown = (row: { title: string; name: string }): string => row.title.trim() || row.name;
 
 function blockedText(what: "Поле" | "Колонка", phrases: string[]): string {
@@ -149,7 +156,8 @@ export function SchemaFieldCard({
   dictionaries: DictRef[];
   /** Таблица в типе уже есть (у другого поля) — «Таблица» недоступна. */
   tableTaken: boolean;
-  onChange: (f: EditorField) => void;
+  /** `shifts` — сдвинулись индексы колонок: ошибки по индексам больше не к месту. */
+  onChange: (f: EditorField, shifts?: boolean) => void;
   onMove: (delta: -1 | 1) => void;
   onDelete: () => void;
   onAddColumn: () => void;
@@ -164,6 +172,14 @@ export function SchemaFieldCard({
   const key = `fields.${index}`;
   const title = shown(field);
   const patch = (p: Partial<EditorField>) => onChange({ ...field, ...p });
+  function moveColumn(j: number, delta: -1 | 1) {
+    onChange({ ...field, columns: move(field.columns, j, delta) }, true);
+    refocus(field.columns[j].uid, j + delta, field.columns.length, delta);
+  }
+  function moveField(delta: -1 | 1) {
+    onMove(delta);
+    refocus(field.uid, index + delta, count, delta);
+  }
   const patchColumn = (j: number, p: Partial<EditorColumn>) =>
     patch({ columns: field.columns.map((c, k) => (k === j ? { ...c, ...p } : c)) });
 
@@ -173,7 +189,7 @@ export function SchemaFieldCard({
       return;
     }
     setBlocked(null);
-    if (window.confirm(`Удалить поле «${title}»?${SPECIAL[field.name] ?? ""}`)) onDelete();
+    if (window.confirm(`Удалить поле «${title}»?${Object.hasOwn(SPECIAL, field.name) ? SPECIAL[field.name] : ""}`)) onDelete();
   }
 
   function removeColumn(j: number) {
@@ -338,8 +354,9 @@ export function SchemaFieldCard({
                             type="button"
                             className={BTN}
                             disabled={j === 0}
+                            id={`${c.uid}-up`}
                             aria-label={`Поднять колонку «${colTitle}» выше`}
-                            onClick={() => patch({ columns: move(field.columns, j, -1) })}
+                            onClick={() => moveColumn(j, -1)}
                           >
                             ↑ Выше
                           </button>
@@ -347,8 +364,9 @@ export function SchemaFieldCard({
                             type="button"
                             className={BTN}
                             disabled={j === field.columns.length - 1}
+                            id={`${c.uid}-down`}
                             aria-label={`Опустить колонку «${colTitle}» ниже`}
-                            onClick={() => patch({ columns: move(field.columns, j, 1) })}
+                            onClick={() => moveColumn(j, 1)}
                           >
                             ↓ Ниже
                           </button>
@@ -382,8 +400,9 @@ export function SchemaFieldCard({
             type="button"
             className={BTN}
             disabled={index === 0}
+            id={`${field.uid}-up`}
             aria-label={`Поднять поле «${title}» выше`}
-            onClick={() => onMove(-1)}
+            onClick={() => moveField(-1)}
           >
             ↑ Выше
           </button>
@@ -391,8 +410,9 @@ export function SchemaFieldCard({
             type="button"
             className={BTN}
             disabled={index === count - 1}
+            id={`${field.uid}-down`}
             aria-label={`Опустить поле «${title}» ниже`}
-            onClick={() => onMove(1)}
+            onClick={() => moveField(1)}
           >
             ↓ Ниже
           </button>
